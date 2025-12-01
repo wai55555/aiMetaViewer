@@ -134,23 +134,55 @@ function addBadgeToImage(img, metadata) {
  * 画像監視を開始
  */
 function observeImages() {
-    // 既存の画像をチェック
-    document.querySelectorAll('img').forEach(checkImageMetadata);
+    // IntersectionObserverで可視範囲の画像のみ処理
+    const intersectionObserver = new IntersectionObserver((entries) => {
+        entries.forEach((entry) => {
+            if (entry.isIntersecting && entry.target.tagName === 'IMG') {
+                checkImageMetadata(entry.target);
+                // 一度処理したら監視解除
+                intersectionObserver.unobserve(entry.target);
+            }
+        });
+    }, {
+        rootMargin: '50px' // 画面外50pxまで先読み
+    });
 
-    // 新しい画像を監視
+    // 既存の画像を監視対象に追加
+    document.querySelectorAll('img').forEach((img) => {
+        intersectionObserver.observe(img);
+    });
+
+    // MutationObserverでデバウンス処理
+    let debounceTimer = null;
+    const pendingNodes = new Set();
+
+    const processPendingNodes = () => {
+        pendingNodes.forEach((node) => {
+            if (node.tagName === 'IMG') {
+                intersectionObserver.observe(node);
+            } else {
+                node.querySelectorAll?.('img').forEach((img) => {
+                    intersectionObserver.observe(img);
+                });
+            }
+        });
+        pendingNodes.clear();
+    };
+
     const observer = new MutationObserver((mutations) => {
         mutations.forEach((mutation) => {
             mutation.addedNodes.forEach((node) => {
                 if (node.nodeType === 1) { // ELEMENT_NODE
-                    if (node.tagName === 'IMG') {
-                        checkImageMetadata(node);
-                    } else {
-                        // 子要素の画像もチェック
-                        node.querySelectorAll?.('img').forEach(checkImageMetadata);
-                    }
+                    pendingNodes.add(node);
                 }
             });
         });
+
+        // デバウンス: 100ms以内の連続した変更をまとめて処理
+        if (debounceTimer) {
+            clearTimeout(debounceTimer);
+        }
+        debounceTimer = setTimeout(processPendingNodes, 100);
     });
 
     observer.observe(document.body, {
@@ -159,9 +191,91 @@ function observeImages() {
     });
 }
 
+/**
+ * 画像が直接表示されているかチェック
+ * @returns {boolean}
+ */
+function isDirectImageView() {
+    // Content-Typeが画像の場合、または<img>タグが1つだけでbodyの直下にある場合
+    const images = document.querySelectorAll('img');
+    if (images.length === 1 && images[0].parentElement === document.body) {
+        return true;
+    }
+    // bodyの子要素が<img>のみの場合
+    if (document.body.children.length === 1 && document.body.children[0].tagName === 'IMG') {
+        return true;
+    }
+    return false;
+}
+
+/**
+ * 直接表示された画像用のUIを作成
+ * @param {HTMLImageElement} img - 画像要素
+ * @param {Object} metadata - メタデータ
+ */
+function createDirectImageUI(img, metadata) {
+    // オーバーレイコンテナを作成
+    const overlay = document.createElement('div');
+    overlay.style.cssText = `
+        position: fixed;
+        top: 10px;
+        left: 10px;
+        z-index: 10000;
+    `;
+
+    const badge = createBadge();
+    badge.style.position = 'relative';
+    badge.style.top = 'auto';
+    badge.style.left = 'auto';
+
+    badge.addEventListener('click', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        const modal = createModal(metadata);
+        document.body.appendChild(modal);
+    });
+
+    overlay.appendChild(badge);
+    document.body.appendChild(overlay);
+}
+
+/**
+ * 直接表示された画像を処理
+ */
+async function handleDirectImageView() {
+    const img = document.querySelector('img');
+    if (!img) return;
+
+    const src = img.src || window.location.href;
+
+    try {
+        // Background Service Workerにメタデータ取得をリクエスト
+        const response = await chrome.runtime.sendMessage({
+            action: 'fetchImageMetadata',
+            imageUrl: src
+        });
+
+        if (response.success && response.metadata && Object.keys(response.metadata).length > 0) {
+            createDirectImageUI(img, response.metadata);
+        }
+    } catch (e) {
+        console.error('Failed to check metadata for direct image:', e);
+    }
+}
+
 // 初期化
 if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', observeImages);
+    document.addEventListener('DOMContentLoaded', () => {
+        if (isDirectImageView()) {
+            handleDirectImageView();
+        } else {
+            observeImages();
+        }
+    });
 } else {
-    observeImages();
+    if (isDirectImageView()) {
+        handleDirectImageView();
+    } else {
+        observeImages();
+    }
 }
