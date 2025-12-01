@@ -1,5 +1,5 @@
 # AI Meta Viewer (Chrome Extension)
-[](https://raw.githubusercontent.com/wai55555/aiMetaViewer/refs/heads/main/sample/sample_civitai.jpg)
+![](https://raw.githubusercontent.com/wai55555/aiMetaViewer/refs/heads/main/sample/sample_civitai.jpg)
 AI生成画像のメタデータ（プロンプト、設定情報など）をブラウザ上で簡単に閲覧できるChrome拡張機能です。
 Webページ上の画像を自動的に解析し、メタデータが含まれている場合に表示します。
 
