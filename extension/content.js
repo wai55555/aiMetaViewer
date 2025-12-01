@@ -19,19 +19,28 @@ async function checkImageMetadata(img) {
     const src = img.src;
     if (!src) return;
 
+    // Pixiv対応: 親リンクからオリジナル画像のURLを取得
+    let targetUrl = src;
+    if (window.location.hostname.includes('pixiv.net')) {
+        const parentLink = img.closest('a');
+        if (parentLink && parentLink.href && parentLink.href.includes('img-original')) {
+            targetUrl = parentLink.href;
+        }
+    }
+
     processedImages.add(img);
 
     try {
         let metadata = null;
 
         // キャッシュチェック
-        if (metadataCache.has(src)) {
-            metadata = metadataCache.get(src);
+        if (metadataCache.has(targetUrl)) {
+            metadata = metadataCache.get(targetUrl);
         } else {
             // Background Service Workerにメタデータ取得をリクエスト
             const response = await chrome.runtime.sendMessage({
                 action: 'fetchImageMetadata',
-                imageUrl: src
+                imageUrl: targetUrl
             });
 
             if (response.success && response.metadata) {
@@ -39,7 +48,7 @@ async function checkImageMetadata(img) {
 
                 // 空でない場合のみキャッシュ
                 if (Object.keys(metadata).length > 0) {
-                    metadataCache.set(src, metadata);
+                    metadataCache.set(targetUrl, metadata);
                 }
             } else {
                 // エラーまたはメタデータなし
@@ -54,7 +63,7 @@ async function checkImageMetadata(img) {
 
     } catch (e) {
         // エラーは静かに無視 (CORS、ネットワークエラーなど)
-        // console.debug('Failed to check metadata for:', src, e);
+        // console.debug('Failed to check metadata for:', targetUrl, e);
     }
 }
 
