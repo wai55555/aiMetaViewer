@@ -5,11 +5,21 @@
     "description": "View AI-generated image metadata (prompts, settings) directly in your browser",
     "permissions": [
         "activeTab",
-        "storage"
+        "storage",
+        "declarativeNetRequest"
     ],
     "host_permissions": [
         "<all_urls>"
     ],
+    "declarative_net_request": {
+        "rule_resources": [
+            {
+                "id": "ruleset_1",
+                "enabled": true,
+                "path": "rules.json"
+            }
+        ]
+    },
     "background": {
         "service_worker": "background.js"
     },
@@ -25,7 +35,9 @@
             "css": [
                 "styles.css"
             ],
-            "run_at": "document_idle"
+            "run_at": "document_start",
+            "all_frames": true,
+            "match_about_blank": true
         }
     ],
     "icons": {
