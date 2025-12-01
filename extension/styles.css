@@ -1,0 +1,227 @@
+/* styles.css - 拡張機能のスタイル定義 */
+
+/* バッジスタイル */
+.ai-meta-badge {
+  position: absolute;
+  top: 0;
+  left: 0;
+  background-color: rgba(0, 0, 0, 0.7);
+  color: white;
+  font-size: 10px;
+  padding: 4px 8px;
+  border-radius: 4px;
+  z-index: 9999;
+  cursor: pointer;
+  font-family: sans-serif;
+  transition: background-color 0.2s;
+  pointer-events: auto;
+  /* クリック可能に */
+  user-select: none;
+  line-height: 1.2;
+}
+
+.ai-meta-badge:hover {
+  background-color: rgba(0, 0, 0, 0.9);
+}
+
+/* モーダルオーバーレイ */
+.ai-meta-modal-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  background-color: rgba(0, 0, 0, 0.5);
+  z-index: 10000;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  backdrop-filter: blur(2px);
+}
+
+/* モーダル本体 */
+.ai-meta-modal {
+  background-color: #1e1e1e;
+  color: #e0e0e0;
+  width: 600px;
+  max-width: 90vw;
+  max-height: 80vh;
+  border-radius: 8px;
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.5);
+  display: flex;
+  flex-direction: column;
+  font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+  border: 1px solid #333;
+}
+
+/* ヘッダー */
+.ai-meta-modal-header {
+  padding: 16px;
+  border-bottom: 1px solid #333;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  cursor: pointer;
+  /* ヘッダークリックで閉じるため */
+}
+
+.ai-meta-modal-header h2 {
+  margin: 0;
+  font-size: 18px;
+  font-weight: 600;
+}
+
+.ai-meta-close-btn {
+  background: none;
+  border: none;
+  color: #aaa;
+  font-size: 24px;
+  cursor: pointer;
+  padding: 0 8px;
+  line-height: 1;
+}
+
+.ai-meta-close-btn:hover {
+  color: white;
+}
+
+/* コンテンツエリア */
+.ai-meta-modal-content {
+  flex: 1;
+  overflow-y: auto;
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+/* セクション */
+.ai-meta-section {
+  background-color: #252526;
+  border-radius: 6px;
+  border: 1px solid #333;
+  /* overflow: hidden; 削除: ツールチップ表示のため */
+  display: flex;
+  flex-direction: column;
+}
+
+.ai-meta-section-header {
+  padding: 8px 12px;
+  background-color: #2d2d2d;
+  border-bottom: 1px solid #333;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  border-top-left-radius: 5px;
+  border-top-right-radius: 5px;
+}
+
+.ai-meta-section-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: #aaa;
+  text-transform: uppercase;
+}
+
+/* コピーボタン */
+.ai-meta-copy-btn,
+.ai-meta-copy-all-btn {
+  background-color: #3e3e42;
+  border: 1px solid #555;
+  color: #e0e0e0;
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: all 0.2s;
+  position: relative;
+}
+
+.ai-meta-copy-btn:hover,
+.ai-meta-copy-all-btn:hover {
+  background-color: #505055;
+  border-color: #666;
+}
+
+.ai-meta-copy-btn.copied,
+.ai-meta-copy-all-btn.copied {
+  background-color: #2ea043;
+  border-color: #2ea043;
+  color: white;
+}
+
+/* ツールチップ */
+[data-tooltip]:hover::after {
+  content: attr(data-tooltip);
+  position: absolute;
+  bottom: 100%;
+  left: 50%;
+  transform: translateX(-50%);
+  background-color: #000;
+  color: #fff;
+  padding: 4px 8px;
+  border-radius: 4px;
+  font-size: 10px;
+  white-space: nowrap;
+  margin-bottom: 5px;
+  pointer-events: none;
+  opacity: 0.9;
+  z-index: 10001;
+  box-shadow: 0 2px 5px rgba(0, 0, 0, 0.5);
+}
+
+/* テキストエリア */
+.ai-meta-text-area {
+  padding: 12px;
+  font-family: 'Consolas', 'Monaco', monospace;
+  font-size: 13px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-all;
+  color: #d4d4d4;
+  max-height: 200px;
+  overflow-y: auto;
+}
+
+.ai-meta-text-area.empty {
+  color: #666;
+  font-style: italic;
+}
+
+/* フッター */
+.ai-meta-modal-footer {
+  padding: 12px 16px;
+  border-top: 1px solid #333;
+  display: flex;
+  justify-content: flex-end;
+  background-color: #252526;
+}
+
+.ai-meta-copy-all-btn {
+  font-size: 12px;
+  padding: 6px 12px;
+  font-weight: 600;
+}
+
+/* スクロールバーのカスタマイズ */
+.ai-meta-modal-content::-webkit-scrollbar,
+.ai-meta-text-area::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+.ai-meta-modal-content::-webkit-scrollbar-track,
+.ai-meta-text-area::-webkit-scrollbar-track {
+  background: #1e1e1e;
+}
+
+.ai-meta-modal-content::-webkit-scrollbar-thumb,
+.ai-meta-text-area::-webkit-scrollbar-thumb {
+  background: #424242;
+  border-radius: 4px;
+}
+
+.ai-meta-modal-content::-webkit-scrollbar-thumb:hover,
+.ai-meta-text-area::-webkit-scrollbar-thumb:hover {
+  background: #4f4f4f;
+}
