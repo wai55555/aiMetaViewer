@@ -46,7 +46,7 @@ Webページ上の画像を自動的に解析し、メタデータが含まれ�
 - **Manifest V3** 準拠
 - **Background Service Worker**: 画像のFetchとバイナリ解析を担当（CORS回避のため）
 - **Content Script**: DOM監視とUI描画を担当
-- **Parser**: Rust実装と同等のロジックでJavaScriptに移植されたバイナリパーサー（エンディアン判定、文字コード判定対応）
+- **Parser**: [Rust実装と同等のロジック](https://github.com/wai55555/checkImageMetadata)でJavaScriptに移植されたバイナリパーサー（エンディアン判定、文字コード判定対応）
 
 ## 📂 ディレクトリ構成
 
