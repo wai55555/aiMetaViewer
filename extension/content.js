@@ -51,11 +51,53 @@ async function checkImageMetadata(img) {
 
     if (parentLink && parentLink.href) {
         const href = parentLink.href;
-        // リンク先が画像ファイル、またはPixivのオリジナル画像URLパターンの場合
-        if (/\.(png|jpg|jpeg|webp|avif)$/i.test(href) ||
-            (window.location.hostname.includes('pixiv.net') && href.includes('img-original'))) {
+        // クエリパラメータを除去して拡張子チェック
+        const cleanHref = href.split('?')[0];
+
+        // リンク先が画像ファイル、またはPixiv/Discordのオリジナル画像URLパターンの場合
+        if (/\.(png|jpg|jpeg|webp|avif)$/i.test(cleanHref) ||
+            (window.location.hostname.includes('pixiv.net') && href.includes('img-original')) ||
+            (href.includes('cdn.discordapp.com') && parentLink.className.includes('originalLink'))) {
             targetUrl = href;
             isLinkedImage = true;
+        }
+    }
+
+    // Discord対応: imgタグがaタグの中になく、兄弟要素や親の配下にある場合
+    if (!isLinkedImage && window.location.hostname.includes('discord.com')) {
+        // Discordの構造: 
+        // <div class="imageWrapper ...">
+        //   <a class="originalLink_..." href="..."></a>
+        //   <div class="clickableWrapper_...">
+        //     <div class="loadingOverlay_...">
+        //       <img class="lazyImg_..." ...>
+        //     </div>
+        //   </div>
+        // </div>
+
+        // 1. imageWrapperクラスを持つ親を探す
+        let container = img.closest('[class*="imageWrapper"]');
+
+        // 2. 見つからない場合、親を数階層遡って探す (念のため)
+        if (!container) {
+            let parent = img.parentElement;
+            for (let i = 0; i < 4; i++) { // 4階層まで
+                if (!parent) break;
+                // originalLinkを持つaタグが直下にあるか確認
+                if (parent.querySelector('a[class*="originalLink"]')) {
+                    container = parent;
+                    break;
+                }
+                parent = parent.parentElement;
+            }
+        }
+
+        if (container) {
+            const discordLink = container.querySelector('a[class*="originalLink"]');
+            if (discordLink && discordLink.href && discordLink.href.includes('cdn.discordapp.com')) {
+                targetUrl = discordLink.href;
+                isLinkedImage = true;
+            }
         }
     }
 
