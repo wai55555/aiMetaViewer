@@ -15,24 +15,40 @@ const metadataCache = new Map();
  * @param {HTMLImageElement} img - 対象画像要素
  */
 async function checkImageMetadata(img) {
-    // 既に処理済み、または小さすぎる画像はスキップ
-    if (processedImages.has(img) || img.width < 100 || img.height < 100) {
-        return;
-    }
+    // 重複チェック
+    if (processedImages.has(img)) return;
 
     const src = img.src;
     if (!src) return;
 
     // 親リンクからオリジナル画像のURLを取得する汎用ロジック
     let targetUrl = src;
+    let isLinkedImage = false;
     const parentLink = img.closest('a');
+
     if (parentLink && parentLink.href) {
         const href = parentLink.href;
         // リンク先が画像ファイル、またはPixivのオリジナル画像URLパターンの場合
         if (/\.(png|jpg|jpeg|webp|avif)$/i.test(href) ||
             (window.location.hostname.includes('pixiv.net') && href.includes('img-original'))) {
             targetUrl = href;
+            isLinkedImage = true;
         }
+    }
+
+    // サイズチェック
+    const actualWidth = img.naturalWidth || img.width;
+    const actualHeight = img.naturalHeight || img.height;
+    const pixelCount = actualWidth * actualHeight;
+
+    // リンク画像でない場合（直接表示など）は、厳密なサイズチェック（250000画素 = 512x512相当）を行う
+    if (!isLinkedImage && pixelCount < 250000) {
+        return;
+    }
+
+    // リンク画像の場合でも、極端に小さいアイコン等は除外（例: 100x100未満）
+    if (isLinkedImage && (actualWidth < 100 || actualHeight < 100)) {
+        return;
     }
 
     // 処理済みフラグを立てる（重複チェック防止）
@@ -45,11 +61,23 @@ async function checkImageMetadata(img) {
         if (metadataCache.has(targetUrl)) {
             metadata = metadataCache.get(targetUrl);
         } else {
-            // Background Service Workerにメタデータ取得をリクエスト
-            const response = await chrome.runtime.sendMessage({
+            // メッセージペイロードの準備
+            const message = {
                 action: 'fetchImageMetadata',
                 imageUrl: targetUrl
-            });
+            };
+
+            // ローカルファイル (file://) の場合、content.js側でデータを取得して送信
+            if (targetUrl.startsWith('file://')) {
+                // img要素を渡す
+                const base64Data = await fetchLocalImage(img);
+                if (base64Data) {
+                    message.imageData = base64Data;
+                }
+            }
+
+            // Background Service Workerにメタデータ取得をリクエスト
+            const response = await chrome.runtime.sendMessage(message);
 
             if (response.success && response.metadata) {
                 metadata = response.metadata;
@@ -323,6 +351,40 @@ function createDirectImageUI(img, metadata) {
 }
 
 /**
+ * ローカル画像 (file://) をCanvas経由でBase64変換
+ * @param {HTMLImageElement} img - 画像要素
+ * @returns {Promise<string|null>} - Base64データ、失敗時はnull
+ */
+async function fetchLocalImage(img) {
+    if (!img.src.startsWith('file://')) return null;
+
+    try {
+        // 画像が読み込まれていない場合はロードを待つ
+        if (!img.complete) {
+            await new Promise((resolve, reject) => {
+                img.onload = resolve;
+                img.onerror = reject;
+            });
+        }
+
+        const canvas = document.createElement('canvas');
+        canvas.width = img.naturalWidth || img.width;
+        canvas.height = img.naturalHeight || img.height;
+
+        const ctx = canvas.getContext('2d');
+        ctx.drawImage(img, 0, 0);
+
+        // CanvasからBase64データを取得
+        // file:// プロトコルでは Tainted Canvas になる可能性があるが、
+        // 拡張機能の権限設定によっては許可される場合がある
+        return canvas.toDataURL('image/png');
+    } catch (e) {
+        console.error('[AI Meta Viewer] Failed to get image data via Canvas:', e);
+        return null;
+    }
+}
+
+/**
  * 直接表示された画像を処理
  */
 async function handleDirectImageView() {
@@ -332,11 +394,22 @@ async function handleDirectImageView() {
     const src = img.src || window.location.href;
 
     try {
-        // Background Service Workerにメタデータ取得をリクエスト
-        const response = await chrome.runtime.sendMessage({
+        const message = {
             action: 'fetchImageMetadata',
             imageUrl: src
-        });
+        };
+
+        // ローカルファイル対応
+        if (src.startsWith('file://')) {
+            // img要素を渡す
+            const base64Data = await fetchLocalImage(img);
+            if (base64Data) {
+                message.imageData = base64Data;
+            }
+        }
+
+        // Background Service Workerにメタデータ取得をリクエスト
+        const response = await chrome.runtime.sendMessage(message);
 
         if (response.success && response.metadata && Object.keys(response.metadata).length > 0) {
             createDirectImageUI(img, response.metadata);

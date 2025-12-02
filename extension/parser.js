@@ -422,3 +422,120 @@ function extractMetadata(buffer) {
       return {};
   }
 }
+
+/**
+ * PNG IHDR チャンクから ColorType を確認
+ * @param {ArrayBuffer} buffer - PNG画像バイナリデータ
+ * @returns {boolean} - αチャンネルあり（ColorType 4 or 6）の場合 true
+ */
+function checkPngIHDRHasAlpha(buffer) {
+  const view = new Uint8Array(buffer);
+
+  // PNGシグネチャ確認 (8バイト)
+  if (buffer.byteLength < 33) return false; // IHDR最小サイズ
+
+  // IHDRチャンクは通常、シグネチャ直後（オフセット8）
+  const offset = 8;
+
+  // チャンク長 (4バイト, Big Endian) - IHDRは常に13バイト
+  const length = (view[offset] << 24) | (view[offset + 1] << 16) |
+    (view[offset + 2] << 8) | view[offset + 3];
+
+  if (length !== 13) return false;
+
+  // チャンク型 (4バイト) - "IHDR"
+  const type = String.fromCharCode(view[offset + 4], view[offset + 5],
+    view[offset + 6], view[offset + 7]);
+
+  if (type !== 'IHDR') return false;
+
+  // ColorType (オフセット8+4+4+4+1+1+1 = 17からデータ開始 + 9バイト目)
+  const colorType = view[offset + 4 + 4 + 9];
+
+  // ColorType 4: Grayscale + Alpha, 6: RGB + Alpha
+  return colorType === 4 || colorType === 6;
+}
+
+/**
+ * ビットストリームから Stealth PNG Info をデコード
+ * @param {string} bitStream - ビットストリーム ('0' と '1' の文字列)
+ * @param {string} mode - 'Alpha' または 'RGB'
+ * @returns {Object|null} - { data: string, mode: string, compressed: boolean }
+ */
+function processStealthStream(bitStream, mode) {
+  const signatures = {
+    'stealth_pnginfo': { mode: 'Alpha', compressed: false },
+    'stealth_pngcomp': { mode: 'Alpha', compressed: true },
+    'stealth_rgbinfo': { mode: 'RGB', compressed: false },
+    'stealth_rgbcomp': { mode: 'RGB', compressed: true },
+  };
+
+  const sigLen = 'stealth_pnginfo'.length * 8; // 128 bits
+
+  // 最小ビットストリーム長チェック (シグネチャ + 長さフィールド32bit)
+  if (bitStream.length < sigLen + 32) return null;
+
+  // シグネチャ抽出
+  const sigBinary = bitStream.substring(0, sigLen);
+  const sigText = binaryToText(sigBinary);
+
+  // シグネチャ確認
+  if (!(sigText in signatures) || signatures[sigText].mode !== mode) {
+    return null;
+  }
+
+  const compressed = signatures[sigText].compressed;
+
+  // データ長を読み取り (32ビット)
+  let currentStream = bitStream.substring(sigLen);
+  const lenBinary = currentStream.substring(0, 32);
+  const paramLen = parseInt(lenBinary, 2);
+  currentStream = currentStream.substring(32);
+
+  // データビット不足チェック
+  if (currentStream.length < paramLen) return null;
+
+  // バイナリデータ抽出
+  const binaryData = currentStream.substring(0, paramLen);
+  const byteArray = new Uint8Array(binaryData.length / 8);
+
+  for (let i = 0; i < byteArray.length; i++) {
+    byteArray[i] = parseInt(binaryData.substring(i * 8, (i + 1) * 8), 2);
+  }
+
+  try {
+    let decodedData;
+
+    if (compressed) {
+      // pako で解凍
+      if (typeof pako === 'undefined') {
+        return { data: '[pako not loaded]', mode: mode, compressed: true };
+      }
+      decodedData = pako.inflate(byteArray, { to: 'string' });
+    } else {
+      // UTF-8 デコード
+      decodedData = new TextDecoder('utf-8', { fatal: true }).decode(byteArray);
+    }
+
+    return { data: decodedData, mode: mode, compressed: compressed };
+  } catch (e) {
+    return { data: '[decoding error]', mode: mode, compressed: compressed };
+  }
+}
+
+/**
+ * バイナリ文字列をテキストに変換
+ * @param {string} binaryStr - '0' と '1' の文字列
+ * @returns {string} - デコードされたテキスト
+ */
+function binaryToText(binaryStr) {
+  try {
+    const bytes = new Uint8Array(binaryStr.length / 8);
+    for (let i = 0; i < bytes.length; i++) {
+      bytes[i] = parseInt(binaryStr.substr(i * 8, 8), 2);
+    }
+    return new TextDecoder('utf-8', { fatal: false }).decode(bytes);
+  } catch {
+    return '';
+  }
+}
