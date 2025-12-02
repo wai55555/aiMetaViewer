@@ -1,7 +1,30 @@
 // content.js - コンテンツスクリプト
 
-// エラー通知設定（デフォルト無効）
-const ENABLE_ERROR_NOTIFICATION = false;
+// デフォルト設定
+const DEFAULT_SETTINGS = {
+    debugMode: false,
+    errorNotification: false,
+    minPixelCount: 250000
+};
+
+// 現在の設定（起動時に読み込み）
+let settings = { ...DEFAULT_SETTINGS };
+
+// 設定を読み込む
+async function loadSettings() {
+    const stored = await chrome.storage.sync.get(DEFAULT_SETTINGS);
+    settings = stored;
+}
+
+// 初期化時に設定を読み込む
+loadSettings();
+
+// 設定更新メッセージを受信
+chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
+    if (request.action === 'settingsUpdated') {
+        settings = request.settings;
+    }
+});
 
 // 処理済み画像とバッジの対応マップ (メモリリーク防止)
 // HTMLImageElement -> HTMLElement (Badge)
@@ -41,8 +64,8 @@ async function checkImageMetadata(img) {
     const actualHeight = img.naturalHeight || img.height;
     const pixelCount = actualWidth * actualHeight;
 
-    // リンク画像でない場合（直接表示など）は、厳密なサイズチェック（250000画素 = 512x512相当）を行う
-    if (!isLinkedImage && pixelCount < 250000) {
+    // リンク画像でない場合（直接表示など）は、設定された最小画素数でチェック
+    if (!isLinkedImage && pixelCount < settings.minPixelCount) {
         return;
     }
 
@@ -105,7 +128,7 @@ async function checkImageMetadata(img) {
         // エラー処理
         processedImages.delete(img);
 
-        if (ENABLE_ERROR_NOTIFICATION) {
+        if (settings.errorNotification) {
             showErrorNotification(`Failed to load metadata: ${e.message}`);
         }
     }
@@ -416,7 +439,7 @@ async function handleDirectImageView() {
         }
     } catch (e) {
         console.error('Failed to check metadata for direct image:', e);
-        if (ENABLE_ERROR_NOTIFICATION) {
+        if (settings.errorNotification) {
             showErrorNotification(`Failed to load metadata: ${e.message}`);
         }
     }

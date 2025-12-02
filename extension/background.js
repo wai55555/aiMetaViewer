@@ -3,6 +3,33 @@
 // メタデータキャッシュ (URLごと)
 const metadataCache = new Map();
 
+// デフォルト設定
+const DEFAULT_SETTINGS = {
+    debugMode: false,
+    errorNotification: false,
+    minPixelCount: 250000
+};
+
+// 現在の設定（起動時に読み込み）
+let settings = { ...DEFAULT_SETTINGS };
+
+// デバッグログ出力関数
+function debugLog(...args) {
+    if (settings.debugMode) {
+        console.log(...args);
+    }
+}
+
+// 設定を読み込む
+async function loadSettings() {
+    const stored = await chrome.storage.sync.get(DEFAULT_SETTINGS);
+    settings = stored;
+    debugLog('[AI Meta Viewer] Settings loaded:', settings);
+}
+
+// 初期化時に設定を読み込む
+loadSettings();
+
 /**
  * Content Scriptからのメッセージを処理
  */
@@ -18,6 +45,22 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         // 非同期レスポンスを返すため true を返す
         return true;
     }
+
+    if (request.action === 'settingsUpdated') {
+        // 設定が更新された
+        settings = request.settings;
+        debugLog('[AI Meta Viewer] Settings updated:', settings);
+        sendResponse({ success: true });
+        return true;
+    }
+
+    if (request.action === 'clearCache') {
+        // キャッシュをクリア
+        metadataCache.clear();
+        debugLog('[AI Meta Viewer] Cache cleared');
+        sendResponse({ success: true });
+        return true;
+    }
 });
 
 /**
@@ -27,12 +70,12 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
  * @returns {Promise<Object>} - { success: boolean, metadata?: Object, error?: string }
  */
 async function handleFetchImageMetadata(imageUrl, base64Data = null) {
-    console.log('[AI Meta Viewer] Fetching metadata for:', imageUrl);
+    debugLog('[AI Meta Viewer] Fetching metadata for:', imageUrl);
 
     // キャッシュチェック
     if (metadataCache.has(imageUrl)) {
         const cachedMetadata = metadataCache.get(imageUrl);
-        console.log('[AI Meta Viewer] Cache hit:', imageUrl);
+        debugLog('[AI Meta Viewer] Cache hit:', imageUrl);
         return { success: true, metadata: cachedMetadata, cached: true };
     }
 
@@ -41,7 +84,7 @@ async function handleFetchImageMetadata(imageUrl, base64Data = null) {
 
         if (base64Data) {
             // Base64データが提供されている場合（ローカルファイルなど）
-            console.log('[AI Meta Viewer] Using provided Base64 data');
+            debugLog('[AI Meta Viewer] Using provided Base64 data');
             const response = await fetch(base64Data);
             buffer = await response.arrayBuffer();
         } else {
@@ -56,7 +99,7 @@ async function handleFetchImageMetadata(imageUrl, base64Data = null) {
             buffer = await response.arrayBuffer();
         }
 
-        console.log('[AI Meta Viewer] Image loaded, size:', buffer.byteLength, 'bytes');
+        debugLog('[AI Meta Viewer] Image loaded, size:', buffer.byteLength, 'bytes');
 
         // 10MB制限
         if (buffer.byteLength > 10 * 1024 * 1024) {
@@ -70,33 +113,33 @@ async function handleFetchImageMetadata(imageUrl, base64Data = null) {
         }
 
         let metadata = extractMetadata(buffer);
-        console.log('[AI Meta Viewer] Extracted metadata:', metadata);
-        console.log('[AI Meta Viewer] Metadata keys:', Object.keys(metadata).length);
+        debugLog('[AI Meta Viewer] Extracted metadata:', metadata);
+        debugLog('[AI Meta Viewer] Metadata keys:', Object.keys(metadata).length);
 
         // 段階3 & 4: PNG判定 & αチャンネル解析
         const format = detectImageFormat(buffer);
-        console.log('[AI Meta Viewer] Detected format:', format);
+        debugLog('[AI Meta Viewer] Detected format:', format);
 
         if (format === 'png') {
             const hasAlpha = checkPngIHDRHasAlpha(buffer);
-            console.log('[AI Meta Viewer] Has Alpha:', hasAlpha);
+            debugLog('[AI Meta Viewer] Has Alpha:', hasAlpha);
 
             // 既存メタデータがない、またはαチャンネル解析を強制する場合（デバッグ用）
             // 現状は「既存メタデータがない場合のみ」
             if (Object.keys(metadata).length === 0) {
                 if (hasAlpha) {
-                    console.log('[AI Meta Viewer] Starting Stealth PNG Info extraction...');
+                    debugLog('[AI Meta Viewer] Starting Stealth PNG Info extraction...');
                     const stealthData = await extractStealthPNGInfoAsync(imageUrl, buffer);
-                    console.log('[AI Meta Viewer] Stealth Data result:', stealthData);
+                    debugLog('[AI Meta Viewer] Stealth Data result:', stealthData);
 
                     if (stealthData) {
                         Object.assign(metadata, stealthData);
                     }
                 } else {
-                    console.log('[AI Meta Viewer] Skipping Stealth Info: No Alpha channel');
+                    debugLog('[AI Meta Viewer] Skipping Stealth Info: No Alpha channel');
                 }
             } else {
-                console.log('[AI Meta Viewer] Skipping Stealth Info: Metadata already exists');
+                debugLog('[AI Meta Viewer] Skipping Stealth Info: Metadata already exists');
             }
         }
 
