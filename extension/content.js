@@ -657,76 +657,63 @@ function handleDirectImageView() {
 }
 
 /**
- * ローカル画像 (file://) をXMLHttpRequestで読み取りBase64化する（リトライ機能付き）
+ * ローカル画像 (file://) をXMLHttpRequestで読み取りBase64化する
+ * リトライは行わず、失敗時は即座にnullを返す（権限エラー等のため）
  * @param {HTMLImageElement} img 
- * @param {number} retryCount - リトライ回数（デフォルト: 5）
- * @param {number} retryDelay - リトライ間隔（ミリ秒、デフォルト: 500）
  * @returns {Promise<string|null>} Base64 data URL
  */
-async function fetchLocalImage(img, retryCount = 5, retryDelay = 500) {
-    for (let attempt = 0; attempt < retryCount; attempt++) {
+async function fetchLocalImage(img) {
+    // 1. 画像のロード完了を待機 (念のため)
+    // タイムアウトを2秒に設定
+    if (!img.complete) {
         try {
-            // 画像が完全にロードされるまで待機
-            if (!img.complete) {
-                await new Promise((resolve, reject) => {
-                    const timeout = setTimeout(() => reject(new Error('Image load timeout')), 5000);
-                    img.onload = () => {
-                        clearTimeout(timeout);
-                        resolve();
-                    };
-                    img.onerror = () => {
-                        clearTimeout(timeout);
-                        reject(new Error('Image load error'));
-                    };
-                });
-            }
-
-            // XMLHttpRequestで取得を試行
-            const result = await new Promise((resolve, reject) => {
-                const xhr = new XMLHttpRequest();
-                xhr.open('GET', img.src, true);
-                xhr.responseType = 'arraybuffer';
-
-                xhr.onload = function () {
-                    if (xhr.status === 200 || xhr.status === 0) { // 0 for local files
-                        try {
-                            const arrayBuffer = xhr.response;
-                            const blob = new Blob([arrayBuffer]);
-                            const reader = new FileReader();
-
-                            reader.onloadend = () => resolve(reader.result);
-                            reader.onerror = () => reject(new Error('FileReader error'));
-                            reader.readAsDataURL(blob);
-                        } catch (e) {
-                            reject(e);
-                        }
-                    } else {
-                        reject(new Error(`HTTP ${xhr.status}`));
-                    }
-                };
-
-                xhr.onerror = () => reject(new Error('XMLHttpRequest error'));
-                xhr.send();
-            });
-
-            // 成功したら結果を返す
-            return result;
-
+            await Promise.race([
+                img.decode(),
+                new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout')), 2000))
+            ]);
         } catch (e) {
-            if (settings.debugMode) {
-                console.log(`[AI Meta Viewer] Local file fetch attempt ${attempt + 1}/${retryCount} failed:`, e.message);
-            }
-
-            // 最後の試行でない場合は遅延後にリトライ
-            if (attempt < retryCount - 1) {
-                await new Promise(resolve => setTimeout(resolve, retryDelay));
-            }
+            // ロード待機に失敗しても、ファイルアクセス自体は試行してみる
+            if (settings.debugMode) console.log('[AI Meta Viewer] Image decode wait failed:', e.message);
         }
     }
 
-    // すべてのリトライが失敗した場合
-    if (settings.debugMode) {
-        console.log('[AI Meta Viewer] Local file access failed after all retries:', img.src);
-    }
-    return null;
+    // 2. XMLHttpRequestで取得 (一発勝負)
+    return new Promise((resolve) => {
+        const xhr = new XMLHttpRequest();
+        xhr.open('GET', img.src, true);
+        xhr.responseType = 'arraybuffer';
+
+        xhr.onload = function () {
+            // ローカルファイルの場合、成功時は status === 0 または 200
+            if (xhr.status === 0 || xhr.status === 200) {
+                try {
+                    const blob = new Blob([xhr.response]);
+                    const reader = new FileReader();
+                    reader.onloadend = () => resolve(reader.result);
+                    reader.onerror = () => resolve(null);
+                    reader.readAsDataURL(blob);
+                } catch (e) {
+                    if (settings.debugMode) console.log('[AI Meta Viewer] Blob/FileReader error:', e);
+                    resolve(null);
+                }
+            } else {
+                // 権限エラーなどの場合
+                if (settings.debugMode) console.log('[AI Meta Viewer] XHR failed status:', xhr.status);
+                resolve(null);
+            }
+        };
+
+        xhr.onerror = function () {
+            // アクセス拒否などのネットワークエラー
+            if (settings.debugMode) console.log('[AI Meta Viewer] XHR network error (likely permission denied)');
+            resolve(null);
+        };
+
+        try {
+            xhr.send();
+        } catch (e) {
+            if (settings.debugMode) console.log('[AI Meta Viewer] XHR send failed:', e);
+            resolve(null);
+        }
+    });
 }
