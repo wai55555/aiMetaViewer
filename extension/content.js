@@ -659,11 +659,11 @@ function handleDirectImageView() {
 /**
  * ローカル画像 (file://) をXMLHttpRequestで読み取りBase64化する（リトライ機能付き）
  * @param {HTMLImageElement} img 
- * @param {number} retryCount - リトライ回数（デフォルト: 20）
+ * @param {number} retryCount - リトライ回数（デフォルト: 5）
  * @param {number} retryDelay - リトライ間隔（ミリ秒、デフォルト: 500）
  * @returns {Promise<string|null>} Base64 data URL
  */
-async function fetchLocalImage(img, retryCount = 20, retryDelay = 500) {
+async function fetchLocalImage(img, retryCount = 5, retryDelay = 500) {
     for (let attempt = 0; attempt < retryCount; attempt++) {
         try {
             // 画像が完全にロードされるまで待機
