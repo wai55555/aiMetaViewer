@@ -242,10 +242,11 @@ async function checkImageMetadata(img) {
     // 処理済みフラグを立てる（重複チェック防止）
     processedImages.set(img, null);
 
-    // Pixivの場合、解析中バッジを表示（設定で有効な場合のみ）
+    // Pixivまたはローカルファイルの場合、解析中バッジを表示（設定で有効な場合のみ）
     const isPixiv = window.location.hostname.includes('pixiv.net');
+    const isLocalFile = targetUrl && (Array.isArray(targetUrl) ? targetUrl[0] : targetUrl).startsWith('file://');
     let analyzingBadge = null;
-    if (isPixiv && settings.showAnalyzingBadge) {
+    if ((isPixiv || isLocalFile) && settings.showAnalyzingBadge) {
         analyzingBadge = addAnalyzingBadge(img);
     }
 
@@ -317,7 +318,7 @@ async function checkImageMetadata(img) {
         }
 
         if (settings.debugMode) {
-            console.error('[AI Meta Viewer] Error checking metadata:', error);
+            console.log('[AI Meta Viewer] Error checking metadata:', error);
         }
 
         // エラー通知が有効な場合
@@ -651,28 +652,81 @@ function handleDirectImageView() {
         img.style.maxWidth = '100%';
         img.style.height = 'auto';
         img.style.boxShadow = '0 0 20px rgba(0,0,0,0.5)';
-
         checkImageMetadata(img);
     }
 }
 
 /**
- * ローカル画像 (file://) をfetchしてBase64化する
+ * ローカル画像 (file://) をXMLHttpRequestで読み取りBase64化する（リトライ機能付き）
  * @param {HTMLImageElement} img 
+ * @param {number} retryCount - リトライ回数（デフォルト: 20）
+ * @param {number} retryDelay - リトライ間隔（ミリ秒、デフォルト: 500）
  * @returns {Promise<string|null>} Base64 data URL
  */
-async function fetchLocalImage(img) {
-    try {
-        const response = await fetch(img.src);
-        const blob = await response.blob();
-        return new Promise((resolve) => {
-            const reader = new FileReader();
-            reader.onloadend = () => resolve(reader.result);
-            reader.onerror = () => resolve(null);
-            reader.readAsDataURL(blob);
-        });
-    } catch (e) {
-        console.error('Failed to fetch local image:', e);
-        return null;
+async function fetchLocalImage(img, retryCount = 20, retryDelay = 500) {
+    for (let attempt = 0; attempt < retryCount; attempt++) {
+        try {
+            // 画像が完全にロードされるまで待機
+            if (!img.complete) {
+                await new Promise((resolve, reject) => {
+                    const timeout = setTimeout(() => reject(new Error('Image load timeout')), 5000);
+                    img.onload = () => {
+                        clearTimeout(timeout);
+                        resolve();
+                    };
+                    img.onerror = () => {
+                        clearTimeout(timeout);
+                        reject(new Error('Image load error'));
+                    };
+                });
+            }
+
+            // XMLHttpRequestで取得を試行
+            const result = await new Promise((resolve, reject) => {
+                const xhr = new XMLHttpRequest();
+                xhr.open('GET', img.src, true);
+                xhr.responseType = 'arraybuffer';
+
+                xhr.onload = function () {
+                    if (xhr.status === 200 || xhr.status === 0) { // 0 for local files
+                        try {
+                            const arrayBuffer = xhr.response;
+                            const blob = new Blob([arrayBuffer]);
+                            const reader = new FileReader();
+
+                            reader.onloadend = () => resolve(reader.result);
+                            reader.onerror = () => reject(new Error('FileReader error'));
+                            reader.readAsDataURL(blob);
+                        } catch (e) {
+                            reject(e);
+                        }
+                    } else {
+                        reject(new Error(`HTTP ${xhr.status}`));
+                    }
+                };
+
+                xhr.onerror = () => reject(new Error('XMLHttpRequest error'));
+                xhr.send();
+            });
+
+            // 成功したら結果を返す
+            return result;
+
+        } catch (e) {
+            if (settings.debugMode) {
+                console.log(`[AI Meta Viewer] Local file fetch attempt ${attempt + 1}/${retryCount} failed:`, e.message);
+            }
+
+            // 最後の試行でない場合は遅延後にリトライ
+            if (attempt < retryCount - 1) {
+                await new Promise(resolve => setTimeout(resolve, retryDelay));
+            }
+        }
     }
+
+    // すべてのリトライが失敗した場合
+    if (settings.debugMode) {
+        console.log('[AI Meta Viewer] Local file access failed after all retries:', img.src);
+    }
+    return null;
 }

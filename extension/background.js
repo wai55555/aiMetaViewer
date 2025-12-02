@@ -130,7 +130,7 @@ async function handleFetchImageMetadata(imageUrl, base64Data = null) {
                 if (response.status === 404) {
                     debugLog(`[AI Meta Viewer] Image not found (404): ${imageUrl}`);
                 } else {
-                    console.error('[AI Meta Viewer] Fetch failed:', response.status);
+                    console.log('[AI Meta Viewer] Fetch failed:', response.status);
                 }
                 return { success: false, error: `HTTP ${response.status}` };
             }
