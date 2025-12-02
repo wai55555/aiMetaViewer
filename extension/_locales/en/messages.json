@@ -1,0 +1,101 @@
+{
+  "appName": {
+    "message": "AI Meta Viewer"
+  },
+  "appDesc": {
+    "message": "View AI-generated image metadata (prompts, settings) directly in your browser."
+  },
+  "optionsTitle": {
+    "message": "Settings"
+  },
+  "optionsSubtitle": {
+    "message": "Customize AI Meta Viewer behavior"
+  },
+  "sectionImageProcessing": {
+    "message": "Image Processing"
+  },
+  "labelMinPixelCount": {
+    "message": "Minimum Pixel Count (Threshold)"
+  },
+  "descMinPixelCount": {
+    "message": "Images smaller than this will be skipped (Default: 250000 = 512x512)"
+  },
+  "labelShowAnalyzingBadge": {
+    "message": "Show Analyzing Badge"
+  },
+  "descShowAnalyzingBadge": {
+    "message": "Display \"Analyzing...\" badge while checking metadata (Pixiv only)"
+  },
+  "sectionExcludedSites": {
+    "message": "Excluded Sites"
+  },
+  "labelExcludedSites": {
+    "message": "Disable extension on these URL patterns (one per line)"
+  },
+  "descExcludedSites": {
+    "message": "Wildcards supported: <code>*</code> (any string), <code>?</code> (single char)"
+  },
+  "placeholderExcludedSites": {
+    "message": "civitai.com*\ndanbooru.donmai.us*"
+  },
+  "sectionNotifications": {
+    "message": "Notifications"
+  },
+  "labelErrorNotification": {
+    "message": "Show Error Notifications"
+  },
+  "descErrorNotification": {
+    "message": "Show a notification when metadata loading fails"
+  },
+  "sectionCache": {
+    "message": "Cache Management"
+  },
+  "descCache": {
+    "message": "Clear metadata cache to free up memory"
+  },
+  "btnClearCache": {
+    "message": "🗑️ Clear Cache"
+  },
+  "sectionDebug": {
+    "message": "Debug"
+  },
+  "labelDebugMode": {
+    "message": "Enable Debug Logs"
+  },
+  "descDebugMode": {
+    "message": "Output detailed logs to browser console (for developers)"
+  },
+  "btnSave": {
+    "message": "💾 Save"
+  },
+  "btnReset": {
+    "message": "🔄 Reset to Defaults"
+  },
+  "msgSaved": {
+    "message": "Settings saved"
+  },
+  "msgSaveFailed": {
+    "message": "Failed to save: "
+  },
+  "msgReset": {
+    "message": "Settings reset to defaults"
+  },
+  "msgResetFailed": {
+    "message": "Failed to reset: "
+  },
+  "msgCacheCleared": {
+    "message": "Cache cleared"
+  },
+  "msgCacheClearFailed": {
+    "message": "Failed to clear cache: "
+  },
+  "confirmReset": {
+    "message": "Are you sure you want to reset all settings to defaults?"
+  },
+  "confirmClearCache": {
+    "message": "Are you sure you want to clear the metadata cache?"
+  },
+  "errorMinPixelCount": {
+    "message": "Minimum pixel count must be 10000 or greater"
+  }
+}

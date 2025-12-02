@@ -1,45 +1,42 @@
-// content.js - コンテンツスクリプト
+// content.js - Content Script for AI Image Metadata Viewer
 
-// デフォルト設定
-const DEFAULT_SETTINGS = {
+// 設定のデフォルト値
+let settings = {
     debugMode: false,
     errorNotification: false,
-    minPixelCount: 250000,
+    minPixelCount: 250000, // 500x500
+    showAnalyzingBadge: true,
     excludedSites: []
 };
 
-// 現在の設定（起動時に読み込み）
-let settings = { ...DEFAULT_SETTINGS };
-
 // 設定を読み込む
 async function loadSettings() {
-    const stored = await chrome.storage.sync.get(DEFAULT_SETTINGS);
-    settings = stored;
-}
-
-// ワイルドカード (*, ?) を正規表現に変換
-function wildcardToRegex(pattern) {
-    // 特殊文字をエスケープ
-    const escaped = pattern.replace(/[.+^${}()|[\]\\]/g, '\\$&');
-    // * -> .*, ? -> . に変換
-    const regexStr = '^' + escaped.replace(/\*/g, '.*').replace(/\?/g, '.') + '$';
-    return new RegExp(regexStr, 'i'); // 大文字小文字を区別しない
-}
-
-// 現在のURLが除外対象かチェック
-function isExcludedUrl() {
-    if (!settings.excludedSites || settings.excludedSites.length === 0) {
-        return false;
+    try {
+        const stored = await chrome.storage.sync.get(settings);
+        settings = { ...settings, ...stored };
+    } catch (e) {
+        console.error('Failed to load settings:', e);
     }
+}
 
+// 除外サイト判定
+function isExcludedUrl() {
     const currentUrl = window.location.href;
     const hostname = window.location.hostname;
 
     for (const pattern of settings.excludedSites) {
+        if (!pattern) continue;
+
+        // ワイルドカード変換 (* -> .*, ? -> .)
+        // エスケープ処理も行う
+        const regexStr = '^' + pattern
+            .replace(/[.+^${}()|[\]\\]/g, '\\$&') // 正規表現特殊文字をエスケープ
+            .replace(/\*/g, '.*')
+            .replace(/\?/g, '.');
+
         try {
-            const regex = wildcardToRegex(pattern);
-            // URL全体またはホスト名でマッチング
-            if (regex.test(currentUrl) || regex.test(hostname)) {
+            const regex = new RegExp(regexStr, 'i');
+            if (regex.test(hostname) || regex.test(currentUrl)) {
                 return true;
             }
         } catch (e) {
@@ -134,10 +131,52 @@ const SiteAdapters = [
     {
         match: () => window.location.hostname.includes('pixiv.net'),
         resolve: (img) => {
+            // 1. 既存の img-original リンクチェック
             const parentLink = img.closest('a');
             if (parentLink && parentLink.href && parentLink.href.includes('img-original')) {
                 return parentLink.href;
             }
+
+            // 2. サムネイルからオリジナルURLを推測
+            // 対応: ギャラリー (_square1200), ランキング (_master1200), その他サムネイル
+            const src = img.src;
+            if (src.includes('i.pximg.net') && (src.includes('img-master') || src.includes('custom-thumb'))) {
+                // URL変換ロジック
+                // 例1 (ギャラリー): https://i.pximg.net/c/250x250.../img-master/.../123_p0_square1200.jpg
+                // 例2 (ランキング): https://i.pximg.net/c/480x960/img-master/.../123_p0_master1200.jpg
+                // -> https://i.pximg.net/img-original/.../123_p0.png
+
+                try {
+                    const url = new URL(src);
+                    let pathname = url.pathname;
+
+                    // /c/xxx/ 部分を削除
+                    pathname = pathname.replace(/^\/c\/[^/]+\//, '/');
+
+                    // img-master または custom-thumb を img-original に置換
+                    pathname = pathname.replace(/\/(img-master|custom-thumb)\//, '/img-original/');
+
+                    // ファイル名から _square1200, _master1200 などのサフィックスを削除
+                    // 例: 136040914_p0_square1200.jpg -> 136040914_p0
+                    const match = pathname.match(/^(.+\/)(\d+_p\d+).*\.(jpg|png|webp|gif)$/);
+                    if (match) {
+                        const basePath = match[1]; // /img-original/img/2025/10/09/00/42/23/
+                        const fileBase = match[2]; // 136040914_p0
+
+                        // 拡張子候補: .png, .jpg, .webp の順で試行
+                        const candidates = [
+                            `${url.origin}${basePath}${fileBase}.png`,
+                            `${url.origin}${basePath}${fileBase}.jpg`,
+                            `${url.origin}${basePath}${fileBase}.webp`
+                        ];
+
+                        return candidates; // 配列を返す
+                    }
+                } catch (e) {
+                    // URL解析失敗時は null
+                }
+            }
+
             return null;
         }
     },
@@ -203,21 +242,39 @@ async function checkImageMetadata(img) {
     // 処理済みフラグを立てる（重複チェック防止）
     processedImages.set(img, null);
 
+    // Pixivの場合、解析中バッジを表示（設定で有効な場合のみ）
+    const isPixiv = window.location.hostname.includes('pixiv.net');
+    let analyzingBadge = null;
+    if (isPixiv && settings.showAnalyzingBadge) {
+        analyzingBadge = addAnalyzingBadge(img);
+    }
+
     try {
         let metadata = null;
+        let successUrl = null;
 
-        // キャッシュチェック
-        if (metadataCache.has(targetUrl)) {
-            metadata = metadataCache.get(targetUrl);
-        } else {
+        // targetUrl が配列の場合（Pixivのサムネイルなど）、順次試行
+        const urlsToTry = Array.isArray(targetUrl) ? targetUrl : [targetUrl];
+
+        for (const url of urlsToTry) {
+            // キャッシュチェック
+            if (metadataCache.has(url)) {
+                metadata = metadataCache.get(url);
+                if (metadata && Object.keys(metadata).length > 0) {
+                    successUrl = url;
+                    break;
+                }
+                continue;
+            }
+
             // メッセージペイロードの準備
             const message = {
                 action: 'fetchImageMetadata',
-                imageUrl: targetUrl
+                imageUrl: url
             };
 
             // ローカルファイル (file://) の場合、content.js側でデータを取得して送信
-            if (targetUrl.startsWith('file://')) {
+            if (url.startsWith('file://')) {
                 // img要素を渡す
                 const base64Data = await fetchLocalImage(img);
                 if (base64Data) {
@@ -231,15 +288,18 @@ async function checkImageMetadata(img) {
             if (response.success && response.metadata) {
                 metadata = response.metadata;
 
-                // 空でない場合のみキャッシュ
+                // 空でない場合のみキャッシュして採用
                 if (Object.keys(metadata).length > 0) {
-                    metadataCache.set(targetUrl, metadata);
+                    metadataCache.set(url, metadata);
+                    successUrl = url;
+                    break; // 成功したらループを抜ける
                 }
-            } else {
-                // エラーまたはメタデータなし
-                processedImages.delete(img);
-                return;
             }
+        }
+
+        // 解析中バッジを削除
+        if (analyzingBadge) {
+            removeAnalyzingBadge(analyzingBadge);
         }
 
         // メタデータが存在する場合、バッジを追加
@@ -250,13 +310,122 @@ async function checkImageMetadata(img) {
             processedImages.delete(img);
         }
 
-    } catch (e) {
-        // エラー処理
-        processedImages.delete(img);
-
-        if (settings.errorNotification) {
-            showErrorNotification(`Failed to load metadata: ${e.message}`);
+    } catch (error) {
+        // エラー時も解析中バッジを削除
+        if (analyzingBadge) {
+            removeAnalyzingBadge(analyzingBadge);
         }
+
+        if (settings.debugMode) {
+            console.error('[AI Meta Viewer] Error checking metadata:', error);
+        }
+
+        // エラー通知が有効な場合
+        if (settings.errorNotification) {
+            // 簡易的な通知（実際にはUIに表示する方が良いが、ここではコンソールのみ）
+            // 必要に応じてトースト通知などを実装
+        }
+
+        processedImages.delete(img);
+    }
+}
+
+/**
+ * 解析中バッジを追加
+ * @param {HTMLImageElement} img 
+ * @returns {Object} バッジ要素とクリーンアップ関数を含むオブジェクト
+ */
+function addAnalyzingBadge(img) {
+    const badge = document.createElement('div');
+    badge.className = 'ai-meta-badge ai-meta-badge-analyzing';
+    badge.textContent = 'Analyzing';
+
+    // Webサイト表示の場合 (fixed配置でスクロールに追従)
+    badge.style.position = 'fixed';
+    document.body.appendChild(badge);
+
+    let ticking = false;
+
+    // 位置更新関数
+    const updatePosition = () => {
+        // 画像がDOMから削除されていたらバッジも削除
+        if (!img.isConnected) {
+            badge.remove();
+            window.removeEventListener('scroll', onScroll);
+            window.removeEventListener('resize', onResize);
+            return;
+        }
+
+        // 画像のビューポート相対位置を取得
+        const rect = img.getBoundingClientRect();
+
+        // バッジの高さ分、上にずらす
+        const badgeHeight = 20;
+        const top = rect.top - badgeHeight;
+        const left = rect.left;
+
+        badge.style.left = `${left}px`;
+        badge.style.top = `${top}px`;
+
+        // 画像が非表示、または画面外の場合はバッジも隠す
+        if (rect.width === 0 || rect.height === 0 ||
+            window.getComputedStyle(img).display === 'none' ||
+            rect.bottom < 0 || rect.top > window.innerHeight) {
+            badge.style.display = 'none';
+        } else {
+            badge.style.display = 'block';
+        }
+
+        ticking = false;
+    };
+
+    // スクロールイベントハンドラ
+    const onScroll = () => {
+        if (!ticking) {
+            window.requestAnimationFrame(updatePosition);
+            ticking = true;
+        }
+    };
+
+    const onResize = () => {
+        if (!ticking) {
+            window.requestAnimationFrame(updatePosition);
+            ticking = true;
+        }
+    };
+
+    // 初期位置設定
+    if (img.complete) {
+        updatePosition();
+    } else {
+        img.addEventListener('load', updatePosition, { once: true });
+    }
+
+    // イベントリスナー登録
+    window.addEventListener('scroll', onScroll, { passive: true, capture: true });
+    window.addEventListener('resize', onResize, { passive: true });
+
+    // クリーンアップ用オブジェクトを返す
+    return {
+        element: badge,
+        cleanup: () => {
+            badge.remove();
+            window.removeEventListener('scroll', onScroll);
+            window.removeEventListener('resize', onResize);
+        }
+    };
+}
+
+/**
+ * 解析中バッジを削除
+ * @param {Object} badgeObj addAnalyzingBadgeが返したオブジェクト
+ */
+function removeAnalyzingBadge(badgeObj) {
+    if (badgeObj && typeof badgeObj.cleanup === 'function') {
+        badgeObj.cleanup();
+    } else if (badgeObj instanceof HTMLElement) {
+        // 古い形式（念のため）
+        badgeObj.remove();
     }
 }
 
@@ -466,109 +635,44 @@ function isDirectImageView() {
 }
 
 /**
- * 直接表示された画像用のUIを作成
- * @param {HTMLImageElement} img - 画像要素
- * @param {Object} metadata - メタデータ
+ * 直接表示画像の処理
  */
-function createDirectImageUI(img, metadata) {
-    // オーバーレイコンテナを作成
-    const overlay = document.createElement('div');
-    overlay.style.cssText = `
-        position: fixed;
-        top: 10px;
-        left: 10px;
-        z-index: 10000;
-    `;
+function handleDirectImageView() {
+    const img = document.querySelector('img');
+    if (img) {
+        // スタイル調整
+        document.body.style.backgroundColor = '#0e0e0e';
+        document.body.style.display = 'flex';
+        document.body.style.justifyContent = 'center';
+        document.body.style.alignItems = 'center';
+        document.body.style.minHeight = '100vh';
+        document.body.style.margin = '0';
 
-    const badge = createBadge();
-    badge.style.position = 'relative';
-    badge.style.top = 'auto';
-    badge.style.left = 'auto';
+        img.style.maxWidth = '100%';
+        img.style.height = 'auto';
+        img.style.boxShadow = '0 0 20px rgba(0,0,0,0.5)';
 
-    // ui.jsのupdateBadgeでツールチップなどを設定
-    updateBadge(badge, metadata);
-
-    badge.addEventListener('click', (e) => {
-        e.preventDefault();
-        e.stopPropagation();
-        const modal = createModal(metadata);
-        document.body.appendChild(modal);
-    });
-
-    overlay.appendChild(badge);
-    document.body.appendChild(overlay);
+        checkImageMetadata(img);
+    }
 }
 
 /**
- * ローカル画像 (file://) をCanvas経由でBase64変換
- * @param {HTMLImageElement} img - 画像要素
- * @returns {Promise<string|null>} - Base64データ、失敗時はnull
+ * ローカル画像 (file://) をfetchしてBase64化する
+ * @param {HTMLImageElement} img 
+ * @returns {Promise<string|null>} Base64 data URL
  */
 async function fetchLocalImage(img) {
-    if (!img.src.startsWith('file://')) return null;
-
     try {
-        // 画像が読み込まれていない場合はロードを待つ
-        if (!img.complete) {
-            await new Promise((resolve, reject) => {
-                img.onload = resolve;
-                img.onerror = reject;
-            });
-        }
-
-        const canvas = document.createElement('canvas');
-        canvas.width = img.naturalWidth || img.width;
-        canvas.height = img.naturalHeight || img.height;
-
-        const ctx = canvas.getContext('2d');
-        ctx.drawImage(img, 0, 0);
-
-        // CanvasからBase64データを取得
-        // file:// プロトコルでは Tainted Canvas になる可能性があるが、
-        // 拡張機能の権限設定によっては許可される場合がある
-        return canvas.toDataURL('image/png');
+        const response = await fetch(img.src);
+        const blob = await response.blob();
+        return new Promise((resolve) => {
+            const reader = new FileReader();
+            reader.onloadend = () => resolve(reader.result);
+            reader.onerror = () => resolve(null);
+            reader.readAsDataURL(blob);
+        });
     } catch (e) {
-        console.error('[AI Meta Viewer] Failed to get image data via Canvas:', e);
+        console.error('Failed to fetch local image:', e);
         return null;
     }
 }
-
-/**
- * 直接表示された画像を処理
- */
-async function handleDirectImageView() {
-    const img = document.querySelector('img');
-    if (!img) return;
-
-    const src = img.src || window.location.href;
-
-    try {
-        const message = {
-            action: 'fetchImageMetadata',
-            imageUrl: src
-        };
-
-        // ローカルファイル対応
-        if (src.startsWith('file://')) {
-            // img要素を渡す
-            const base64Data = await fetchLocalImage(img);
-            if (base64Data) {
-                message.imageData = base64Data;
-            }
-        }
-
-        // Background Service Workerにメタデータ取得をリクエスト
-        const response = await chrome.runtime.sendMessage(message);
-
-        if (response.success && response.metadata && Object.keys(response.metadata).length > 0) {
-            createDirectImageUI(img, response.metadata);
-        }
-    } catch (e) {
-        console.error('Failed to check metadata for direct image:', e);
-        if (settings.errorNotification) {
-            showErrorNotification(`Failed to load metadata: ${e.message}`);
-        }
-    }
-}
-
-

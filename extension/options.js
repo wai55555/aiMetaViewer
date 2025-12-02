@@ -1,34 +1,58 @@
-// options.js - 設定ページのロジック
+// options.js - Settings Page Logic
 
-// デフォルト設定
+// Default Settings
 const DEFAULT_SETTINGS = {
     debugMode: false,
     errorNotification: false,
     minPixelCount: 250000,
+    showAnalyzingBadge: true,
     excludedSites: []
 };
 
-// DOM要素
+// DOM Elements
 const debugModeCheckbox = document.getElementById('debugMode');
 const errorNotificationCheckbox = document.getElementById('errorNotification');
 const minPixelCountInput = document.getElementById('minPixelCount');
+const showAnalyzingBadgeCheckbox = document.getElementById('showAnalyzingBadge');
 const excludedSitesTextarea = document.getElementById('excludedSites');
 const saveBtn = document.getElementById('saveBtn');
 const resetBtn = document.getElementById('resetBtn');
 const clearCacheBtn = document.getElementById('clearCache');
 const statusMessage = document.getElementById('statusMessage');
 
-// 設定を読み込む
+// Apply i18n texts
+function applyI18n() {
+    document.querySelectorAll('[data-i18n]').forEach(element => {
+        const key = element.getAttribute('data-i18n');
+        const message = chrome.i18n.getMessage(key);
+        if (message) {
+            element.innerHTML = message;
+        }
+    });
+
+    document.querySelectorAll('[data-i18n-placeholder]').forEach(element => {
+        const key = element.getAttribute('data-i18n-placeholder');
+        const message = chrome.i18n.getMessage(key);
+        if (message) {
+            element.placeholder = message;
+        }
+    });
+}
+
+// Load settings
 async function loadSettings() {
+    applyI18n(); // Apply translations first
+
     const settings = await chrome.storage.sync.get(DEFAULT_SETTINGS);
 
     if (debugModeCheckbox) debugModeCheckbox.checked = settings.debugMode;
     if (errorNotificationCheckbox) errorNotificationCheckbox.checked = settings.errorNotification;
     if (minPixelCountInput) minPixelCountInput.value = settings.minPixelCount;
+    if (showAnalyzingBadgeCheckbox) showAnalyzingBadgeCheckbox.checked = settings.showAnalyzingBadge;
     if (excludedSitesTextarea) excludedSitesTextarea.value = settings.excludedSites.join('\n');
 }
 
-// 設定を保存する
+// Save settings
 async function saveSettings() {
     const excludedSites = excludedSitesTextarea ? excludedSitesTextarea.value
         .split('\n')
@@ -39,107 +63,97 @@ async function saveSettings() {
         debugMode: debugModeCheckbox ? debugModeCheckbox.checked : false,
         errorNotification: errorNotificationCheckbox ? errorNotificationCheckbox.checked : false,
         minPixelCount: parseInt(minPixelCountInput ? minPixelCountInput.value : '250000', 10) || 250000,
+        showAnalyzingBadge: showAnalyzingBadgeCheckbox ? showAnalyzingBadgeCheckbox.checked : true,
         excludedSites: excludedSites
     };
 
-    // 入力値の検証
+    // Validation
     if (settings.minPixelCount < 10000) {
-        showStatus('最小画素数は10000以上である必要があります', 'error');
+        showStatus(chrome.i18n.getMessage('errorMinPixelCount'), 'error');
         return;
     }
 
     try {
         await chrome.storage.sync.set(settings);
 
-        // Background scriptに設定変更を通知
+        // Notify Background script
         chrome.runtime.sendMessage({ action: 'settingsUpdated', settings: settings });
 
-        // アクティブなタブにも通知（拡張機能ページを除外）
+        // Notify active tabs (excluding extension pages)
         const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
         for (const tab of tabs) {
-            // chrome-extension:// で始まるURLは除外（設定ページなど）
             if (tab.url && !tab.url.startsWith('chrome-extension://')) {
                 try {
                     await chrome.tabs.sendMessage(tab.id, { action: 'settingsUpdated', settings: settings });
                 } catch (e) {
-                    // Content scriptが注入されていないタブの場合は無視
-                    // (例: chrome://, about:blank, file:// など)
+                    // Ignore errors for tabs where content script is not injected
                 }
             }
         }
 
-        showStatus('設定を保存しました', 'success');
+        showStatus(chrome.i18n.getMessage('msgSaved'), 'success');
     } catch (error) {
-        showStatus('保存に失敗しました: ' + error.message, 'error');
+        showStatus(chrome.i18n.getMessage('msgSaveFailed') + error.message, 'error');
     }
 }
 
-// デフォルト設定にリセット
+// Reset to defaults
 async function resetSettings() {
-    if (!confirm('設定をデフォルトに戻しますか?')) {
+    if (!confirm(chrome.i18n.getMessage('confirmReset'))) {
         return;
     }
 
     try {
         await chrome.storage.sync.set(DEFAULT_SETTINGS);
         await loadSettings();
-        showStatus('設定をデフォルトに戻しました', 'success');
+        showStatus(chrome.i18n.getMessage('msgReset'), 'success');
 
-        // Background scriptとContent scriptに設定変更を通知
+        // Notify Background script
         chrome.runtime.sendMessage({ action: 'settingsUpdated', settings: DEFAULT_SETTINGS });
     } catch (error) {
-        showStatus('リセットに失敗しました: ' + error.message, 'error');
+        showStatus(chrome.i18n.getMessage('msgResetFailed') + error.message, 'error');
     }
 }
 
-// キャッシュをクリア
+// Clear cache
 async function clearCache() {
-    if (!confirm('メタデータのキャッシュをクリアしますか?\nページを再読み込みすると、画像のメタデータが再取得されます。')) {
+    if (!confirm(chrome.i18n.getMessage('confirmClearCache'))) {
         return;
     }
 
     try {
-        // Background scriptにキャッシュクリアを依頼
         const response = await chrome.runtime.sendMessage({ action: 'clearCache' });
 
         if (response && response.success) {
-            showStatus('キャッシュをクリアしました', 'success');
+            showStatus(chrome.i18n.getMessage('msgCacheCleared'), 'success');
         } else {
-            showStatus('キャッシュのクリアに失敗しました', 'error');
+            showStatus(chrome.i18n.getMessage('msgCacheClearFailed'), 'error');
         }
     } catch (error) {
-        showStatus('エラー: ' + error.message, 'error');
+        showStatus(chrome.i18n.getMessage('msgCacheClearFailed') + error.message, 'error');
     }
 }
 
-// ステータスメッセージを表示
+// Show status message
 function showStatus(message, type = 'success') {
     if (!statusMessage) return;
 
     statusMessage.textContent = message;
     statusMessage.className = `status-message ${type} show`;
 
-    // 3秒後に非表示
     setTimeout(() => {
         statusMessage.classList.remove('show');
     }, 3000);
 }
 
-// イベントリスナーの設定
+// Event Listeners
 document.addEventListener('DOMContentLoaded', () => {
-    // 設定を読み込む
     loadSettings();
 
-    // 保存ボタン
     if (saveBtn) saveBtn.addEventListener('click', saveSettings);
-
-    // リセットボタン
     if (resetBtn) resetBtn.addEventListener('click', resetSettings);
-
-    // キャッシュクリアボタン
     if (clearCacheBtn) clearCacheBtn.addEventListener('click', clearCache);
 
-    // Enterキーで保存
     if (minPixelCountInput) {
         minPixelCountInput.addEventListener('keypress', (e) => {
             if (e.key === 'Enter') {

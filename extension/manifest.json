@@ -1,8 +1,9 @@
 {
     "manifest_version": 3,
-    "name": "Image Metadata Viewer",
+    "name": "__MSG_appName__",
+    "description": "__MSG_appDesc__",
+    "default_locale": "en",
     "version": "1.0.0",
-    "description": "View AI-generated image metadata (prompts, settings) directly in your browser",
     "permissions": [
         "activeTab",
         "storage",

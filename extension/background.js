@@ -126,7 +126,12 @@ async function handleFetchImageMetadata(imageUrl, base64Data = null) {
             const response = await fetch(imageUrl);
 
             if (!response.ok) {
-                console.error('[AI Meta Viewer] Fetch failed:', response.status);
+                // 404は候補URLが存在しない場合（Pixivの拡張子試行など）なので、デバッグログのみ
+                if (response.status === 404) {
+                    debugLog(`[AI Meta Viewer] Image not found (404): ${imageUrl}`);
+                } else {
+                    console.error('[AI Meta Viewer] Fetch failed:', response.status);
+                }
                 return { success: false, error: `HTTP ${response.status}` };
             }
 

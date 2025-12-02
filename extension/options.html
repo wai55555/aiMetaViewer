@@ -1,10 +1,10 @@
 <!DOCTYPE html>
-<html lang="ja">
+<html>
 
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>AI画像メタデータビューア - 設定</title>
+    <title data-i18n="optionsTitle">Settings</title>
     <style>
         * {
             margin: 0;
@@ -234,51 +234,63 @@
 <body>
     <div class="container">
         <div class="header">
-            <h1>⚙️ 設定</h1>
-            <p>AI画像メタデータビューアの動作をカスタマイズ</p>
+            <h1 data-i18n="optionsTitle">Settings</h1>
+            <p data-i18n="optionsSubtitle">Customize AI Meta Viewer behavior</p>
         </div>
 
         <div class="content">
             <!-- 画像処理設定 -->
             <div class="section">
-                <h2 class="section-title">画像処理</h2>
+                <h2 class="section-title" data-i18n="sectionImageProcessing">Image Processing</h2>
                 <div class="setting-item">
                     <div class="input-group">
-                        <label for="minPixelCount">最小画素数（閾値）</label>
+                        <label for="minPixelCount" data-i18n="labelMinPixelCount">Minimum Pixel Count
+                            (Threshold)</label>
                         <input type="number" id="minPixelCount" min="10000" max="10000000" step="10000">
-                        <div class="input-helper">
-                            この画素数未満の画像はメタデータチェックをスキップします（デフォルト: 250000 = 512x512相当）
+                        <div class="input-helper" data-i18n="descMinPixelCount">
+                            Images smaller than this will be skipped (Default: 250000 = 512x512)
                         </div>
                     </div>
+                </div>
+                <div class="setting-item">
+                    <label class="setting-label">
+                        <input type="checkbox" id="showAnalyzingBadge">
+                        <div class="setting-label-text">
+                            <div class="setting-label-title" data-i18n="labelShowAnalyzingBadge">Show Analyzing Badge</div>
+                            <div class="setting-label-desc" data-i18n="descShowAnalyzingBadge">Display "Analyzing..." badge while checking metadata (Pixiv only)</div>
+                        </div>
+                    </label>
                 </div>
             </div>
 
             <!-- 除外サイト設定 -->
             <div class="section">
-                <h2 class="section-title">除外サイト</h2>
+                <h2 class="section-title" data-i18n="sectionExcludedSites">Excluded Sites</h2>
                 <div class="setting-item">
-                    <label for="excludedSites" style="display:block; margin-bottom:8px; font-weight:500; color:#333;">
-                        以下のURLパターンでは拡張機能を無効化（1行に1つ）
+                    <label for="excludedSites" style="display:block; margin-bottom:8px; font-weight:500; color:#333;"
+                        data-i18n="labelExcludedSites">
+                        Disable extension on these URL patterns (one per line)
                     </label>
                     <textarea id="excludedSites" rows="5"
                         style="width:100%; padding:10px; border:2px solid #e0e0e0; border-radius:8px; font-family:monospace; resize: vertical;"
-                        placeholder="例:&#13;&#10;civitai.com*&#13;&#10;*.twitter.com"></textarea>
-                    <div class="input-helper">
-                        ワイルドカードが使用可能です: <code>*</code> (任意の文字列), <code>?</code> (任意の1文字)
+                        data-i18n-placeholder="placeholderExcludedSites"></textarea>
+                    <div class="input-helper" data-i18n="descExcludedSites">
+                        Wildcards supported: <code>*</code> (any string), <code>?</code> (single char)
                     </div>
                 </div>
             </div>
 
             <!-- 通知設定 -->
             <div class="section">
-                <h2 class="section-title">通知</h2>
+                <h2 class="section-title" data-i18n="sectionNotifications">Notifications</h2>
                 <div class="setting-item">
                     <label class="setting-label">
                         <input type="checkbox" id="errorNotification">
                         <div class="setting-label-text">
-                            <div class="setting-label-title">エラー通知を表示</div>
-                            <div class="setting-label-desc">
-                                メタデータの読み込みに失敗した場合に通知を表示します
+                            <div class="setting-label-title" data-i18n="labelErrorNotification">Show Error Notifications
+                            </div>
+                            <div class="setting-label-desc" data-i18n="descErrorNotification">
+                                Show a notification when metadata loading fails
                             </div>
                         </div>
                     </label>
@@ -287,25 +299,25 @@
 
             <!-- キャッシュ管理 -->
             <div class="section">
-                <h2 class="section-title">キャッシュ管理</h2>
+                <h2 class="section-title" data-i18n="sectionCache">Cache Management</h2>
                 <div class="setting-item">
-                    <p style="color: #666; font-size: 14px; margin-bottom: 12px;">
-                        メタデータのキャッシュをクリアして、メモリを解放します
+                    <p style="color: #666; font-size: 14px; margin-bottom: 12px;" data-i18n="descCache">
+                        Clear metadata cache to free up memory
                     </p>
-                    <button class="btn btn-danger" id="clearCache">🗑️ キャッシュをクリア</button>
+                    <button class="btn btn-danger" id="clearCache" data-i18n="btnClearCache">🗑️ Clear Cache</button>
                 </div>
             </div>
 
             <!-- デバッグ設定 -->
             <div class="section">
-                <h2 class="section-title">デバッグ</h2>
+                <h2 class="section-title" data-i18n="sectionDebug">Debug</h2>
                 <div class="setting-item">
                     <label class="setting-label">
                         <input type="checkbox" id="debugMode">
                         <div class="setting-label-text">
-                            <div class="setting-label-title">デバッグログを有効化</div>
-                            <div class="setting-label-desc">
-                                ブラウザのコンソールに詳細なログを出力します（開発者向け）
+                            <div class="setting-label-title" data-i18n="labelDebugMode">Enable Debug Logs</div>
+                            <div class="setting-label-desc" data-i18n="descDebugMode">
+                                Output detailed logs to browser console (for developers)
                             </div>
                         </div>
                     </label>
@@ -314,8 +326,8 @@
 
             <!-- 保存・リセットボタン -->
             <div class="button-group">
-                <button class="btn btn-primary" id="saveBtn">💾 保存</button>
-                <button class="btn btn-secondary" id="resetBtn">🔄 デフォルトに戻す</button>
+                <button class="btn btn-primary" id="saveBtn" data-i18n="btnSave">💾 Save</button>
+                <button class="btn btn-secondary" id="resetBtn" data-i18n="btnReset">🔄 Reset to Defaults</button>
             </div>
 
             <div class="status-message" id="statusMessage"></div>
