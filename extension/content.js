@@ -33,6 +33,73 @@ const processedImages = new WeakMap();
 // 画像URLごとのメタデータキャッシュ
 const metadataCache = new Map();
 
+// --- サイト別アダプター ---
+
+const SiteAdapters = [
+    // Discord
+    {
+        match: () => window.location.hostname.includes('discord.com'),
+        resolve: (img) => {
+            // 1. 親リンクからの判定 (cdn.discordapp.com)
+            const parentLink = img.closest('a');
+            if (parentLink && parentLink.href) {
+                const href = parentLink.href;
+                if (href.includes('cdn.discordapp.com') && parentLink.className.includes('originalLink')) {
+                    return href;
+                }
+            }
+
+            // 2. ネストされた構造からの判定
+            let container = img.closest('[class*="imageWrapper"]');
+            if (!container) {
+                let parent = img.parentElement;
+                for (let i = 0; i < 4; i++) {
+                    if (!parent) break;
+                    if (parent.querySelector('a[class*="originalLink"]')) {
+                        container = parent;
+                        break;
+                    }
+                    parent = parent.parentElement;
+                }
+            }
+
+            if (container) {
+                const discordLink = container.querySelector('a[class*="originalLink"]');
+                if (discordLink && discordLink.href && discordLink.href.includes('cdn.discordapp.com')) {
+                    return discordLink.href;
+                }
+            }
+            return null;
+        }
+    },
+    // Pixiv
+    {
+        match: () => window.location.hostname.includes('pixiv.net'),
+        resolve: (img) => {
+            const parentLink = img.closest('a');
+            if (parentLink && parentLink.href && parentLink.href.includes('img-original')) {
+                return parentLink.href;
+            }
+            return null;
+        }
+    },
+    // 汎用 (拡張子チェック)
+    {
+        match: () => true, // 常にマッチ
+        resolve: (img) => {
+            const parentLink = img.closest('a');
+            if (parentLink && parentLink.href) {
+                const href = parentLink.href;
+                const cleanHref = href.split('?')[0];
+                if (/\.(png|jpg|jpeg|webp|avif)$/i.test(cleanHref)) {
+                    return href;
+                }
+            }
+            return null;
+        }
+    }
+];
+
 /**
  * 画像のメタデータをチェックしてバッジを追加
  * @param {HTMLImageElement} img - 対象画像要素
@@ -44,59 +111,18 @@ async function checkImageMetadata(img) {
     const src = img.src;
     if (!src) return;
 
-    // 親リンクからオリジナル画像のURLを取得する汎用ロジック
+    // ターゲットURLの解決
     let targetUrl = src;
     let isLinkedImage = false;
-    const parentLink = img.closest('a');
 
-    if (parentLink && parentLink.href) {
-        const href = parentLink.href;
-        // クエリパラメータを除去して拡張子チェック
-        const cleanHref = href.split('?')[0];
-
-        // リンク先が画像ファイル、またはPixiv/Discordのオリジナル画像URLパターンの場合
-        if (/\.(png|jpg|jpeg|webp|avif)$/i.test(cleanHref) ||
-            (window.location.hostname.includes('pixiv.net') && href.includes('img-original')) ||
-            (href.includes('cdn.discordapp.com') && parentLink.className.includes('originalLink'))) {
-            targetUrl = href;
-            isLinkedImage = true;
-        }
-    }
-
-    // Discord対応: imgタグがaタグの中になく、兄弟要素や親の配下にある場合
-    if (!isLinkedImage && window.location.hostname.includes('discord.com')) {
-        // Discordの構造: 
-        // <div class="imageWrapper ...">
-        //   <a class="originalLink_..." href="..."></a>
-        //   <div class="clickableWrapper_...">
-        //     <div class="loadingOverlay_...">
-        //       <img class="lazyImg_..." ...>
-        //     </div>
-        //   </div>
-        // </div>
-
-        // 1. imageWrapperクラスを持つ親を探す
-        let container = img.closest('[class*="imageWrapper"]');
-
-        // 2. 見つからない場合、親を数階層遡って探す (念のため)
-        if (!container) {
-            let parent = img.parentElement;
-            for (let i = 0; i < 4; i++) { // 4階層まで
-                if (!parent) break;
-                // originalLinkを持つaタグが直下にあるか確認
-                if (parent.querySelector('a[class*="originalLink"]')) {
-                    container = parent;
-                    break;
-                }
-                parent = parent.parentElement;
-            }
-        }
-
-        if (container) {
-            const discordLink = container.querySelector('a[class*="originalLink"]');
-            if (discordLink && discordLink.href && discordLink.href.includes('cdn.discordapp.com')) {
-                targetUrl = discordLink.href;
+    // アダプターを使ってオリジナル画像を探索
+    for (const adapter of SiteAdapters) {
+        if (adapter.match()) {
+            const resolvedUrl = adapter.resolve(img);
+            if (resolvedUrl) {
+                targetUrl = resolvedUrl;
                 isLinkedImage = true;
+                break; // 最初に見つかったものを採用
             }
         }
     }
