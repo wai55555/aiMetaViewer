@@ -24,10 +24,8 @@ Webページ上の画像を自動的に解析し、メタデータが含まれ�
 ## 🚀 インストール方法
 
 この拡張機能はChromeウェブストアにはまだ公開されていません。以下の手順で手動インストールしてください。
-
-1. このリポジトリをダウンロードします。
 ![](https://raw.githubusercontent.com/wai55555/aiMetaViewer/refs/heads/main/sample/code_download_zip.png)
-緑色の<>codeを押して、Download ZIP
+1. このリポジトリをダウンロードします。緑色の<>codeを押して、Download ZIP
 2. Google Chromeを開き、アドレスバーに `chrome://extensions` と入力します。
 3. 右上の **「デベロッパーモード」** スイッチをオンにします。
 4. **「パッケージ化されていない拡張機能を読み込む」** をクリックします。
