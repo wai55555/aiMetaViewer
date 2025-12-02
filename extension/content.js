@@ -4,7 +4,8 @@
 const DEFAULT_SETTINGS = {
     debugMode: false,
     errorNotification: false,
-    minPixelCount: 250000
+    minPixelCount: 250000,
+    excludedSites: []
 };
 
 // 現在の設定（起動時に読み込み）
@@ -16,13 +17,70 @@ async function loadSettings() {
     settings = stored;
 }
 
+// ワイルドカード (*, ?) を正規表現に変換
+function wildcardToRegex(pattern) {
+    // 特殊文字をエスケープ
+    const escaped = pattern.replace(/[.+^${}()|[\]\\]/g, '\\$&');
+    // * -> .*, ? -> . に変換
+    const regexStr = '^' + escaped.replace(/\*/g, '.*').replace(/\?/g, '.') + '$';
+    return new RegExp(regexStr, 'i'); // 大文字小文字を区別しない
+}
+
+// 現在のURLが除外対象かチェック
+function isExcludedUrl() {
+    if (!settings.excludedSites || settings.excludedSites.length === 0) {
+        return false;
+    }
+
+    const currentUrl = window.location.href;
+    const hostname = window.location.hostname;
+
+    for (const pattern of settings.excludedSites) {
+        try {
+            const regex = wildcardToRegex(pattern);
+            // URL全体またはホスト名でマッチング
+            if (regex.test(currentUrl) || regex.test(hostname)) {
+                return true;
+            }
+        } catch (e) {
+            console.error('[AI Meta Viewer] Invalid wildcard pattern:', pattern, e);
+        }
+    }
+    return false;
+}
+
 // 初期化時に設定を読み込む
-loadSettings();
+loadSettings().then(() => {
+    // 除外サイトチェック
+    if (isExcludedUrl()) {
+        if (settings.debugMode) {
+            console.log('[AI Meta Viewer] Site excluded by settings:', window.location.href);
+        }
+        return;
+    }
+
+    // 初期化実行
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', init);
+    } else {
+        init();
+    }
+});
+
+function init() {
+    if (isDirectImageView()) {
+        handleDirectImageView();
+    } else {
+        observeImages();
+    }
+}
 
 // 設定更新メッセージを受信
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     if (request.action === 'settingsUpdated') {
         settings = request.settings;
+        // 設定変更時はリロードを推奨するか、動的に反映するが、
+        // 除外設定の動的反映は複雑なため、次回ロード時から有効とするのが一般的
     }
 });
 
@@ -513,19 +571,4 @@ async function handleDirectImageView() {
     }
 }
 
-// 初期化
-if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', () => {
-        if (isDirectImageView()) {
-            handleDirectImageView();
-        } else {
-            observeImages();
-        }
-    });
-} else {
-    if (isDirectImageView()) {
-        handleDirectImageView();
-    } else {
-        observeImages();
-    }
-}
+

@@ -239,19 +239,33 @@
         </div>
 
         <div class="content">
-            <!-- デバッグ設定 -->
+            <!-- 画像処理設定 -->
             <div class="section">
-                <h2 class="section-title">デバッグ</h2>
+                <h2 class="section-title">画像処理</h2>
                 <div class="setting-item">
-                    <label class="setting-label">
-                        <input type="checkbox" id="debugMode">
-                        <div class="setting-label-text">
-                            <div class="setting-label-title">デバッグログを有効化</div>
-                            <div class="setting-label-desc">
-                                ブラウザのコンソールに詳細なログを出力します（開発者向け）
-                            </div>
+                    <div class="input-group">
+                        <label for="minPixelCount">最小画素数（閾値）</label>
+                        <input type="number" id="minPixelCount" min="10000" max="10000000" step="10000">
+                        <div class="input-helper">
+                            この画素数未満の画像はメタデータチェックをスキップします（デフォルト: 250000 = 512x512相当）
                         </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 除外サイト設定 -->
+            <div class="section">
+                <h2 class="section-title">除外サイト</h2>
+                <div class="setting-item">
+                    <label for="excludedSites" style="display:block; margin-bottom:8px; font-weight:500; color:#333;">
+                        以下のURLパターンでは拡張機能を無効化（1行に1つ）
                     </label>
+                    <textarea id="excludedSites" rows="5"
+                        style="width:100%; padding:10px; border:2px solid #e0e0e0; border-radius:8px; font-family:monospace; resize: vertical;"
+                        placeholder="例:&#13;&#10;civitai.com*&#13;&#10;*.twitter.com"></textarea>
+                    <div class="input-helper">
+                        ワイルドカードが使用可能です: <code>*</code> (任意の文字列), <code>?</code> (任意の1文字)
+                    </div>
                 </div>
             </div>
 
@@ -271,20 +285,6 @@
                 </div>
             </div>
 
-            <!-- 画像処理設定 -->
-            <div class="section">
-                <h2 class="section-title">画像処理</h2>
-                <div class="setting-item">
-                    <div class="input-group">
-                        <label for="minPixelCount">最小画素数（閾値）</label>
-                        <input type="number" id="minPixelCount" min="10000" max="10000000" step="10000">
-                        <div class="input-helper">
-                            この画素数未満の画像はメタデータチェックをスキップします（デフォルト: 250000 = 512x512相当）
-                        </div>
-                    </div>
-                </div>
-            </div>
-
             <!-- キャッシュ管理 -->
             <div class="section">
                 <h2 class="section-title">キャッシュ管理</h2>
@@ -293,6 +293,22 @@
                         メタデータのキャッシュをクリアして、メモリを解放します
                     </p>
                     <button class="btn btn-danger" id="clearCache">🗑️ キャッシュをクリア</button>
+                </div>
+            </div>
+
+            <!-- デバッグ設定 -->
+            <div class="section">
+                <h2 class="section-title">デバッグ</h2>
+                <div class="setting-item">
+                    <label class="setting-label">
+                        <input type="checkbox" id="debugMode">
+                        <div class="setting-label-text">
+                            <div class="setting-label-title">デバッグログを有効化</div>
+                            <div class="setting-label-desc">
+                                ブラウザのコンソールに詳細なログを出力します（開発者向け）
+                            </div>
+                        </div>
+                    </label>
                 </div>
             </div>
 
