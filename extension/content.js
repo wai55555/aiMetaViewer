@@ -1,7 +1,11 @@
 // content.js - コンテンツスクリプト
 
-// 処理済み画像のWeakSet (メモリリーク防止)
-const processedImages = new WeakSet();
+// エラー通知設定（デフォルト無効）
+const ENABLE_ERROR_NOTIFICATION = false;
+
+// 処理済み画像とバッジの対応マップ (メモリリーク防止)
+// HTMLImageElement -> HTMLElement (Badge)
+const processedImages = new WeakMap();
 
 // 画像URLごとのメタデータキャッシュ
 const metadataCache = new Map();
@@ -19,16 +23,20 @@ async function checkImageMetadata(img) {
     const src = img.src;
     if (!src) return;
 
-    // Pixiv対応: 親リンクからオリジナル画像のURLを取得
+    // 親リンクからオリジナル画像のURLを取得する汎用ロジック
     let targetUrl = src;
-    if (window.location.hostname.includes('pixiv.net')) {
-        const parentLink = img.closest('a');
-        if (parentLink && parentLink.href && parentLink.href.includes('img-original')) {
-            targetUrl = parentLink.href;
+    const parentLink = img.closest('a');
+    if (parentLink && parentLink.href) {
+        const href = parentLink.href;
+        // リンク先が画像ファイル、またはPixivのオリジナル画像URLパターンの場合
+        if (/\.(png|jpg|jpeg|webp|avif)$/i.test(href) ||
+            (window.location.hostname.includes('pixiv.net') && href.includes('img-original'))) {
+            targetUrl = href;
         }
     }
 
-    processedImages.add(img);
+    // 処理済みフラグを立てる（重複チェック防止）
+    processedImages.set(img, null);
 
     try {
         let metadata = null;
@@ -52,18 +60,26 @@ async function checkImageMetadata(img) {
                 }
             } else {
                 // エラーまたはメタデータなし
+                processedImages.delete(img);
                 return;
             }
         }
 
-        // メタデータが存在する場合、バッジを表示
+        // メタデータが存在する場合、バッジを追加
         if (metadata && Object.keys(metadata).length > 0) {
             addBadgeToImage(img, metadata);
+        } else {
+            // メタデータが空の場合は削除
+            processedImages.delete(img);
         }
 
     } catch (e) {
-        // エラーは静かに無視 (CORS、ネットワークエラーなど)
-        // console.debug('Failed to check metadata for:', targetUrl, e);
+        // エラー処理
+        processedImages.delete(img);
+
+        if (ENABLE_ERROR_NOTIFICATION) {
+            showErrorNotification(`Failed to load metadata: ${e.message}`);
+        }
     }
 }
 
@@ -73,70 +89,125 @@ async function checkImageMetadata(img) {
  * @param {Object} metadata - メタデータ
  */
 function addBadgeToImage(img, metadata) {
-    // 親要素がposition: relativeでない場合、ラッパーが必要になる可能性があるが、
-    // 既存のレイアウトを壊さないよう、画像の上にオーバーレイするコンテナを作成するアプローチをとる
-    // または、画像の親要素に相対配置を適用する（副作用のリスクあり）
-
-    // ここでは、画像の親要素にバッジを挿入し、画像の位置に合わせて配置する
-    // ただし、画像が動的に動く場合やレスポンシブ対応が難しい
-
-    // より堅牢なアプローチ:
-    // 画像の直後にコンテナを挿入し、その中にバッジを絶対配置する
-
-    const container = document.createElement('div');
-    container.className = 'ai-meta-container';
-    container.style.position = 'absolute';
-    container.style.zIndex = '9990';
-
-    // 画像の位置とサイズに合わせてコンテナを配置するためのロジックが必要だが、
-    // シンプルに画像の親要素が相対配置可能ならそこに追加するのがベスト
-
-    // 今回は、画像の親要素に `position: relative` を設定し（既存がstaticなら）、
-    // バッジを画像要素の兄弟として追加する
-
-    const parent = img.parentElement;
-    if (!parent) return;
-
-    const style = window.getComputedStyle(parent);
-    if (style.position === 'static') {
-        parent.style.position = 'relative';
-    }
+    // 既にバッジがある場合は何もしない
+    if (processedImages.get(img)) return;
 
     const badge = createBadge(); // ui.jsの関数
+    const isDirectImage = isDirectImageView();
 
-    // バッジの位置調整 (画像の左上)
-    // 画像自体にマージンやパディングがある場合を考慮する必要があるが、
-    // 簡易的に親要素の左上に配置し、画像のオフセットを考慮する
+    // ui.jsのupdateBadgeでツールチップなどを設定
+    updateBadge(badge, metadata);
 
-    // 画像のオフセットを取得
-    const imgLeft = img.offsetLeft;
-    const imgTop = img.offsetTop;
-
-    badge.style.left = `${imgLeft}px`;
-    badge.style.top = `${imgTop}px`;
+    // バッジにメタデータを保存
+    badge._metadata = metadata;
 
     // クリックイベント
     badge.addEventListener('click', (e) => {
         e.preventDefault();
         e.stopPropagation();
-        const modal = createModal(metadata); // ui.jsの関数
-        document.body.appendChild(modal);
+
+        const currentMetadata = badge._metadata;
+        if (currentMetadata) {
+            const modal = createModal(currentMetadata); // ui.jsの関数
+            document.body.appendChild(modal);
+        }
     });
 
-    // 画像がロード完了しているか確認
-    if (img.complete) {
-        parent.appendChild(badge);
-    } else {
-        img.addEventListener('load', () => {
-            // 再計算
+    // バッジを管理マップに登録
+    processedImages.set(img, badge);
+
+    if (isDirectImage) {
+        // --- 画像直接表示の場合 (従来通り) ---
+        const parent = img.parentElement;
+        if (!parent) return;
+
+        const style = window.getComputedStyle(parent);
+        if (style.position === 'static') {
+            parent.style.position = 'relative';
+        }
+
+        // 画像の左上に配置
+        const updateBadgeOnDirectImage = () => {
             badge.style.left = `${img.offsetLeft}px`;
             badge.style.top = `${img.offsetTop}px`;
-            parent.appendChild(badge);
-        });
-    }
+        };
 
-    // ウィンドウリサイズ時に位置調整
-    // (MutationObserverだけでは不十分な場合)
+        updateBadgeOnDirectImage();
+        parent.appendChild(badge);
+
+        if (!img.complete) {
+            img.addEventListener('load', updateBadgeOnDirectImage);
+        }
+        window.addEventListener('resize', updateBadgeOnDirectImage);
+
+    } else {
+        // --- Webサイト表示の場合 (fixed配置でスクロールに追従) ---
+        // position: fixed でビューポート座標を使用
+        badge.style.position = 'fixed';
+        document.body.appendChild(badge);
+
+        let ticking = false;
+
+        // 位置更新関数
+        const updatePosition = () => {
+            // 画像がDOMから削除されていたらバッジも削除
+            if (!img.isConnected) {
+                badge.remove();
+                processedImages.delete(img);
+                window.removeEventListener('scroll', onScroll);
+                window.removeEventListener('resize', onResize);
+                return;
+            }
+
+            // 画像のビューポート相対位置を取得
+            const rect = img.getBoundingClientRect();
+
+            // バッジの高さ分、上にずらす
+            const badgeHeight = 20;
+            const top = rect.top - badgeHeight;
+            const left = rect.left;
+
+            badge.style.left = `${left}px`;
+            badge.style.top = `${top}px`;
+
+            // 画像が非表示、または画面外の場合はバッジも隠す
+            if (rect.width === 0 || rect.height === 0 ||
+                window.getComputedStyle(img).display === 'none' ||
+                rect.bottom < 0 || rect.top > window.innerHeight) {
+                badge.style.display = 'none';
+            } else {
+                badge.style.display = 'block';
+            }
+
+            ticking = false;
+        };
+
+        // スクロールイベントハンドラ (requestAnimationFrameで最適化)
+        const onScroll = () => {
+            if (!ticking) {
+                window.requestAnimationFrame(updatePosition);
+                ticking = true;
+            }
+        };
+
+        const onResize = () => {
+            if (!ticking) {
+                window.requestAnimationFrame(updatePosition);
+                ticking = true;
+            }
+        };
+
+        // 初期位置設定
+        if (img.complete) {
+            updatePosition();
+        } else {
+            img.addEventListener('load', updatePosition, { once: true });
+        }
+
+        // スクロールとリサイズイベントで位置を更新
+        window.addEventListener('scroll', onScroll, { passive: true, capture: true });
+        window.addEventListener('resize', onResize, { passive: true });
+    }
 }
 
 /**
@@ -237,6 +308,9 @@ function createDirectImageUI(img, metadata) {
     badge.style.top = 'auto';
     badge.style.left = 'auto';
 
+    // ui.jsのupdateBadgeでツールチップなどを設定
+    updateBadge(badge, metadata);
+
     badge.addEventListener('click', (e) => {
         e.preventDefault();
         e.stopPropagation();
@@ -269,6 +343,9 @@ async function handleDirectImageView() {
         }
     } catch (e) {
         console.error('Failed to check metadata for direct image:', e);
+        if (ENABLE_ERROR_NOTIFICATION) {
+            showErrorNotification(`Failed to load metadata: ${e.message}`);
+        }
     }
 }
 

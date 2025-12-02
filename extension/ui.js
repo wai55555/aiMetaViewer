@@ -2,14 +2,84 @@
 
 /**
  * バッジ要素を作成
+ * @param {boolean} isLoading - 初期状態がローディングかどうか
  * @returns {HTMLElement} - バッジ要素
  */
-function createBadge() {
+function createBadge(isLoading = false) {
     const badge = document.createElement('div');
     badge.className = 'ai-meta-badge';
-    badge.textContent = 'View Metadata';
-    badge.title = 'Click to view image metadata';
+
+    if (isLoading) {
+        badge.classList.add('loading');
+        badge.textContent = 'Analyzing...';
+        badge.title = 'Checking for image metadata...';
+    } else {
+        badge.textContent = 'View Metadata';
+        badge.title = 'Click to view image metadata';
+    }
+
     return badge;
+}
+
+/**
+ * バッジの状態を更新
+ * @param {HTMLElement} badge - 対象のバッジ要素
+ * @param {Object|null} metadata - メタデータ（nullの場合はエラーまたはデータなし）
+ * @param {boolean} isError - エラーかどうか
+ */
+function updateBadge(badge, metadata, isError = false) {
+    badge.classList.remove('loading');
+
+    if (isError) {
+        // エラー時は通常非表示にするか、エラーアイコンにするが、
+        // 今回の要件ではメタデータがない場合はバッジを削除するため、
+        // ここでは明示的なエラー表示（赤色など）は行わない
+        // 呼び出し元で remove() される想定
+        return;
+    }
+
+    if (metadata) {
+        badge.textContent = 'View Metadata';
+
+        // ホバープレビュー用のツールチップ設定
+        const generator = detectGenerator(metadata);
+        let previewText = generator;
+
+        // プロンプトの冒頭を追加
+        const { positive } = parseMetadataToTabs(metadata);
+        if (positive) {
+            // 最初の50文字程度を表示
+            const truncatedPrompt = positive.length > 50 ? positive.substring(0, 50) + '...' : positive;
+            previewText += `\n${truncatedPrompt}`;
+        }
+
+        badge.setAttribute('data-tooltip', previewText);
+        badge.title = ''; // title属性はツールチップと競合するので削除
+    }
+}
+
+/**
+ * エラー通知を表示（設定で有効な場合のみ）
+ * @param {string} message - エラーメッセージ
+ */
+function showErrorNotification(message) {
+    // 設定で無効な場合は何もしない（呼び出し元で制御するが念のため）
+    const notification = document.createElement('div');
+    notification.className = 'ai-meta-error-notification';
+    notification.textContent = message;
+
+    document.body.appendChild(notification);
+
+    // 3秒後に消える
+    setTimeout(() => {
+        notification.style.opacity = '0';
+        notification.style.transform = 'translateY(10px)';
+        notification.addEventListener('transitionend', () => {
+            if (notification.parentNode) {
+                notification.parentNode.removeChild(notification);
+            }
+        });
+    }, 3000);
 }
 
 /**
