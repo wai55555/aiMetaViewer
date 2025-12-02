@@ -88,24 +88,48 @@ function showErrorNotification(message) {
  * @returns {string} - ツール名とバージョン（例: "NovelAI V4.5", "ComfyUI workflow", "Civitai", "Stable Diffusion WebUI"）
  */
 function detectGenerator(metadata) {
+    // Midjourney
+    // Description に "Job ID:" または "--v" (バージョンフラグ) が含まれている場合
+    if (metadata.Description) {
+        const desc = metadata.Description;
+
+        // Job ID の存在チェック（最も確実）
+        if (desc.includes('Job ID:')) {
+            // バージョン抽出 (例: "--v 7" -> "V7")
+            const versionMatch = desc.match(/--v\s+(\d+(?:\.\d+)?)/);
+            const version = versionMatch ? ` V${versionMatch[1]}` : '';
+            return `Midjourney${version}`;
+        }
+
+        // Midjourneyパラメータの存在チェック（--ar, --profile など）
+        if (desc.match(/--(?:ar|v|profile|chaos|quality|style|stylize|weird|tile|no|stop|video|seed|sref|cref)\s+/)) {
+            const versionMatch = desc.match(/--v\s+(\d+(?:\.\d+)?)/);
+            const version = versionMatch ? ` V${versionMatch[1]}` : '';
+            return `Midjourney${version}`;
+        }
+    }
+
     // NovelAI
-    if (metadata.Comment || metadata.Description) {
+    // Comment キーが存在する、または Description に NovelAI 特有のパターンがある場合
+    if (metadata.Comment) {
         let version = '';
         try {
-            // Comment内のJSONからバージョンを探す
-            if (metadata.Comment) {
-                const json = JSON.parse(metadata.Comment);
-                // inputフィールドなどからバージョンを探すヒューリスティック
-                // 例: "NovelAI Diffusion V4.5 1229B44F"
-                // JSON構造は不定だが、文字列化して検索
-                const jsonStr = JSON.stringify(json);
-                const match = jsonStr.match(/NovelAI Diffusion V([\d.]+)/);
-                if (match) {
-                    version = ` V${match[1]}`;
-                }
+            const json = JSON.parse(metadata.Comment);
+            // inputフィールドなどからバージョンを探すヒューリスティック
+            // 例: "NovelAI Diffusion V4.5 1229B44F"
+            const jsonStr = JSON.stringify(json);
+            const match = jsonStr.match(/NovelAI Diffusion V([\d.]+)/);
+            if (match) {
+                version = ` V${match[1]}`;
             }
         } catch (e) { }
         return `NovelAI${version}`;
+    }
+
+    // Description のみでは NovelAI と判定しない（Midjourneyと区別するため）
+    // ただし、Description に "NovelAI" という文字列が含まれている場合は例外
+    if (metadata.Description && metadata.Description.includes('NovelAI')) {
+        return 'NovelAI';
     }
 
     // Tensor.art
