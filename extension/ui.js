@@ -147,9 +147,15 @@ function detectGenerator(metadata) {
     }
 
     // Civitai
-    // parameters内に「Civitai metadata」という文字列がある場合
-    if (metadata.parameters && metadata.parameters.includes('Civitai metadata')) {
-        return 'Civitai';
+    // parameters内に「Civitai metadata」がある、または Version: v... がある場合
+    if (metadata.parameters) {
+        if (metadata.parameters.includes('Civitai metadata')) {
+            return 'Civitai';
+        }
+        // Version: v1.10.xxxxx などのパターンを検出 (Civitai生成画像の特徴)
+        if (metadata.parameters.match(/Version:\s*v1\.10\./)) {
+            return 'Civitai';
+        }
     }
 
     // Stable Diffusion WebUI (デフォルト)
