@@ -421,7 +421,18 @@ function createModal(metadata) {
 
             // 値が長いJSON等の場合は整形
             const valueStr = typeof value === 'object' ? JSON.stringify(value, null, 2) : String(value);
-            valueDiv.textContent = valueStr;
+
+            // parameters_settingsの場合、Model: を色付け
+            if (key === 'parameters_settings' && typeof valueStr === 'string') {
+                // Model: から次のカンマまでをハイライト
+                const highlightedValue = valueStr.replace(
+                    /(Model:\s*)([^,]+)/g,
+                    '$1<span style="color: #ff9500; font-weight: bold;">$2</span>'
+                );
+                valueDiv.innerHTML = highlightedValue;
+            } else {
+                valueDiv.textContent = valueStr;
+            }
 
             itemDiv.appendChild(keySpan);
             itemDiv.appendChild(valueDiv);
