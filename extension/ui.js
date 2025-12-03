@@ -214,14 +214,35 @@ function parseMetadataToTabs(metadata) {
             positive = metadata.Description;
             delete otherObj['Description'];
         }
-        // CommentはSettingsとしてOtherに残る
+
+        // Comment内のnegative promptを抽出 (NovelAI v3/v4/v4.5対応)
+        if (metadata.Comment) {
+            try {
+                const commentJson = JSON.parse(metadata.Comment);
+                // negative promptを検索 (v3_negative_prompt, v4_negative_prompt, v4.5_negative_prompt等)
+                for (const key in commentJson) {
+                    if (key.includes('negative')) {
+                        negative = commentJson[key];
+                        break;
+                    }
+                }
+            } catch (e) {
+                // JSON parseに失敗した場合は何もしない
+            }
+        }
+        // CommentはそのままOtherに残る
     }
 
-    // Other Settings用の文字列生成
-    let other = '';
-    if (Object.keys(otherObj).length > 0) {
-        other = JSON.stringify(otherObj, null, 2);
+    // Other Settings用のオブジェクト
+    // parameters_settingsがあれば優先的に表示
+    const other = {};
+    if (otherObj['parameters_settings']) {
+        other['parameters_settings'] = otherObj['parameters_settings'];
+        delete otherObj['parameters_settings'];
     }
+
+    // 残りのメタデータをすべてotherに追加
+    Object.assign(other, otherObj);
 
     return { positive, negative, other };
 }
@@ -323,7 +344,78 @@ function createModal(metadata) {
     // 各セクション追加
     content.appendChild(createSection('Positive Prompt', positive, 'positive-section'));
     content.appendChild(createSection('Negative Prompt', negative, 'negative-section'));
-    content.appendChild(createSection('Other Settings', other, 'other-section'));
+
+    // Other Settings セクション（特別処理）
+    const otherSection = document.createElement('div');
+    otherSection.className = 'ai-meta-section other-section';
+
+    const otherHeader = document.createElement('div');
+    otherHeader.className = 'ai-meta-section-header';
+
+    const otherLabel = document.createElement('span');
+    otherLabel.className = 'ai-meta-section-label';
+    otherLabel.textContent = 'Other Settings';
+
+    // Other全体のコピーボタン
+    const otherCopyBtn = document.createElement('button');
+    otherCopyBtn.className = 'ai-meta-copy-btn';
+    otherCopyBtn.textContent = 'Copy';
+    otherCopyBtn.setAttribute('data-tooltip', 'Copy all other settings');
+
+    // otherオブジェクトを文字列化（キー: 値の形式）
+    let otherText = '';
+    if (other && typeof other === 'object' && Object.keys(other).length > 0) {
+        for (const [key, value] of Object.entries(other)) {
+            // 値が長い場合は改行を入れる
+            const valueStr = typeof value === 'object' ? JSON.stringify(value, null, 2) : String(value);
+            otherText += `${key}:\n${valueStr}\n\n`;
+        }
+        otherText = otherText.trim();
+    }
+
+    setupCopyButton(otherCopyBtn, otherText || 'None');
+
+    otherHeader.appendChild(otherLabel);
+    otherHeader.appendChild(otherCopyBtn);
+
+    const otherTextArea = document.createElement('div');
+    otherTextArea.className = 'ai-meta-text-area';
+
+    if (other && typeof other === 'object' && Object.keys(other).length > 0) {
+        // キーと値のリスト形式で表示
+        for (const [key, value] of Object.entries(other)) {
+            const itemDiv = document.createElement('div');
+            itemDiv.className = 'ai-meta-other-item';
+            itemDiv.style.marginBottom = '12px';
+
+            const keySpan = document.createElement('div');
+            keySpan.style.fontWeight = 'bold';
+            keySpan.style.marginBottom = '4px';
+            keySpan.style.color = '#4a9eff';
+            keySpan.textContent = key;
+
+            const valueDiv = document.createElement('div');
+            valueDiv.style.whiteSpace = 'pre-wrap';
+            valueDiv.style.wordBreak = 'break-word';
+            valueDiv.style.fontFamily = 'monospace';
+            valueDiv.style.fontSize = '0.9em';
+
+            // 値が長いJSON等の場合は整形
+            const valueStr = typeof value === 'object' ? JSON.stringify(value, null, 2) : String(value);
+            valueDiv.textContent = valueStr;
+
+            itemDiv.appendChild(keySpan);
+            itemDiv.appendChild(valueDiv);
+            otherTextArea.appendChild(itemDiv);
+        }
+    } else {
+        otherTextArea.textContent = 'None';
+        otherTextArea.classList.add('empty');
+    }
+
+    otherSection.appendChild(otherHeader);
+    otherSection.appendChild(otherTextArea);
+    content.appendChild(otherSection);
 
     // フッター
     const footer = document.createElement('div');
@@ -332,12 +424,17 @@ function createModal(metadata) {
     const copyAllBtn = document.createElement('button');
     copyAllBtn.className = 'ai-meta-copy-all-btn';
     copyAllBtn.textContent = 'Copy All Data';
-    copyAllBtn.setAttribute('data-tooltip', 'Copy all metadata');
+    copyAllBtn.setAttribute('data-tooltip', 'Copy all metadata (raw format)');
 
-    // 全データ結合 (元のmetadataオブジェクト全体をJSON化)
-    const allData = JSON.stringify(metadata, null, 2);
+    // 全データをraw形式で結合（JSON化しない）
+    let allDataRaw = '';
+    for (const [key, value] of Object.entries(metadata)) {
+        const valueStr = typeof value === 'object' ? JSON.stringify(value, null, 2) : String(value);
+        allDataRaw += `${key}:\n${valueStr}\n\n`;
+    }
+    allDataRaw = allDataRaw.trim();
 
-    setupCopyButton(copyAllBtn, allData);
+    setupCopyButton(copyAllBtn, allDataRaw);
 
     footer.appendChild(copyAllBtn);
 

@@ -1,16 +1,9 @@
 // parser.js - 画像メタデータ抽出モジュール
 
 /**
- * 対象キーワードリスト
+ * 対象キーワードリスト (廃止: すべてのメタデータを取得するため)
  */
-const TARGET_KEYWORDS = [
-  'parameters',    // Stable Diffusion (A1111)
-  'prompt',        // ComfyUI
-  'workflow',      // ComfyUI
-  'generation_data', // ComfyUI
-  'Description',   // NovelAI (Prompt)
-  'Comment'        // NovelAI (Settings JSON)
-];
+// const TARGET_KEYWORDS = [ ... ];
 
 /**
  * 画像形式を判定
@@ -100,9 +93,8 @@ function extractPngMetadata(buffer) {
         const keyword = new TextDecoder('utf-8').decode(chunkData.slice(0, nullIndex));
         const text = new TextDecoder('utf-8').decode(chunkData.slice(nullIndex + 1));
 
-        if (TARGET_KEYWORDS.includes(keyword)) {
-          metadata[keyword] = text;
-        }
+        // フィルタリングを廃止し、すべて保存
+        metadata[keyword] = text;
       }
     }
 
@@ -147,9 +139,8 @@ function extractPngMetadata(buffer) {
       if (compressionFlag === 0) { // 非圧縮のみ対応
         const text = new TextDecoder('utf-8').decode(chunkData.slice(pos));
 
-        if (TARGET_KEYWORDS.includes(keyword)) {
-          metadata[keyword] = text;
-        }
+        // フィルタリングを廃止し、すべて保存
+        metadata[keyword] = text;
       }
     }
 
