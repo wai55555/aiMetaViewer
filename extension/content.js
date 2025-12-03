@@ -695,42 +695,63 @@ async function fetchLocalImage(img) {
     }
 
     // 2. XMLHttpRequestで取得 (一発勝負)
-    return new Promise((resolve) => {
-        const xhr = new XMLHttpRequest();
-        xhr.open('GET', img.src, true);
-        xhr.responseType = 'arraybuffer';
+    // 日本語ファイル名などの場合、デコードが必要な場合とそうでない場合があるため、
+    // まずはそのまま試し、だめならデコードして試す（XHRはローカルパスの扱いに癖がある）
 
-        xhr.onload = function () {
-            // ローカルファイルの場合、成功時は status === 0 または 200
-            if (xhr.status === 0 || xhr.status === 200) {
-                try {
-                    const blob = new Blob([xhr.response]);
-                    const reader = new FileReader();
-                    reader.onloadend = () => resolve(reader.result);
-                    reader.onerror = () => resolve(null);
-                    reader.readAsDataURL(blob);
-                } catch (e) {
-                    if (settings.debugMode) console.log('[AI Meta Viewer] Blob/FileReader error:', e);
+    const tryFetch = (url) => {
+        return new Promise((resolve) => {
+            const xhr = new XMLHttpRequest();
+            xhr.open('GET', url, true);
+            xhr.responseType = 'arraybuffer';
+
+            xhr.onload = function () {
+                if (xhr.status === 0 || xhr.status === 200) {
+                    try {
+                        const blob = new Blob([xhr.response]);
+                        const reader = new FileReader();
+                        reader.onloadend = () => resolve(reader.result);
+                        reader.onerror = () => resolve(null);
+                        reader.readAsDataURL(blob);
+                    } catch (e) {
+                        if (settings.debugMode) console.log('[AI Meta Viewer] Blob/FileReader error:', e);
+                        resolve(null);
+                    }
+                } else {
                     resolve(null);
                 }
-            } else {
-                // 権限エラーなどの場合
-                if (settings.debugMode) console.log('[AI Meta Viewer] XHR failed status:', xhr.status);
+            };
+
+            xhr.onerror = function () {
+                resolve(null);
+            };
+
+            try {
+                xhr.send();
+            } catch (e) {
                 resolve(null);
             }
-        };
+        });
+    };
 
-        xhr.onerror = function () {
-            // アクセス拒否などのネットワークエラー
-            if (settings.debugMode) console.log('[AI Meta Viewer] XHR network error (likely permission denied)');
-            resolve(null);
-        };
+    // まず img.src (エンコード済み) で試す
+    let result = await tryFetch(img.src);
 
+    // 失敗した場合、かつURLに%が含まれているなら、デコードして試す
+    if (!result && img.src.includes('%')) {
         try {
-            xhr.send();
+            const decodedUrl = decodeURIComponent(img.src);
+            if (decodedUrl !== img.src) {
+                if (settings.debugMode) console.log('[AI Meta Viewer] Retrying with decoded URL:', decodedUrl);
+                result = await tryFetch(decodedUrl);
+            }
         } catch (e) {
-            if (settings.debugMode) console.log('[AI Meta Viewer] XHR send failed:', e);
-            resolve(null);
+            // デコード失敗時は無視
         }
-    });
+    }
+
+    if (!result && settings.debugMode) {
+        console.log('[AI Meta Viewer] Failed to fetch local image:', img.src);
+    }
+
+    return result;
 }

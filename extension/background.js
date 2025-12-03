@@ -122,6 +122,12 @@ async function handleFetchImageMetadata(imageUrl, base64Data = null) {
             const response = await fetch(base64Data);
             buffer = await response.arrayBuffer();
         } else {
+            // file:// プロトコルの場合、Extensionの権限上 background から直接 fetch できないためエラーにする
+            if (imageUrl.startsWith('file://')) {
+                debugLog('[AI Meta Viewer] Skipping direct fetch for local file:', imageUrl);
+                return { success: false, error: 'Local file access denied in background script' };
+            }
+
             // 通常のURLフェッチ
             const response = await fetch(imageUrl);
 
