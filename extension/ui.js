@@ -63,6 +63,8 @@ function updateBadge(badge, metadata, isError = false) {
  * @param {string} message - エラーメッセージ
  */
 function showErrorNotification(message) {
+    if (!document.body) return;
+
     // 設定で無効な場合は何もしない（呼び出し元で制御するが念のため）
     const notification = document.createElement('div');
     notification.className = 'ai-meta-error-notification';
@@ -446,8 +448,12 @@ function createModal(metadata) {
 
     // イベントハンドラ
     const close = () => {
-        document.body.removeChild(overlay);
-        document.body.style.overflow = ''; // スクロールロック解除
+        if (document.body) {
+            if (overlay.parentNode === document.body) {
+                document.body.removeChild(overlay);
+            }
+            document.body.style.overflow = ''; // スクロールロック解除
+        }
     };
 
     closeBtn.addEventListener('click', close);
@@ -470,7 +476,9 @@ function createModal(metadata) {
     document.addEventListener('keydown', escHandler);
 
     // スクロールロック
-    document.body.style.overflow = 'hidden';
+    if (document.body) {
+        document.body.style.overflow = 'hidden';
+    }
 
     return overlay;
 }

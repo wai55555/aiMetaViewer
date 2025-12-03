@@ -303,6 +303,15 @@ async function checkImageMetadata(img) {
             removeAnalyzingBadge(analyzingBadge);
         }
 
+        // Celsys Studio Tool (CLIP STUDIO PAINT) の場合は除外
+        if (metadata && metadata['Software'] && metadata['Software'].includes('Celsys Studio Tool')) {
+            if (settings.debugMode) {
+                console.log('[AI Meta Viewer] Ignored Celsys Studio Tool metadata');
+            }
+            processedImages.delete(img);
+            return;
+        }
+
         // メタデータが存在する場合、バッジを追加
         if (metadata && Object.keys(metadata).length > 0) {
             addBadgeToImage(img, metadata);
@@ -337,6 +346,8 @@ async function checkImageMetadata(img) {
  * @returns {Object} バッジ要素とクリーンアップ関数を含むオブジェクト
  */
 function addAnalyzingBadge(img) {
+    if (!document.body) return null; // bodyが存在しない場合は何もしない
+
     const badge = document.createElement('div');
     badge.className = 'ai-meta-badge ai-meta-badge-analyzing';
     badge.textContent = 'Analyzing';
@@ -454,7 +465,7 @@ function addBadgeToImage(img, metadata) {
         e.stopPropagation();
 
         const currentMetadata = badge._metadata;
-        if (currentMetadata) {
+        if (currentMetadata && document.body) {
             const modal = createModal(currentMetadata); // ui.jsの関数
             document.body.appendChild(modal);
         }
@@ -490,6 +501,8 @@ function addBadgeToImage(img, metadata) {
     } else {
         // --- Webサイト表示の場合 (fixed配置でスクロールに追従) ---
         // position: fixed でビューポート座標を使用
+        if (!document.body) return; // bodyが存在しない場合は何もしない
+
         badge.style.position = 'fixed';
         document.body.appendChild(badge);
 
@@ -623,6 +636,8 @@ function observeImages() {
  * @returns {boolean}
  */
 function isDirectImageView() {
+    if (!document.body) return false; // bodyが存在しない場合はfalse
+
     // Content-Typeが画像の場合、または<img>タグが1つだけでbodyの直下にある場合
     const images = document.querySelectorAll('img');
     if (images.length === 1 && images[0].parentElement === document.body) {
@@ -639,21 +654,23 @@ function isDirectImageView() {
  * 直接表示画像の処理
  */
 function handleDirectImageView() {
-    const img = document.querySelector('img');
-    if (img) {
-        // スタイル調整
-        document.body.style.backgroundColor = '#0e0e0e';
-        document.body.style.display = 'flex';
-        document.body.style.justifyContent = 'center';
-        document.body.style.alignItems = 'center';
-        document.body.style.minHeight = '100vh';
-        document.body.style.margin = '0';
+    if (!document.body) return; // bodyが存在しない場合は何もしない
 
-        img.style.maxWidth = '100%';
-        img.style.height = 'auto';
-        img.style.boxShadow = '0 0 20px rgba(0,0,0,0.5)';
-        checkImageMetadata(img);
-    }
+    const img = document.querySelector('img');
+    if (!img) return;
+
+    // スタイル調整
+    document.body.style.backgroundColor = '#0e0e0e';
+    document.body.style.display = 'flex';
+    document.body.style.justifyContent = 'center';
+    document.body.style.alignItems = 'center';
+    document.body.style.minHeight = '100vh';
+    document.body.style.margin = '0';
+
+    img.style.maxWidth = '100%';
+    img.style.height = 'auto';
+    img.style.boxShadow = '0 0 20px rgba(0,0,0,0.5)';
+    checkImageMetadata(img);
 }
 
 /**
