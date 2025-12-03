@@ -221,11 +221,28 @@ function parseMetadataToTabs(metadata) {
         if (metadata.Comment) {
             try {
                 const commentJson = JSON.parse(metadata.Comment);
-                // negative promptを検索 (v3_negative_prompt, v4_negative_prompt, v4.5_negative_prompt等)
-                for (const key in commentJson) {
-                    if (key.includes('negative')) {
-                        negative = commentJson[key];
-                        break;
+
+                // 優先度1: "uc" キー (Undesired Content)
+                if (commentJson.uc) {
+                    negative = commentJson.uc;
+                } else {
+                    // 優先度2: "negative" を含むキーを検索
+                    for (const key in commentJson) {
+                        if (key.includes('negative')) {
+                            const val = commentJson[key];
+                            if (typeof val === 'string') {
+                                negative = val;
+                            } else if (typeof val === 'object' && val !== null) {
+                                // v4_negative_prompt: { caption: { base_caption: "..." } }
+                                if (val.caption && val.caption.base_caption) {
+                                    negative = val.caption.base_caption;
+                                } else {
+                                    // 構造が不明な場合はJSON文字列化
+                                    negative = JSON.stringify(val, null, 2);
+                                }
+                            }
+                            break;
+                        }
                     }
                 }
             } catch (e) {
