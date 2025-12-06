@@ -256,8 +256,10 @@
                     <label class="setting-label">
                         <input type="checkbox" id="showAnalyzingBadge">
                         <div class="setting-label-text">
-                            <div class="setting-label-title" data-i18n="labelShowAnalyzingBadge">Show Analyzing Badge</div>
-                            <div class="setting-label-desc" data-i18n="descShowAnalyzingBadge">Display "Analyzing..." badge while checking metadata (Pixiv only)</div>
+                            <div class="setting-label-title" data-i18n="labelShowAnalyzingBadge">Show Analyzing Badge
+                            </div>
+                            <div class="setting-label-desc" data-i18n="descShowAnalyzingBadge">Display "Analyzing..."
+                                badge while checking metadata (Pixiv only)</div>
                         </div>
                     </label>
                 </div>
@@ -305,6 +307,38 @@
                         Clear metadata cache to free up memory
                     </p>
                     <button class="btn btn-danger" id="clearCache" data-i18n="btnClearCache">🗑️ Clear Cache</button>
+                </div>
+            </div>
+
+            <!-- 除外メタデータ設定 -->
+            <div class="section">
+                <h2 class="section-title" data-i18n="sectionIgnoredMetadata">Ignored Metadata</h2>
+
+                <div class="setting-item">
+                    <label for="ignoredMetadataKeys"
+                        style="display:block; margin-bottom:8px; font-weight:500; color:#333;"
+                        data-i18n="labelIgnoredMetadataKeys">
+                        Ignored Metadata Keys (one per line)
+                    </label>
+                    <textarea id="ignoredMetadataKeys" rows="3"
+                        style="width:100%; padding:10px; border:2px solid #e0e0e0; border-radius:8px; font-family:monospace; resize: vertical;"
+                        placeholder="XML:com.adobe.xmp"></textarea>
+                    <div class="input-helper" data-i18n="descIgnoredMetadataKeys">
+                        If a metadata key matches any of these, the image will be ignored.
+                    </div>
+                </div>
+
+                <div class="setting-item">
+                    <label for="ignoredSoftware" style="display:block; margin-bottom:8px; font-weight:500; color:#333;"
+                        data-i18n="labelIgnoredSoftware">
+                        Ignored Software (one per line)
+                    </label>
+                    <textarea id="ignoredSoftware" rows="3"
+                        style="width:100%; padding:10px; border:2px solid #e0e0e0; border-radius:8px; font-family:monospace; resize: vertical;"
+                        placeholder="Adobe Photoshop&#10;Celsys Studio Tool"></textarea>
+                    <div class="input-helper" data-i18n="descIgnoredSoftware">
+                        If the "Software" metadata contains any of these strings, the image will be ignored.
+                    </div>
                 </div>
             </div>
 

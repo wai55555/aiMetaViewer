@@ -6,7 +6,9 @@ let settings = {
     errorNotification: false,
     minPixelCount: 250000, // 500x500
     showAnalyzingBadge: true,
-    excludedSites: []
+    excludedSites: [],
+    ignoredMetadataKeys: ['XML:com.adobe.xmp'],
+    ignoredSoftware: ['Adobe Photoshop', 'Adobe ImageReady', 'Celsys Studio Tool', 'GIMP', 'Paint.NET']
 };
 
 // 設定を読み込む
@@ -303,13 +305,37 @@ async function checkImageMetadata(img) {
             removeAnalyzingBadge(analyzingBadge);
         }
 
-        // Celsys Studio Tool (CLIP STUDIO PAINT) の場合は除外
-        if (metadata && metadata['Software'] && metadata['Software'].includes('Celsys Studio Tool')) {
-            if (settings.debugMode) {
-                console.log('[AI Meta Viewer] Ignored Celsys Studio Tool metadata');
+        // --- メタデータフィルタリング (除外判定) ---
+
+        // 1. キーによる除外 (Ignored Metadata Keys)
+        // 設定されたキーが含まれている場合、その画像を除外
+        if (settings.ignoredMetadataKeys && settings.ignoredMetadataKeys.length > 0) {
+            const hasIgnoredKey = Object.keys(metadata).some(key =>
+                settings.ignoredMetadataKeys.includes(key)
+            );
+
+            if (hasIgnoredKey) {
+                if (settings.debugMode) {
+                    console.log('[AI Meta Viewer] Ignored image due to ignored metadata key');
+                }
+                processedImages.delete(img);
+                return;
             }
-            processedImages.delete(img);
-            return;
+        }
+
+        // 2. ソフトウェア名による除外 (Ignored Software)
+        // Softwareタグの値に設定された文字列が含まれている場合、その画像を除外
+        if (metadata['Software'] && settings.ignoredSoftware && settings.ignoredSoftware.length > 0) {
+            const software = metadata['Software'];
+            const isIgnoredSoftware = settings.ignoredSoftware.some(s => software.includes(s));
+
+            if (isIgnoredSoftware) {
+                if (settings.debugMode) {
+                    console.log('[AI Meta Viewer] Ignored software:', software);
+                }
+                processedImages.delete(img);
+                return;
+            }
         }
 
         // メタデータが存在する場合、バッジを追加

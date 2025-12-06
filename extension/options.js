@@ -6,7 +6,9 @@ const DEFAULT_SETTINGS = {
     errorNotification: false,
     minPixelCount: 250000,
     showAnalyzingBadge: true,
-    excludedSites: []
+    excludedSites: [],
+    ignoredMetadataKeys: ['XML:com.adobe.xmp'],
+    ignoredSoftware: ['Adobe Photoshop', 'Adobe ImageReady', 'Celsys Studio Tool', 'GIMP', 'Paint.NET']
 };
 
 // DOM Elements
@@ -15,6 +17,8 @@ const errorNotificationCheckbox = document.getElementById('errorNotification');
 const minPixelCountInput = document.getElementById('minPixelCount');
 const showAnalyzingBadgeCheckbox = document.getElementById('showAnalyzingBadge');
 const excludedSitesTextarea = document.getElementById('excludedSites');
+const ignoredMetadataKeysTextarea = document.getElementById('ignoredMetadataKeys');
+const ignoredSoftwareTextarea = document.getElementById('ignoredSoftware');
 const saveBtn = document.getElementById('saveBtn');
 const resetBtn = document.getElementById('resetBtn');
 const clearCacheBtn = document.getElementById('clearCache');
@@ -50,6 +54,8 @@ async function loadSettings() {
     if (minPixelCountInput) minPixelCountInput.value = settings.minPixelCount;
     if (showAnalyzingBadgeCheckbox) showAnalyzingBadgeCheckbox.checked = settings.showAnalyzingBadge;
     if (excludedSitesTextarea) excludedSitesTextarea.value = settings.excludedSites.join('\n');
+    if (ignoredMetadataKeysTextarea) ignoredMetadataKeysTextarea.value = settings.ignoredMetadataKeys.join('\n');
+    if (ignoredSoftwareTextarea) ignoredSoftwareTextarea.value = settings.ignoredSoftware.join('\n');
 }
 
 // Save settings
@@ -59,12 +65,24 @@ async function saveSettings() {
         .map(line => line.trim())
         .filter(line => line.length > 0) : [];
 
+    const ignoredMetadataKeys = ignoredMetadataKeysTextarea ? ignoredMetadataKeysTextarea.value
+        .split('\n')
+        .map(line => line.trim())
+        .filter(line => line.length > 0) : [];
+
+    const ignoredSoftware = ignoredSoftwareTextarea ? ignoredSoftwareTextarea.value
+        .split('\n')
+        .map(line => line.trim())
+        .filter(line => line.length > 0) : [];
+
     const settings = {
         debugMode: debugModeCheckbox ? debugModeCheckbox.checked : false,
         errorNotification: errorNotificationCheckbox ? errorNotificationCheckbox.checked : false,
         minPixelCount: parseInt(minPixelCountInput ? minPixelCountInput.value : '250000', 10) || 250000,
         showAnalyzingBadge: showAnalyzingBadgeCheckbox ? showAnalyzingBadgeCheckbox.checked : true,
-        excludedSites: excludedSites
+        excludedSites: excludedSites,
+        ignoredMetadataKeys: ignoredMetadataKeys,
+        ignoredSoftware: ignoredSoftware
     };
 
     // Validation
