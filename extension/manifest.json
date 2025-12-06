@@ -3,16 +3,14 @@
     "name": "__MSG_appName__",
     "description": "__MSG_appDesc__",
     "default_locale": "en",
-    "version": "1.0.0",
+    "version": "1.2.0",
     "permissions": [
         "activeTab",
         "storage",
-        "declarativeNetRequest",
-        "scripting"
+        "declarativeNetRequest"
     ],
     "host_permissions": [
-        "<all_urls>",
-        "file:///*"
+        "<all_urls>"
     ],
     "declarative_net_request": {
         "rule_resources": [
@@ -29,8 +27,7 @@
     "content_scripts": [
         {
             "matches": [
-                "http://*/*",
-                "https://*/*"
+                "<all_urls>"
             ],
             "js": [
                 "ui.js",

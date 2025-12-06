@@ -4,17 +4,37 @@
 console.log('[AI Meta Viewer] content.js loaded, URL:', window.location.href);
 
 // file:// URL では console.log が表示されないため、DOM に表示するデバッグ関数
+let debugLogContainer = null;
+const MAX_DEBUG_LOGS = 20; // 最大保持ログ数
+
 function debugLog(message, data = null) {
     console.log(message, data); // 通常のコンソールにも出力（http/https では表示される）
 
     // debugMode が有効で、かつ file:// URL の場合のみ DOM に表示
     if (settings && settings.debugMode && window.location.protocol === 'file:') {
-        const debugDiv = document.createElement('div');
-        debugDiv.style.cssText = 'position:fixed;bottom:0;left:0;background:rgba(0,0,0,0.8);color:#0f0;padding:5px;z-index:999999;font-size:12px;font-family:monospace;max-width:100%;word-wrap:break-word;';
-        debugDiv.textContent = `[DEBUG] ${message}${data ? ': ' + JSON.stringify(data).substring(0, 100) : ''}`;
-        if (document.body) {
-            document.body.appendChild(debugDiv);
-            setTimeout(() => debugDiv.remove(), 2000);
+        // コンテナがまだない場合は作成
+        if (!debugLogContainer && document.body) {
+            debugLogContainer = document.createElement('div');
+            debugLogContainer.id = 'ai-meta-viewer-debug-log';
+            debugLogContainer.style.cssText = 'position:fixed;bottom:0;left:0;right:0;max-height:200px;overflow-y:auto;background:rgba(0,0,0,0.9);color:#0f0;padding:5px;z-index:999999;font-size:11px;font-family:monospace;border-top:2px solid #0f0;';
+            document.body.appendChild(debugLogContainer);
+        }
+
+        if (debugLogContainer) {
+            const logEntry = document.createElement('div');
+            logEntry.style.cssText = 'padding:2px 0;border-bottom:1px solid rgba(0,255,0,0.2);';
+            const timestamp = new Date().toLocaleTimeString('ja-JP', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit', fractionalSecondDigits: 3 });
+            logEntry.textContent = `[${timestamp}] ${message}${data ? ': ' + JSON.stringify(data).substring(0, 150) : ''}`;
+
+            debugLogContainer.appendChild(logEntry);
+
+            // 最大数を超えたら古いログを削除
+            while (debugLogContainer.children.length > MAX_DEBUG_LOGS) {
+                debugLogContainer.removeChild(debugLogContainer.firstChild);
+            }
+
+            // 最新ログまでスクロール
+            debugLogContainer.scrollTop = debugLogContainer.scrollHeight;
         }
     }
 }
@@ -230,11 +250,11 @@ const SiteAdapters = [
  * @param {HTMLImageElement} img - 対象画像要素
  */
 async function checkImageMetadata(img) {
-    console.log('[AI Meta Viewer] checkImageMetadata() called for:', img.src);
+    debugLog('[AI Meta Viewer] checkImageMetadata() called for:', img.src);
 
     // 重複チェック
     if (processedImages.has(img)) {
-        console.log('[AI Meta Viewer] Image already processed, skipping');
+        debugLog('[AI Meta Viewer] Image already processed, skipping');
         return;
     }
 
@@ -313,7 +333,7 @@ async function checkImageMetadata(img) {
             // ローカルファイル (file://) の場合、content.js側でデータを取得して送信
             if (url.startsWith('file://')) {
                 if (settings.debugMode) {
-                    console.log('[AI Meta Viewer] Fetching local file data:', url);
+                    debugLog('[AI Meta Viewer] Fetching local file data:', url);
                 }
                 // img要素を渡す
                 const base64Data = await fetchLocalImage(img);
@@ -723,7 +743,7 @@ function isDirectImageView() {
  * 直接表示画像の処理
  */
 function handleDirectImageView() {
-    console.log('[AI Meta Viewer] handleDirectImageView() called');
+    debugLog('[AI Meta Viewer] handleDirectImageView() called');
     if (!document.body) {
         console.log('[AI Meta Viewer] No document.body, returning');
         return;
@@ -735,7 +755,7 @@ function handleDirectImageView() {
         return;
     }
 
-    console.log('[AI Meta Viewer] Found img element:', img.src);
+    debugLog('[AI Meta Viewer] Found img element:', img.src);
 
     // スタイル調整
     document.body.style.backgroundColor = '#0e0e0e';
@@ -759,18 +779,28 @@ function handleDirectImageView() {
  * @param {HTMLImageElement} img 
  * @returns {Promise<string|null>} Base64 data URL
  */
+/**
+ * ローカル画像 (file://) をXMLHttpRequestで読み取りBase64化する
+ * リトライは行わず、失敗時は即座にnullを返す（権限エラー等のため）
+ * @param {HTMLImageElement} img 
+ * @returns {Promise<string|null>} Base64 data URL
+ */
 async function fetchLocalImage(img) {
+    debugLog('[AI Meta Viewer] fetchLocalImage() called for:', img.src);
+
     // 1. 画像のロード完了を待機 (念のため)
     // タイムアウトを2秒に設定
     if (!img.complete) {
+        debugLog('[AI Meta Viewer] Image not complete, waiting...');
         try {
             await Promise.race([
                 img.decode(),
                 new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout')), 2000))
             ]);
+            debugLog('[AI Meta Viewer] Image decode success');
         } catch (e) {
             // ロード待機に失敗しても、ファイルアクセス自体は試行してみる
-            if (settings.debugMode) console.log('[AI Meta Viewer] Image decode wait failed:', e.message);
+            debugLog('[AI Meta Viewer] Image decode wait failed (continuing anyway):', e.message);
         }
     }
 
@@ -786,30 +816,41 @@ async function fetchLocalImage(img) {
                 try {
                     const blob = new Blob([xhr.response]);
                     const reader = new FileReader();
-                    reader.onloadend = () => resolve(reader.result);
-                    reader.onerror = () => resolve(null);
+                    reader.onloadend = () => {
+                        if (reader.result) {
+                            debugLog('[AI Meta Viewer] File read successfully. Size:', reader.result.length);
+                            resolve(reader.result);
+                        } else {
+                            debugLog('[AI Meta Viewer] FileReader result is empty');
+                            resolve(null);
+                        }
+                    };
+                    reader.onerror = (e) => {
+                        debugLog('[AI Meta Viewer] FileReader error:', reader.error);
+                        resolve(null);
+                    };
                     reader.readAsDataURL(blob);
                 } catch (e) {
-                    if (settings.debugMode) console.log('[AI Meta Viewer] Blob/FileReader error:', e);
+                    debugLog('[AI Meta Viewer] Blob/FileReader processing error:', e);
                     resolve(null);
                 }
             } else {
                 // 権限エラーなどの場合
-                if (settings.debugMode) console.log('[AI Meta Viewer] XHR failed status:', xhr.status);
+                debugLog('[AI Meta Viewer] XHR failed status:', xhr.status);
                 resolve(null);
             }
         };
 
-        xhr.onerror = function () {
+        xhr.onerror = function (e) {
             // アクセス拒否などのネットワークエラー
-            if (settings.debugMode) console.log('[AI Meta Viewer] XHR network error (likely permission denied)');
+            debugLog('[AI Meta Viewer] XHR network error (likely permission denied):', e);
             resolve(null);
         };
 
         try {
             xhr.send();
         } catch (e) {
-            if (settings.debugMode) console.log('[AI Meta Viewer] XHR send failed:', e);
+            debugLog('[AI Meta Viewer] XHR send failed:', e);
             resolve(null);
         }
     });
