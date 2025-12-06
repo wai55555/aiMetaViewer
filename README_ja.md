@@ -2,6 +2,8 @@
 
 ![](https://raw.githubusercontent.com/wai55555/aiMetaViewer/refs/heads/main/sample/sample_civitai.png)
 
+[Chrome Web Store](https://chromewebstore.google.com/detail/ai-meta-viewer/glggkpjfgbabooefiijgnaemfabdmkgf?hl=en&authuser=5)
+
 AI生成画像のメタデータ（プロンプト、設定情報など）をブラウザ上で簡単に閲覧できるChrome拡張機能です。
 Webページ上の画像を自動的に解析し、メタデータが含まれている場合に表示します。
 
@@ -29,8 +31,10 @@ Webページ上の画像を自動的に解析し、メタデータが含まれ�
   - JSONデータの整形表示
 
 ## 🚀 インストール方法
+[Chrome Web Store](https://chromewebstore.google.com/detail/ai-meta-viewer/glggkpjfgbabooefiijgnaemfabdmkgf?hl=en&authuser=5)
 
-この拡張機能はChromeウェブストアにはまだ公開されていません。以下の手順で手動インストールしてください。
+
+最新版は、以下の手順で手動インストールしてください。
 
 ![](https://raw.githubusercontent.com/wai55555/aiMetaViewer/refs/heads/main/sample/code_download_zip.png)
 

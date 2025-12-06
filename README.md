@@ -4,6 +4,8 @@
 
 ![](https://raw.githubusercontent.com/wai55555/aiMetaViewer/refs/heads/main/sample/sample_civitai.png)
 
+[Chrome Web Store](https://chromewebstore.google.com/detail/ai-meta-viewer/glggkpjfgbabooefiijgnaemfabdmkgf?hl=en&authuser=5)
+
 A Chrome extension that allows you to easily view metadata (prompts, generation settings, etc.) of AI-generated images directly in your browser.
 It automatically analyzes images on web pages and displays a badge if metadata is detected.
 
@@ -41,7 +43,9 @@ Right-click the extension icon -> "Options" to configure:
 
 ## 🚀 Installation
 
-This extension is not yet available on the Chrome Web Store. Please install it manually:
+[Chrome Web Store](https://chromewebstore.google.com/detail/ai-meta-viewer/glggkpjfgbabooefiijgnaemfabdmkgf?hl=en&authuser=5)
+
+Please manually install the latest version using the following steps.
 
 ![](https://raw.githubusercontent.com/wai55555/aiMetaViewer/refs/heads/main/sample/code_download_zip.png)
 
