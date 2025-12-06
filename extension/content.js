@@ -1,5 +1,8 @@
 // content.js - Content Script for AI Image Metadata Viewer
 
+// スクリプト読み込み確認
+console.log('[AI Meta Viewer] content.js loaded, URL:', window.location.href);
+
 // 設定のデフォルト値
 let settings = {
     debugMode: false,
@@ -14,8 +17,8 @@ let settings = {
 // 設定を読み込む
 async function loadSettings() {
     try {
-        const stored = await chrome.storage.sync.get(settings);
-        settings = { ...settings, ...stored };
+        const stored = await chrome.storage.sync.get(null); // すべての保存済み設定を取得
+        settings = { ...settings, ...stored }; // デフォルト値に保存済み値を上書き
     } catch (e) {
         console.error('Failed to load settings:', e);
     }
@@ -50,26 +53,33 @@ function isExcludedUrl() {
 
 // 初期化時に設定を読み込む
 loadSettings().then(() => {
+    console.log('[AI Meta Viewer] Settings loaded:', settings);
+
     // 除外サイトチェック
     if (isExcludedUrl()) {
-        if (settings.debugMode) {
-            console.log('[AI Meta Viewer] Site excluded by settings:', window.location.href);
-        }
+        console.log('[AI Meta Viewer] Site excluded by settings:', window.location.href);
         return;
     }
 
+    console.log('[AI Meta Viewer] Initializing extension on:', window.location.href);
+
     // 初期化実行
     if (document.readyState === 'loading') {
+        console.log('[AI Meta Viewer] Document still loading, waiting for DOMContentLoaded');
         document.addEventListener('DOMContentLoaded', init);
     } else {
+        console.log('[AI Meta Viewer] Document ready, calling init()');
         init();
     }
 });
 
 function init() {
+    console.log('[AI Meta Viewer] init() called');
     if (isDirectImageView()) {
+        console.log('[AI Meta Viewer] Direct image view detected');
         handleDirectImageView();
     } else {
+        console.log('[AI Meta Viewer] Normal page view, starting image observation');
         observeImages();
     }
 }
@@ -204,11 +214,19 @@ const SiteAdapters = [
  * @param {HTMLImageElement} img - 対象画像要素
  */
 async function checkImageMetadata(img) {
+    console.log('[AI Meta Viewer] checkImageMetadata() called for:', img.src);
+
     // 重複チェック
-    if (processedImages.has(img)) return;
+    if (processedImages.has(img)) {
+        console.log('[AI Meta Viewer] Image already processed, skipping');
+        return;
+    }
 
     const src = img.src;
-    if (!src) return;
+    if (!src) {
+        console.log('[AI Meta Viewer] No src, skipping');
+        return;
+    }
 
     // ターゲットURLの解決
     let targetUrl = src;
@@ -278,10 +296,20 @@ async function checkImageMetadata(img) {
 
             // ローカルファイル (file://) の場合、content.js側でデータを取得して送信
             if (url.startsWith('file://')) {
+                if (settings.debugMode) {
+                    console.log('[AI Meta Viewer] Fetching local file data:', url);
+                }
                 // img要素を渡す
                 const base64Data = await fetchLocalImage(img);
                 if (base64Data) {
                     message.imageData = base64Data;
+                    if (settings.debugMode) {
+                        console.log('[AI Meta Viewer] Local file data fetched successfully');
+                    }
+                } else {
+                    if (settings.debugMode) {
+                        console.log('[AI Meta Viewer] Failed to fetch local file data');
+                    }
                 }
             }
 
@@ -307,39 +335,37 @@ async function checkImageMetadata(img) {
 
         // --- メタデータフィルタリング (除外判定) ---
 
-        // 1. キーによる除外 (Ignored Metadata Keys)
-        // 設定されたキーが含まれている場合、その画像を除外
-        if (settings.ignoredMetadataKeys && settings.ignoredMetadataKeys.length > 0) {
-            const hasIgnoredKey = Object.keys(metadata).some(key =>
-                settings.ignoredMetadataKeys.includes(key)
-            );
-
-            if (hasIgnoredKey) {
-                if (settings.debugMode) {
-                    console.log('[AI Meta Viewer] Ignored image due to ignored metadata key');
-                }
-                processedImages.delete(img);
-                return;
-            }
-        }
-
-        // 2. ソフトウェア名による除外 (Ignored Software)
-        // Softwareタグの値に設定された文字列が含まれている場合、その画像を除外
-        if (metadata['Software'] && settings.ignoredSoftware && settings.ignoredSoftware.length > 0) {
-            const software = metadata['Software'];
-            const isIgnoredSoftware = settings.ignoredSoftware.some(s => software.includes(s));
-
-            if (isIgnoredSoftware) {
-                if (settings.debugMode) {
-                    console.log('[AI Meta Viewer] Ignored software:', software);
-                }
-                processedImages.delete(img);
-                return;
-            }
-        }
-
-        // メタデータが存在する場合、バッジを追加
         if (metadata && Object.keys(metadata).length > 0) {
+            // 1. キーによる除外 (Ignored Metadata Keys)
+            if (settings.ignoredMetadataKeys && Array.isArray(settings.ignoredMetadataKeys) && settings.ignoredMetadataKeys.length > 0) {
+                const hasIgnoredKey = Object.keys(metadata).some(key =>
+                    settings.ignoredMetadataKeys.includes(key)
+                );
+
+                if (hasIgnoredKey) {
+                    if (settings.debugMode) {
+                        console.log('[AI Meta Viewer] Ignored image due to ignored metadata key');
+                    }
+                    processedImages.delete(img);
+                    return;
+                }
+            }
+
+            // 2. ソフトウェア名による除外 (Ignored Software)
+            if (metadata['Software'] && settings.ignoredSoftware && Array.isArray(settings.ignoredSoftware) && settings.ignoredSoftware.length > 0) {
+                const software = metadata['Software'];
+                const isIgnoredSoftware = settings.ignoredSoftware.some(s => software.includes(s));
+
+                if (isIgnoredSoftware) {
+                    if (settings.debugMode) {
+                        console.log('[AI Meta Viewer] Ignored software:', software);
+                    }
+                    processedImages.delete(img);
+                    return;
+                }
+            }
+
+            // バッジを追加
             addBadgeToImage(img, metadata);
         } else {
             // メタデータが空の場合は削除
@@ -680,10 +706,19 @@ function isDirectImageView() {
  * 直接表示画像の処理
  */
 function handleDirectImageView() {
-    if (!document.body) return; // bodyが存在しない場合は何もしない
+    console.log('[AI Meta Viewer] handleDirectImageView() called');
+    if (!document.body) {
+        console.log('[AI Meta Viewer] No document.body, returning');
+        return;
+    }
 
     const img = document.querySelector('img');
-    if (!img) return;
+    if (!img) {
+        console.log('[AI Meta Viewer] No img element found');
+        return;
+    }
+
+    console.log('[AI Meta Viewer] Found img element:', img.src);
 
     // スタイル調整
     document.body.style.backgroundColor = '#0e0e0e';
@@ -696,6 +731,8 @@ function handleDirectImageView() {
     img.style.maxWidth = '100%';
     img.style.height = 'auto';
     img.style.boxShadow = '0 0 20px rgba(0,0,0,0.5)';
+
+    console.log('[AI Meta Viewer] Calling checkImageMetadata()');
     checkImageMetadata(img);
 }
 
@@ -721,63 +758,42 @@ async function fetchLocalImage(img) {
     }
 
     // 2. XMLHttpRequestで取得 (一発勝負)
-    // 日本語ファイル名などの場合、デコードが必要な場合とそうでない場合があるため、
-    // まずはそのまま試し、だめならデコードして試す（XHRはローカルパスの扱いに癖がある）
+    return new Promise((resolve) => {
+        const xhr = new XMLHttpRequest();
+        xhr.open('GET', img.src, true);
+        xhr.responseType = 'arraybuffer';
 
-    const tryFetch = (url) => {
-        return new Promise((resolve) => {
-            const xhr = new XMLHttpRequest();
-            xhr.open('GET', url, true);
-            xhr.responseType = 'arraybuffer';
-
-            xhr.onload = function () {
-                if (xhr.status === 0 || xhr.status === 200) {
-                    try {
-                        const blob = new Blob([xhr.response]);
-                        const reader = new FileReader();
-                        reader.onloadend = () => resolve(reader.result);
-                        reader.onerror = () => resolve(null);
-                        reader.readAsDataURL(blob);
-                    } catch (e) {
-                        if (settings.debugMode) console.log('[AI Meta Viewer] Blob/FileReader error:', e);
-                        resolve(null);
-                    }
-                } else {
+        xhr.onload = function () {
+            // ローカルファイルの場合、成功時は status === 0 または 200
+            if (xhr.status === 0 || xhr.status === 200) {
+                try {
+                    const blob = new Blob([xhr.response]);
+                    const reader = new FileReader();
+                    reader.onloadend = () => resolve(reader.result);
+                    reader.onerror = () => resolve(null);
+                    reader.readAsDataURL(blob);
+                } catch (e) {
+                    if (settings.debugMode) console.log('[AI Meta Viewer] Blob/FileReader error:', e);
                     resolve(null);
                 }
-            };
-
-            xhr.onerror = function () {
-                resolve(null);
-            };
-
-            try {
-                xhr.send();
-            } catch (e) {
+            } else {
+                // 権限エラーなどの場合
+                if (settings.debugMode) console.log('[AI Meta Viewer] XHR failed status:', xhr.status);
                 resolve(null);
             }
-        });
-    };
+        };
 
-    // まず img.src (エンコード済み) で試す
-    let result = await tryFetch(img.src);
+        xhr.onerror = function () {
+            // アクセス拒否などのネットワークエラー
+            if (settings.debugMode) console.log('[AI Meta Viewer] XHR network error (likely permission denied)');
+            resolve(null);
+        };
 
-    // 失敗した場合、かつURLに%が含まれているなら、デコードして試す
-    if (!result && img.src.includes('%')) {
         try {
-            const decodedUrl = decodeURIComponent(img.src);
-            if (decodedUrl !== img.src) {
-                if (settings.debugMode) console.log('[AI Meta Viewer] Retrying with decoded URL:', decodedUrl);
-                result = await tryFetch(decodedUrl);
-            }
+            xhr.send();
         } catch (e) {
-            // デコード失敗時は無視
+            if (settings.debugMode) console.log('[AI Meta Viewer] XHR send failed:', e);
+            resolve(null);
         }
-    }
-
-    if (!result && settings.debugMode) {
-        console.log('[AI Meta Viewer] Failed to fetch local image:', img.src);
-    }
-
-    return result;
+    });
 }
