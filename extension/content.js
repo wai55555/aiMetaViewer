@@ -330,24 +330,11 @@ async function checkImageMetadata(img) {
                 imageUrl: url
             };
 
-            // ローカルファイル (file://) の場合、content.js側でデータを取得して送信
+            // ローカルファイル (file://) の場合
+            // content.js からの fetch/XHR はセキュリティ制限で失敗するため、
+            // background.js に直接任せる (Chromeの設定で許可されている場合のみ成功する)
             if (url.startsWith('file://')) {
-                if (settings.debugMode) {
-                    debugLog('[AI Meta Viewer] Fetching local file data:', url);
-                }
-                // img要素を渡す
-                const base64Data = await fetchLocalImage(img);
-                if (base64Data) {
-                    message.imageData = base64Data;
-                    if (settings.debugMode) {
-                        console.log('[AI Meta Viewer] Local file data fetched successfully');
-                    }
-                } else {
-                    message.fetchError = 'Failed to fetch local file data in content.js';
-                    if (settings.debugMode) {
-                        console.log('[AI Meta Viewer] Failed to fetch local file data');
-                    }
-                }
+                debugLog('[AI Meta Viewer] Local file detected, delegating fetch to background script:', url);
             }
 
             // Background Service Workerにメタデータ取得をリクエスト
@@ -773,85 +760,4 @@ function handleDirectImageView() {
     checkImageMetadata(img);
 }
 
-/**
- * ローカル画像 (file://) をXMLHttpRequestで読み取りBase64化する
- * リトライは行わず、失敗時は即座にnullを返す（権限エラー等のため）
- * @param {HTMLImageElement} img 
- * @returns {Promise<string|null>} Base64 data URL
- */
-/**
- * ローカル画像 (file://) をXMLHttpRequestで読み取りBase64化する
- * リトライは行わず、失敗時は即座にnullを返す（権限エラー等のため）
- * @param {HTMLImageElement} img 
- * @returns {Promise<string|null>} Base64 data URL
- */
-async function fetchLocalImage(img) {
-    debugLog('[AI Meta Viewer] fetchLocalImage() called for:', img.src);
 
-    // 1. 画像のロード完了を待機 (念のため)
-    // タイムアウトを2秒に設定
-    if (!img.complete) {
-        debugLog('[AI Meta Viewer] Image not complete, waiting...');
-        try {
-            await Promise.race([
-                img.decode(),
-                new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout')), 2000))
-            ]);
-            debugLog('[AI Meta Viewer] Image decode success');
-        } catch (e) {
-            // ロード待機に失敗しても、ファイルアクセス自体は試行してみる
-            debugLog('[AI Meta Viewer] Image decode wait failed (continuing anyway):', e.message);
-        }
-    }
-
-    // 2. XMLHttpRequestで取得 (一発勝負)
-    return new Promise((resolve) => {
-        const xhr = new XMLHttpRequest();
-        xhr.open('GET', img.src, true);
-        xhr.responseType = 'arraybuffer';
-
-        xhr.onload = function () {
-            // ローカルファイルの場合、成功時は status === 0 または 200
-            if (xhr.status === 0 || xhr.status === 200) {
-                try {
-                    const blob = new Blob([xhr.response]);
-                    const reader = new FileReader();
-                    reader.onloadend = () => {
-                        if (reader.result) {
-                            debugLog('[AI Meta Viewer] File read successfully. Size:', reader.result.length);
-                            resolve(reader.result);
-                        } else {
-                            debugLog('[AI Meta Viewer] FileReader result is empty');
-                            resolve(null);
-                        }
-                    };
-                    reader.onerror = (e) => {
-                        debugLog('[AI Meta Viewer] FileReader error:', reader.error);
-                        resolve(null);
-                    };
-                    reader.readAsDataURL(blob);
-                } catch (e) {
-                    debugLog('[AI Meta Viewer] Blob/FileReader processing error:', e);
-                    resolve(null);
-                }
-            } else {
-                // 権限エラーなどの場合
-                debugLog('[AI Meta Viewer] XHR failed status:', xhr.status);
-                resolve(null);
-            }
-        };
-
-        xhr.onerror = function (e) {
-            // アクセス拒否などのネットワークエラー
-            debugLog('[AI Meta Viewer] XHR network error (likely permission denied):', e);
-            resolve(null);
-        };
-
-        try {
-            xhr.send();
-        } catch (e) {
-            debugLog('[AI Meta Viewer] XHR send failed:', e);
-            resolve(null);
-        }
-    });
-}
