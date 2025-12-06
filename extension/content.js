@@ -3,6 +3,22 @@
 // スクリプト読み込み確認
 console.log('[AI Meta Viewer] content.js loaded, URL:', window.location.href);
 
+// file:// URL では console.log が表示されないため、DOM に表示するデバッグ関数
+function debugLog(message, data = null) {
+    console.log(message, data); // 通常のコンソールにも出力（http/https では表示される）
+
+    // debugMode が有効で、かつ file:// URL の場合のみ DOM に表示
+    if (settings && settings.debugMode && window.location.protocol === 'file:') {
+        const debugDiv = document.createElement('div');
+        debugDiv.style.cssText = 'position:fixed;bottom:0;left:0;background:rgba(0,0,0,0.8);color:#0f0;padding:5px;z-index:999999;font-size:12px;font-family:monospace;max-width:100%;word-wrap:break-word;';
+        debugDiv.textContent = `[DEBUG] ${message}${data ? ': ' + JSON.stringify(data).substring(0, 100) : ''}`;
+        if (document.body) {
+            document.body.appendChild(debugDiv);
+            setTimeout(() => debugDiv.remove(), 2000);
+        }
+    }
+}
+
 // 設定のデフォルト値
 let settings = {
     debugMode: false,
@@ -307,6 +323,7 @@ async function checkImageMetadata(img) {
                         console.log('[AI Meta Viewer] Local file data fetched successfully');
                     }
                 } else {
+                    message.fetchError = 'Failed to fetch local file data in content.js';
                     if (settings.debugMode) {
                         console.log('[AI Meta Viewer] Failed to fetch local file data');
                     }
