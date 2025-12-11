@@ -26,6 +26,12 @@
   "descShowAnalyzingBadge": {
     "message": "Display \"Analyzing...\" badge while checking metadata (Pixiv only)"
   },
+  "labelAnalyzeEverywhere": {
+    "message": "Show Analyzing Badge Everywhere"
+  },
+  "descAnalyzeEverywhere": {
+    "message": "Display \"Analyzing...\" badge on all sites (Default: Pixiv & Local only)"
+  },
   "sectionExcludedSites": {
     "message": "Excluded Sites"
   },

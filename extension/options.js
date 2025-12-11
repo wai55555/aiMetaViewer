@@ -6,6 +6,7 @@ const DEFAULT_SETTINGS = {
     errorNotification: false,
     minPixelCount: 250000,
     showAnalyzingBadge: true,
+    analyzeEverywhere: false,
     excludedSites: [],
     ignoredMetadataKeys: ['XML:com.adobe.xmp'],
     ignoredSoftware: ['Adobe Photoshop', 'Adobe ImageReady', 'Celsys Studio Tool', 'GIMP', 'Paint.NET']
@@ -16,6 +17,7 @@ const debugModeCheckbox = document.getElementById('debugMode');
 const errorNotificationCheckbox = document.getElementById('errorNotification');
 const minPixelCountInput = document.getElementById('minPixelCount');
 const showAnalyzingBadgeCheckbox = document.getElementById('showAnalyzingBadge');
+const analyzeEverywhereCheckbox = document.getElementById('analyzeEverywhere');
 const excludedSitesTextarea = document.getElementById('excludedSites');
 const ignoredMetadataKeysTextarea = document.getElementById('ignoredMetadataKeys');
 const ignoredSoftwareTextarea = document.getElementById('ignoredSoftware');
@@ -53,6 +55,7 @@ async function loadSettings() {
     if (errorNotificationCheckbox) errorNotificationCheckbox.checked = settings.errorNotification;
     if (minPixelCountInput) minPixelCountInput.value = settings.minPixelCount;
     if (showAnalyzingBadgeCheckbox) showAnalyzingBadgeCheckbox.checked = settings.showAnalyzingBadge;
+    if (analyzeEverywhereCheckbox) analyzeEverywhereCheckbox.checked = settings.analyzeEverywhere;
     if (excludedSitesTextarea) excludedSitesTextarea.value = settings.excludedSites.join('\n');
     if (ignoredMetadataKeysTextarea) ignoredMetadataKeysTextarea.value = settings.ignoredMetadataKeys.join('\n');
     if (ignoredSoftwareTextarea) ignoredSoftwareTextarea.value = settings.ignoredSoftware.join('\n');
@@ -80,6 +83,7 @@ async function saveSettings() {
         errorNotification: errorNotificationCheckbox ? errorNotificationCheckbox.checked : false,
         minPixelCount: parseInt(minPixelCountInput ? minPixelCountInput.value : '250000', 10) || 250000,
         showAnalyzingBadge: showAnalyzingBadgeCheckbox ? showAnalyzingBadgeCheckbox.checked : true,
+        analyzeEverywhere: analyzeEverywhereCheckbox ? analyzeEverywhereCheckbox.checked : false,
         excludedSites: excludedSites,
         ignoredMetadataKeys: ignoredMetadataKeys,
         ignoredSoftware: ignoredSoftware

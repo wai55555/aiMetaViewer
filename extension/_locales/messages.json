@@ -20,18 +20,6 @@
     "descMinPixelCount": {
         "message": "この画素数未満の画像はメタデータチェックをスキップします（デフォルト: 250000 = 512x512相当）"
     },
-    "labelShowAnalyzingBadge": {
-        "message": "解析中を表示"
-    },
-    "descShowAnalyzingBadge": {
-        "message": "メタデータチェック中に\"Analyzing...\"を表示します（Pixivのみ）"
-    },
-    "labelAnalyzeEverywhere": {
-        "message": "全サイトで解析中を表示"
-    },
-    "descAnalyzeEverywhere": {
-        "message": "すべてのサイトで\"Analyzing...\"バッジを表示します（デフォルト: Pixivとローカルのみ）"
-    },
     "sectionExcludedSites": {
         "message": "除外サイト"
     },
@@ -40,9 +28,6 @@
     },
     "descExcludedSites": {
         "message": "ワイルドカードが使用可能です: <code>*</code> (任意の文字列), <code>?</code> (任意の1文字)"
-    },
-    "placeholderExcludedSites": {
-        "message": "civitai.com*\ndanbooru.donmai.us*"
     },
     "sectionNotifications": {
         "message": "通知"

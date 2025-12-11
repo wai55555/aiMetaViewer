@@ -45,6 +45,7 @@ let settings = {
     errorNotification: false,
     minPixelCount: 250000, // 500x500
     showAnalyzingBadge: true,
+    analyzeEverywhere: false,
     excludedSites: [],
     ignoredMetadataKeys: ['XML:com.adobe.xmp'],
     ignoredSoftware: ['Adobe Photoshop', 'Adobe ImageReady', 'Celsys Studio Tool', 'GIMP', 'Paint.NET']
@@ -298,11 +299,17 @@ async function checkImageMetadata(img) {
     // 処理済みフラグを立てる（重複チェック防止）
     processedImages.set(img, null);
 
-    // Pixivまたはローカルファイルの場合、解析中バッジを表示（設定で有効な場合のみ）
+    // Pixivまたはローカルファイル、または全サイト設定が有効な場合、解析中バッジを表示
     const isPixiv = window.location.hostname.includes('pixiv.net');
     const isLocalFile = targetUrl && (Array.isArray(targetUrl) ? targetUrl[0] : targetUrl).startsWith('file://');
+
+    let shouldShowBadge = isPixiv || isLocalFile;
+    if (settings.analyzeEverywhere) {
+        shouldShowBadge = true;
+    }
+
     let analyzingBadge = null;
-    if ((isPixiv || isLocalFile) && settings.showAnalyzingBadge) {
+    if (shouldShowBadge && settings.showAnalyzingBadge) {
         analyzingBadge = addAnalyzingBadge(img);
     }
 
@@ -701,6 +708,10 @@ function observeImages() {
         debounceTimer = setTimeout(processPendingNodes, 100);
     });
 
+    if (!document.body) {
+        console.warn('[AI Meta Viewer] document.body is null, cannot observe images');
+        return;
+    }
     observer.observe(document.body, {
         childList: true,
         subtree: true
