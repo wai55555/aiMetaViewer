@@ -44,17 +44,18 @@ Right-click the extension icon -> "Options" to configure:
 ## 🚀 Installation
 
 [Chrome Web Store](https://chromewebstore.google.com/detail/ai-meta-viewer/glggkpjfgbabooefiijgnaemfabdmkgf?hl=en&authuser=5)
+latest version is avaiable on Chrome Web Store.
 
-Please manually install the latest version using the following steps.
+~~Please manually install the latest version using the following steps.~~
 
 ![](https://raw.githubusercontent.com/wai55555/aiMetaViewer/refs/heads/main/sample/code_download_zip.png)
 
-1. Download this repository (Click **Code** -> **Download ZIP**).
-2. Unzip the downloaded file.
-3. Open Google Chrome and navigate to `chrome://extensions`.
-4. Enable **"Developer mode"** in the top right corner.
-5. Click **"Load unpacked"**.
-6. Select the `extension` folder inside the unzipped directory.
+~~1. Download this repository (Click **Code** -> **Download ZIP**).~~
+~~2. Unzip the downloaded file.~~
+~~3. Open Google Chrome and navigate to `chrome://extensions`.~~
+~~4. Enable **"Developer mode"** in the top right corner.~~
+~~5. Click **"Load unpacked"**.~~
+~~6. Select the `extension` folder inside the unzipped directory.~~
 
 ## 📖 Usage
 
