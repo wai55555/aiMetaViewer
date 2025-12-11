@@ -5,6 +5,7 @@ const DEFAULT_SETTINGS = {
     debugMode: false,
     errorNotification: false,
     minPixelCount: 250000,
+    minImageSize: 200,
     showAnalyzingBadge: true,
     analyzeEverywhere: false,
     excludedSites: [],
@@ -16,6 +17,7 @@ const DEFAULT_SETTINGS = {
 const debugModeCheckbox = document.getElementById('debugMode');
 const errorNotificationCheckbox = document.getElementById('errorNotification');
 const minPixelCountInput = document.getElementById('minPixelCount');
+const minImageSizeInput = document.getElementById('minImageSize');
 const showAnalyzingBadgeCheckbox = document.getElementById('showAnalyzingBadge');
 const analyzeEverywhereCheckbox = document.getElementById('analyzeEverywhere');
 const excludedSitesTextarea = document.getElementById('excludedSites');
@@ -54,6 +56,7 @@ async function loadSettings() {
     if (debugModeCheckbox) debugModeCheckbox.checked = settings.debugMode;
     if (errorNotificationCheckbox) errorNotificationCheckbox.checked = settings.errorNotification;
     if (minPixelCountInput) minPixelCountInput.value = settings.minPixelCount;
+    if (minImageSizeInput) minImageSizeInput.value = settings.minImageSize;
     if (showAnalyzingBadgeCheckbox) showAnalyzingBadgeCheckbox.checked = settings.showAnalyzingBadge;
     if (analyzeEverywhereCheckbox) analyzeEverywhereCheckbox.checked = settings.analyzeEverywhere;
     if (excludedSitesTextarea) excludedSitesTextarea.value = settings.excludedSites.join('\n');
@@ -82,6 +85,7 @@ async function saveSettings() {
         debugMode: debugModeCheckbox ? debugModeCheckbox.checked : false,
         errorNotification: errorNotificationCheckbox ? errorNotificationCheckbox.checked : false,
         minPixelCount: parseInt(minPixelCountInput ? minPixelCountInput.value : '250000', 10) || 250000,
+        minImageSize: parseInt(minImageSizeInput ? minImageSizeInput.value : '200', 10) || 200,
         showAnalyzingBadge: showAnalyzingBadgeCheckbox ? showAnalyzingBadgeCheckbox.checked : true,
         analyzeEverywhere: analyzeEverywhereCheckbox ? analyzeEverywhereCheckbox.checked : false,
         excludedSites: excludedSites,

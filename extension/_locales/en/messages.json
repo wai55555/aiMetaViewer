@@ -20,6 +20,12 @@
   "descMinPixelCount": {
     "message": "Images smaller than this will be skipped (Default: 250000 = 512x512)"
   },
+  "labelMinImageSize": {
+    "message": "Minimum Image Size (Linked Images)"
+  },
+  "descMinImageSize": {
+    "message": "Linked images smaller than this (width or height) will be skipped (Default: 200px)"
+  },
   "labelShowAnalyzingBadge": {
     "message": "Show Analyzing Badge"
   },

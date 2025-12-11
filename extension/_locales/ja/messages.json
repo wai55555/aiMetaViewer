@@ -12,7 +12,7 @@
         "message": "AI画像メタデータビューアの動作をカスタマイズ"
     },
     "sectionImageProcessing": {
-        "message": "画像処理"
+        "message": "画像処理中"
     },
     "labelMinPixelCount": {
         "message": "最小画素数（閾値）"
@@ -20,17 +20,17 @@
     "descMinPixelCount": {
         "message": "この画素数未満の画像はメタデータチェックをスキップします（デフォルト: 250000 = 512x512相当）"
     },
+    "labelMinImageSize": {
+        "message": "最小画像サイズ（リンク画像）"
+    },
+    "descMinImageSize": {
+        "message": "このサイズ未満のリンク画像はメタデータチェックをスキップします（デフォルト: 200px）"
+    },
     "labelShowAnalyzingBadge": {
         "message": "解析中を表示"
     },
     "descShowAnalyzingBadge": {
         "message": "メタデータチェック中に\"Analyzing...\"を表示します（Pixivのみ）"
-    },
-    "labelAnalyzeEverywhere": {
-        "message": "全サイトで解析中を表示"
-    },
-    "descAnalyzeEverywhere": {
-        "message": "すべてのサイトで\"Analyzing...\"バッジを表示します（デフォルト: Pixivとローカルのみ）"
     },
     "sectionExcludedSites": {
         "message": "除外サイト"

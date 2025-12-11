@@ -44,6 +44,7 @@ let settings = {
     debugMode: false,
     errorNotification: false,
     minPixelCount: 250000, // 500x500
+    minImageSize: 200, // リンク付き画像の最小サイズ
     showAnalyzingBadge: true,
     analyzeEverywhere: false,
     excludedSites: [],
@@ -291,8 +292,8 @@ async function checkImageMetadata(img) {
         return;
     }
 
-    // リンク画像の場合でも、極端に小さいアイコン等は除外（例: 100x100未満）
-    if (isLinkedImage && (actualWidth < 100 || actualHeight < 100)) {
+    // リンク画像の場合でも、設定された最小サイズ未満は除外（デフォルト200x200）
+    if (isLinkedImage && (actualWidth < settings.minImageSize || actualHeight < settings.minImageSize)) {
         return;
     }
 
@@ -650,6 +651,30 @@ function addBadgeToImage(img, metadata) {
         // スクロールとリサイズイベントで位置を更新
         window.addEventListener('scroll', onScroll, { passive: true, capture: true });
         window.addEventListener('resize', onResize, { passive: true });
+
+        // ホバー制御 (遅延表示)
+        let hoverTimer = null;
+        const showDelay = 300; // ms
+
+        const showBadge = () => {
+            if (hoverTimer) clearTimeout(hoverTimer);
+            hoverTimer = setTimeout(() => {
+                badge.classList.add('visible');
+                updatePosition(); // 表示時に位置を再計算
+            }, showDelay);
+        };
+
+        const hideBadge = () => {
+            if (hoverTimer) clearTimeout(hoverTimer);
+            hoverTimer = setTimeout(() => {
+                badge.classList.remove('visible');
+            }, 100);
+        };
+
+        img.addEventListener('mouseenter', showBadge);
+        img.addEventListener('mouseleave', hideBadge);
+        badge.addEventListener('mouseenter', showBadge);
+        badge.addEventListener('mouseleave', hideBadge);
     }
 }
 
