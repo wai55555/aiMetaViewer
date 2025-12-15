@@ -131,9 +131,36 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     }
 });
 
-// 処理済み画像とバッジの対応マップ (メモリリーク防止)
-// HTMLImageElement -> HTMLElement (Badge)
+// 処理済み画像とバッジデータの対応マップ
+// HTMLImageElement -> { badge: HTMLElement, updatePosition: Function, cleanup: Function }
 const processedImages = new WeakMap();
+
+// ResizeObserver for tracking image size/position changes
+const resizeObserver = new ResizeObserver((entries) => {
+    for (const entry of entries) {
+        const img = entry.target;
+        const data = processedImages.get(img);
+        if (data && data.updatePosition) {
+            // Use requestAnimationFrame to avoid "ResizeObserver loop limit exceeded"
+            requestAnimationFrame(() => data.updatePosition());
+        }
+    }
+});
+
+/**
+ * Remove badge and cleanup observers for an image
+ * @param {HTMLImageElement} img 
+ */
+function removeBadge(img) {
+    const data = processedImages.get(img);
+    if (data) {
+        if (data.badge) data.badge.remove();
+        if (data.cleanup) data.cleanup();
+        resizeObserver.unobserve(img);
+        processedImages.delete(img);
+    }
+}
+
 
 // 画像URLごとのメタデータキャッシュ
 const metadataCache = new Map();
@@ -400,8 +427,10 @@ async function checkImageMetadata(img) {
             // バッジを追加
             addBadgeToImage(img, metadata);
         } else {
-            // メタデータが空の場合は削除
-            processedImages.delete(img);
+            // メタデータが空の場合は削除（再解析対象から外すため、nullを入れる）
+            // ただし、画像が変更されたら再解析したいので、processedImagesには入れない方が良いかも？
+            // いや、毎回チェックするのは負荷が高いので、"メタデータなし"として登録する。
+            processedImages.set(img, { badge: null });
         }
 
     } catch (error) {
@@ -531,8 +560,11 @@ function removeAnalyzingBadge(badgeObj) {
  * @param {Object} metadata - メタデータ
  */
 function addBadgeToImage(img, metadata) {
-    // 既にバッジがある場合は何もしない
-    if (processedImages.get(img)) return;
+    // 既にバッジがある場合はクリーンアップして再作成（通常はここに来る前にremoveBadge呼ばれるはずだが念のため）
+    if (processedImages.has(img)) {
+        const existing = processedImages.get(img);
+        if (existing && existing.badge) return; // 既にバッジがあるなら何もしない
+    }
 
     const badge = createBadge(); // ui.jsの関数
     const isDirectImage = isDirectImageView();
@@ -555,8 +587,8 @@ function addBadgeToImage(img, metadata) {
         }
     });
 
-    // バッジを管理マップに登録
-    processedImages.set(img, badge);
+    // バッジを管理マップに登録 (updatePositionなどは後で設定)
+    // processedImages.set(img, badge); // ここではなく、全てのセットアップが終わってから登録する
 
     if (isDirectImage) {
         // --- 画像直接表示の場合 (従来通り) ---
@@ -582,29 +614,51 @@ function addBadgeToImage(img, metadata) {
         }
         window.addEventListener('resize', updateBadgeOnDirectImage);
 
+        // 登録
+        processedImages.set(img, {
+            badge: badge,
+            updatePosition: updateBadgeOnDirectImage,
+            cleanup: () => {
+                img.removeEventListener('load', updateBadgeOnDirectImage);
+                window.removeEventListener('resize', updateBadgeOnDirectImage);
+            }
+        });
+
     } else {
         // --- Webサイト表示の場合 (fixed配置でスクロールに追従) ---
         // position: fixed でビューポート座標を使用
         if (!document.body) return; // bodyが存在しない場合は何もしない
 
         badge.style.position = 'fixed';
+        // badge.style.zIndex removed to respect CSS rules (Stacking Context managed in styles.css)
         document.body.appendChild(badge);
 
         let ticking = false;
+
+
+        // 遮蔽検知用のカウンター（間引き処理）
+        let occlusionCheckCounter = 0;
 
         // 位置更新関数
         const updatePosition = () => {
             // 画像がDOMから削除されていたらバッジも削除
             if (!img.isConnected) {
-                badge.remove();
-                processedImages.delete(img);
-                window.removeEventListener('scroll', onScroll);
-                window.removeEventListener('resize', onResize);
+                removeBadge(img);
                 return;
             }
 
             // 画像のビューポート相対位置を取得
             const rect = img.getBoundingClientRect();
+
+            // 画像が非表示、または画面外の場合はバッジも隠す
+            // スクロールコンテナ内などでの部分表示も考慮
+            if (rect.width === 0 || rect.height === 0 ||
+                window.getComputedStyle(img).display === 'none' ||
+                rect.bottom < 0 || rect.top > window.innerHeight ||
+                rect.right < 0 || rect.left > window.innerWidth) {
+                badge.style.display = 'none';
+                return;
+            }
 
             // バッジの高さ分、上にずらす
             const badgeHeight = 20;
@@ -614,10 +668,48 @@ function addBadgeToImage(img, metadata) {
             badge.style.left = `${left}px`;
             badge.style.top = `${top}px`;
 
-            // 画像が非表示、または画面外の場合はバッジも隠す
-            if (rect.width === 0 || rect.height === 0 ||
-                window.getComputedStyle(img).display === 'none' ||
-                rect.bottom < 0 || rect.top > window.innerHeight) {
+            // 遮蔽検知 (Occlusion Detection)
+            occlusionCheckCounter++;
+            if (occlusionCheckCounter > 10) {
+                occlusionCheckCounter = 0;
+
+                // 画像の中心点を取得
+                const cx = rect.left + rect.width / 2;
+                const cy = rect.top + rect.height / 2;
+
+                let currentlyOccluded = false;
+
+                if (cx >= 0 && cy >= 0 && cx <= window.innerWidth && cy <= window.innerHeight) {
+                    // 判定精度を上げるため、一時的にバッジを非表示(visibility: hidden)にする
+                    // display: noneだとレイアウトが変わる可能性があるためvisibility推奨だが、
+                    // elementFromPointはvisibility: hiddenの要素を無視して奥の要素を取得する
+                    const originalVisibility = badge.style.visibility;
+                    badge.style.visibility = 'hidden';
+
+                    const topElement = document.elementFromPoint(cx, cy);
+
+                    // 戻す
+                    badge.style.visibility = originalVisibility;
+
+                    if (topElement) {
+                        const isSelf = topElement === img || img.contains(topElement);
+                        // バッジは隠しているので isBadge 判定は不要だが念のため
+                        const isParent = topElement.contains(img);
+
+                        // 画像がtopElementに含まれておらず、かつ自分自身でもない場合 -> 遮蔽されている
+                        // (モーダル画像などが手前にある場合、topElementはそのモーダル画像になるはず)
+                        if (!isSelf && !isParent) {
+                            currentlyOccluded = true;
+                        }
+                    }
+                }
+
+                // 状態更新
+                badge._isOccluded = currentlyOccluded;
+            }
+
+            // 遮蔽状態に基づいて表示切り替え
+            if (badge._isOccluded) {
                 badge.style.display = 'none';
             } else {
                 badge.style.display = 'block';
@@ -634,12 +726,8 @@ function addBadgeToImage(img, metadata) {
             }
         };
 
-        const onResize = () => {
-            if (!ticking) {
-                window.requestAnimationFrame(updatePosition);
-                ticking = true;
-            }
-        };
+        // MutationObserverで検知できないレイアウト変更用
+        // ResizeObserverからも呼ばれる
 
         // 初期位置設定
         if (img.complete) {
@@ -648,9 +736,11 @@ function addBadgeToImage(img, metadata) {
             img.addEventListener('load', updatePosition, { once: true });
         }
 
-        // スクロールとリサイズイベントで位置を更新
+        // スクロールイベントで位置を更新
         window.addEventListener('scroll', onScroll, { passive: true, capture: true });
-        window.addEventListener('resize', onResize, { passive: true });
+
+        // ResizeObserverに登録
+        resizeObserver.observe(img);
 
         // ホバー制御 (遅延表示)
         let hoverTimer = null;
@@ -675,6 +765,19 @@ function addBadgeToImage(img, metadata) {
         img.addEventListener('mouseleave', hideBadge);
         badge.addEventListener('mouseenter', showBadge);
         badge.addEventListener('mouseleave', hideBadge);
+
+        // 登録
+        processedImages.set(img, {
+            badge: badge,
+            updatePosition: updatePosition,
+            cleanup: () => {
+                img.removeEventListener('load', updatePosition);
+                img.removeEventListener('mouseenter', showBadge);
+                img.removeEventListener('mouseleave', hideBadge);
+                window.removeEventListener('scroll', onScroll);
+                resizeObserver.unobserve(img);
+            }
+        });
     }
 }
 
@@ -717,16 +820,50 @@ function observeImages() {
         pendingNodes.clear();
     };
 
+    // MutationObserver Updates
     const observer = new MutationObserver((mutations) => {
         mutations.forEach((mutation) => {
+            // Node addition
             mutation.addedNodes.forEach((node) => {
                 if (node.nodeType === 1) { // ELEMENT_NODE
                     pendingNodes.add(node);
                 }
             });
+
+            // Node removal - Cleanup badges
+            mutation.removedNodes.forEach((node) => {
+                if (node.nodeType === 1) {
+                    if (node.tagName === 'IMG') {
+                        removeBadge(node);
+                    } else {
+                        // 子要素の画像もクリーンアップ
+                        const imgs = node.querySelectorAll('img');
+                        imgs.forEach(img => removeBadge(img));
+                    }
+                }
+            });
+
+            // Attribute changes (src, style, etc.)
+            if (mutation.type === 'attributes') {
+                const target = mutation.target;
+                if (target.tagName === 'IMG') {
+                    if (mutation.attributeName === 'src') {
+                        // ソース変更: 再解析
+                        debugLog('[AI Meta Viewer] Image src changed, reprocessing:', target.src);
+                        removeBadge(target);
+                        pendingNodes.add(target);
+                    } else if (['style', 'class', 'width', 'height', 'transform'].includes(mutation.attributeName)) {
+                        // スタイル変更: 位置更新
+                        const data = processedImages.get(target);
+                        if (data && data.updatePosition) {
+                            data.updatePosition();
+                        }
+                    }
+                }
+            }
         });
 
-        // デバウンス: 100ms以内の連続した変更をまとめて処理
+        // デバウンス処理
         if (debounceTimer) {
             clearTimeout(debounceTimer);
         }
@@ -739,7 +876,9 @@ function observeImages() {
     }
     observer.observe(document.body, {
         childList: true,
-        subtree: true
+        subtree: true,
+        attributes: true,
+        attributeFilter: ['src', 'style', 'class', 'width', 'height', 'transform']
     });
 }
 
