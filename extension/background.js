@@ -193,7 +193,7 @@ async function handleDownloadImages(images, context) {
                 safeFilename = `image_${Date.now()}_${downloadedCount}.png`;
             }
 
-            const fullFilename = `${downloadPath}/${safeFilename}`;
+            const fullFilename = downloadPath ? `${downloadPath}/${safeFilename}` : safeFilename;
             debugLog('[AI Meta Viewer] Registering path & Requesting download:', fullFilename);
 
             // イベントリスナー用にキューへパスを登録
