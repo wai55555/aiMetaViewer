@@ -69,13 +69,25 @@
     "message": "Choose how to organize downloaded images in your downloads folder."
   },
   "optPageTitle": {
-    "message": "Page Title (e.g. AI_Meta_Viewer/PageName/)"
+    "message": "Page Title"
   },
   "optDomain": {
-    "message": "Domain Name (e.g. AI_Meta_Viewer/pixiv.net/)"
+    "message": "Domain Name"
   },
   "optNone": {
-    "message": "Flat (AI_Meta_Viewer/image.png)"
+    "message": "Flat (No Subfolder)"
+  },
+  "labelDownloaderBaseFolder": {
+    "message": "Main Folder Name"
+  },
+  "descDownloaderBaseFolder": {
+    "message": "Specify the main folder name (default: AI_Meta_Viewer)."
+  },
+  "labelDownloaderUseRoot": {
+    "message": "Save Directly to Downloads"
+  },
+  "descDownloaderUseRoot": {
+    "message": "Save images directly to the downloads root or subfolders without a main folder."
   },
   "sectionCache": {
     "message": "Cache Management"

@@ -29,8 +29,14 @@ It automatically analyzes images on web pages and displays a badge if metadata i
   - Tensor.art
 - **Detailed Viewer**:
   - Automatically categorizes into Positive / Negative Prompt / Other Settings.
+  - **Multi-color Highlighting**: Color-coded parameters for easier reading (Model, ADetailer, Hires, Lora).
   - Copy all metadata with one click.
   - Formatted JSON view.
+- **Action-Triggered Downloader**:
+  - Click the extension icon to scan the entire page.
+  - Bulk download detected images.
+  - **Flexible Folder Naming**: Automatically organize downloads by Page Title, Domain, or Flat structure.
+  - **Smart Filtering**: Toggle between viewing only AI images or all discoverable images.
 
 ## ⚙️ Settings
 
@@ -38,6 +44,10 @@ Right-click the extension icon -> "Options" to configure:
 
 - **Image Processing**: Set minimum pixel count threshold for metadata check.
 - **Excluded Sites**: Disable extension on specific sites using wildcards (e.g., `civitai.com*`).
+- **Downloader Configuration**: 
+  - Choose your preferred folder organization (Page Title, Domain, or None).
+  - Customize the main folder name (default: `AI_Meta_Viewer`).
+  - Option to save directly to the Downloads root.
 - **Notifications**: Toggle error notifications.
 - **Cache**: Clear metadata cache to free up memory.
 
@@ -59,10 +69,18 @@ latest version is avaiable on Chrome Web Store.
 
 ## 📖 Usage
 
+### Individual Image View
 1. Open a website containing AI-generated images with the extension enabled.
 2. A **"View Metadata"** badge will appear on the top-left of detected images.
 3. Click the badge to open a modal window with detailed metadata.
 4. Use the "Copy" buttons to copy content to your clipboard.
+
+### Full-Page Scan & Bulk Download
+1. Click the **AI Meta Viewer** extension icon in your toolbar.
+2. A scanning overlay will show progress as it discovers images.
+3. Once complete, a downloader modal will appear.
+4. Filter or select the images you want to save.
+5. Click **"Download Selected"**. Images will be saved to your browser's download folder, organized by your chosen folder mode.
 
 ## 🔒 Privacy & Security
 
@@ -84,10 +102,11 @@ latest version is avaiable on Chrome Web Store.
 aiMetaViewer/
 └─ extension/          # Source code
    ├── manifest.json   # Manifest file
-   ├── background.js   # Service Worker
-   ├── content.js      # Content Script
+   ├── background.js   # Service Worker (Handling downloads & parsing)
+   ├── content.js      # Content Script (Badge management)
+   ├── scanner.js      # Full-page Scan & Downloader Logic
    ├── parser.js       # Metadata Parser
-   ├── ui.js           # UI Components
+   ├── ui.js           # UI Components (Modals & Badges)
    ├── options.html    # Options Page
    ├── options.js      # Options Logic
    ├── styles.css      # Styles
