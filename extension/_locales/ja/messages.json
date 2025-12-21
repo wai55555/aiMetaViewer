@@ -53,6 +53,24 @@
     "descErrorNotification": {
         "message": "メタデータの読み込みに失敗した場合に通知を表示します"
     },
+    "sectionDownloader": {
+        "message": "ダウンローダー"
+    },
+    "labelDownloaderFolderMode": {
+        "message": "保存フォルダ構成"
+    },
+    "descDownloaderFolderMode": {
+        "message": "ダウンロードフォルダ内での画像の整理方法を選択します。"
+    },
+    "optPageTitle": {
+        "message": "ページタイトルごと (例: AI_Meta_Viewer/ページ名/)"
+    },
+    "optDomain": {
+        "message": "ドメインごと (例: AI_Meta_Viewer/pixiv.net/)"
+    },
+    "optNone": {
+        "message": "フォルダ分けしない (AI_Meta_Viewer/画像名.png)"
+    },
     "sectionCache": {
         "message": "キャッシュ管理"
     },

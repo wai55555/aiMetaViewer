@@ -320,6 +320,28 @@
                 </div>
             </div>
 
+            <!-- ダウンロード設定 -->
+            <div class="section">
+                <h2 class="section-title" data-i18n="sectionDownloader">Downloader</h2>
+                <div class="setting-item">
+                    <div class="input-group">
+                        <label for="downloaderFolderMode" data-i18n="labelDownloaderFolderMode">Save Folder
+                            Structure</label>
+                        <select id="downloaderFolderMode"
+                            style="width: 100%; padding: 10px; border: 2px solid #e0e0e0; border-radius: 8px; font-size: 14px;">
+                            <option value="pageTitle" data-i18n="optPageTitle">Page Title (e.g.
+                                AI_Meta_Viewer/PageName/)</option>
+                            <option value="domain" data-i18n="optDomain">Domain Name (e.g. AI_Meta_Viewer/pixiv.net/)
+                            </option>
+                            <option value="none" data-i18n="optNone">Flat (AI_Meta_Viewer/image.png)</option>
+                        </select>
+                        <div class="input-helper" data-i18n="descDownloaderFolderMode">
+                            Choose how to organize downloaded images in your downloads folder.
+                        </div>
+                    </div>
+                </div>
+            </div>
+
             <!-- キャッシュ管理 -->
             <div class="section">
                 <h2 class="section-title" data-i18n="sectionCache">Cache Management</h2>

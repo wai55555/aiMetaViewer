@@ -133,7 +133,8 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
 
 // 処理済み画像とバッジデータの対応マップ
 // HTMLImageElement -> { badge: HTMLElement, updatePosition: Function, cleanup: Function }
-const processedImages = new WeakMap();
+window.processedImages = new Map();
+const processedImages = window.processedImages;
 
 // ResizeObserver for tracking image size/position changes
 const resizeObserver = new ResizeObserver((entries) => {
@@ -166,8 +167,7 @@ function removeBadge(img) {
 const metadataCache = new Map();
 
 // --- サイト別アダプター ---
-
-const SiteAdapters = [
+window.SiteAdapters = [
     // Discord
     {
         match: () => window.location.hostname.includes('discord.com'),
@@ -425,7 +425,7 @@ async function checkImageMetadata(img) {
             }
 
             // バッジを追加
-            addBadgeToImage(img, metadata);
+            addBadgeToImage(img, metadata, successUrl || img.src);
         } else {
             // メタデータが空の場合は削除（再解析対象から外すため、nullを入れる）
             // ただし、画像が変更されたら再解析したいので、processedImagesには入れない方が良いかも？
@@ -554,12 +554,7 @@ function removeAnalyzingBadge(badgeObj) {
     }
 }
 
-/**
- * 画像にバッジを追加
- * @param {HTMLImageElement} img - 対象画像要素
- * @param {Object} metadata - メタデータ
- */
-function addBadgeToImage(img, metadata) {
+function addBadgeToImage(img, metadata, originalUrl) {
     // 既にバッジがある場合はクリーンアップして再作成（通常はここに来る前にremoveBadge呼ばれるはずだが念のため）
     if (processedImages.has(img)) {
         const existing = processedImages.get(img);
@@ -572,8 +567,9 @@ function addBadgeToImage(img, metadata) {
     // ui.jsのupdateBadgeでツールチップなどを設定
     updateBadge(badge, metadata);
 
-    // バッジにメタデータを保存
+    // バッジにメタデータとオリジナルURLを保存
     badge._metadata = metadata;
+    badge._originalUrl = originalUrl;
 
     // クリックイベント
     badge.addEventListener('click', (e) => {
@@ -779,6 +775,8 @@ function addBadgeToImage(img, metadata) {
             }
         });
     }
+
+    // メタデータ付き画像が追加されました
 }
 
 /**
@@ -820,40 +818,43 @@ function observeImages() {
         pendingNodes.clear();
     };
 
-    // MutationObserver Updates
-    const observer = new MutationObserver((mutations) => {
+
+    // 変更監視のデバウンス処理
+    let timeoutId = null;
+    const observerCallback = (mutations) => {
+        if (timeoutId) {
+            clearTimeout(timeoutId);
+        }
+
+        // 頻繁な実行を防ぐため、100msのデバウンスを入れる
+        timeoutId = setTimeout(() => {
+            processPendingNodes();
+        }, 100);
+
         mutations.forEach((mutation) => {
-            // Node addition
             mutation.addedNodes.forEach((node) => {
                 if (node.nodeType === 1) { // ELEMENT_NODE
                     pendingNodes.add(node);
                 }
             });
 
-            // Node removal - Cleanup badges
             mutation.removedNodes.forEach((node) => {
                 if (node.nodeType === 1) {
                     if (node.tagName === 'IMG') {
                         removeBadge(node);
                     } else {
-                        // 子要素の画像もクリーンアップ
                         const imgs = node.querySelectorAll('img');
                         imgs.forEach(img => removeBadge(img));
                     }
                 }
             });
-
-            // Attribute changes (src, style, etc.)
             if (mutation.type === 'attributes') {
                 const target = mutation.target;
                 if (target.tagName === 'IMG') {
                     if (mutation.attributeName === 'src') {
-                        // ソース変更: 再解析
-                        debugLog('[AI Meta Viewer] Image src changed, reprocessing:', target.src);
                         removeBadge(target);
                         pendingNodes.add(target);
                     } else if (['style', 'class', 'width', 'height', 'transform'].includes(mutation.attributeName)) {
-                        // スタイル変更: 位置更新
                         const data = processedImages.get(target);
                         if (data && data.updatePosition) {
                             data.updatePosition();
@@ -862,24 +863,18 @@ function observeImages() {
                 }
             }
         });
+    };
 
-        // デバウンス処理
-        if (debounceTimer) {
-            clearTimeout(debounceTimer);
-        }
-        debounceTimer = setTimeout(processPendingNodes, 100);
-    });
-
-    if (!document.body) {
-        console.warn('[AI Meta Viewer] document.body is null, cannot observe images');
-        return;
-    }
+    const observer = new MutationObserver(observerCallback);
     observer.observe(document.body, {
         childList: true,
         subtree: true,
         attributes: true,
         attributeFilter: ['src', 'style', 'class', 'width', 'height', 'transform']
     });
+
+    // 初期ロード時の処理
+    processPendingNodes();
 }
 
 /**
