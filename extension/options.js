@@ -10,7 +10,8 @@ const DEFAULT_SETTINGS = {
     analyzeEverywhere: false,
     excludedSites: [],
     ignoredMetadataKeys: ['XML:com.adobe.xmp'],
-    ignoredSoftware: ['Adobe Photoshop', 'Adobe ImageReady', 'Celsys Studio Tool', 'GIMP', 'Paint.NET']
+    ignoredSoftware: ['Adobe Photoshop', 'Adobe ImageReady', 'Celsys Studio Tool', 'GIMP', 'Paint.NET'],
+    downloaderFolderMode: 'pageTitle'
 };
 
 // DOM Elements
@@ -27,6 +28,7 @@ const saveBtn = document.getElementById('saveBtn');
 const resetBtn = document.getElementById('resetBtn');
 const clearCacheBtn = document.getElementById('clearCache');
 const statusMessage = document.getElementById('statusMessage');
+const downloaderFolderModeSelect = document.getElementById('downloaderFolderMode');
 
 // Apply i18n texts
 function applyI18n() {
@@ -62,6 +64,7 @@ async function loadSettings() {
     if (excludedSitesTextarea) excludedSitesTextarea.value = settings.excludedSites.join('\n');
     if (ignoredMetadataKeysTextarea) ignoredMetadataKeysTextarea.value = settings.ignoredMetadataKeys.join('\n');
     if (ignoredSoftwareTextarea) ignoredSoftwareTextarea.value = settings.ignoredSoftware.join('\n');
+    if (downloaderFolderModeSelect) downloaderFolderModeSelect.value = settings.downloaderFolderMode;
 }
 
 // Save settings
@@ -90,7 +93,8 @@ async function saveSettings() {
         analyzeEverywhere: analyzeEverywhereCheckbox ? analyzeEverywhereCheckbox.checked : false,
         excludedSites: excludedSites,
         ignoredMetadataKeys: ignoredMetadataKeys,
-        ignoredSoftware: ignoredSoftware
+        ignoredSoftware: ignoredSoftware,
+        downloaderFolderMode: downloaderFolderModeSelect ? downloaderFolderModeSelect.value : 'pageTitle'
     };
 
     // Validation

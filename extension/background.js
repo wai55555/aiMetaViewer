@@ -37,11 +37,31 @@ class LRUCache {
 // メタデータキャッシュ (URLごと, 最大100件)
 const metadataCache = new LRUCache(100);
 
+// ダウンロード先パスを一時的に保持するマップ（URL -> ファイルパスのキュー）
+// download APIの実行と onDeterminingFilename イベントのタイミングのズレを吸収するため
+const downloadPathQueue = new Map();
+
+// ファイル名の決定を上書きするリスナー
+chrome.downloads.onDeterminingFilename.addListener((item, suggest) => {
+    const queue = downloadPathQueue.get(item.url);
+    if (queue && queue.length > 0) {
+        const targetFilename = queue.shift();
+        if (queue.length === 0) downloadPathQueue.delete(item.url);
+
+        debugLog('[AI Meta Viewer] Forcing filename via Event:', targetFilename);
+        suggest({
+            filename: targetFilename,
+            conflictAction: 'uniquify'
+        });
+    }
+});
+
 // デフォルト設定
 const DEFAULT_SETTINGS = {
     debugMode: false,
     errorNotification: false,
-    minPixelCount: 250000
+    minPixelCount: 250000,
+    downloaderFolderMode: 'pageTitle' // 'pageTitle', 'domain', 'none'
 };
 
 // 現在の設定（起動時に読み込み）
@@ -95,7 +115,99 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         sendResponse({ success: true });
         return true;
     }
+
+    if (request.action === 'downloadImages') {
+        const folderContext = request.context || { folderName: request.folderName };
+        handleDownloadImages(request.images, folderContext)
+            .then(count => sendResponse({ success: true, count }))
+            .catch(error => sendResponse({ success: false, error: error.message }));
+        return true;
+    }
 });
+
+/**
+ * 拡張機能アイコンがクリックされた時の処理
+ */
+chrome.action.onClicked.addListener((tab) => {
+    debugLog('[AI Meta Viewer] Extension icon clicked on tab:', tab.id);
+    chrome.tabs.sendMessage(tab.id, { action: 'triggerScan' }).catch(err => {
+        console.error('[AI Meta Viewer] Failed to send triggerScan message:', err);
+    });
+});
+
+/**
+ * 画像リストを一括ダウンロード
+ */
+async function handleDownloadImages(images, context) {
+    const { pageTitle, domain } = context || {};
+    debugLog('[AI Meta Viewer] Starting download loop. Images:', images.length);
+
+    // フォルダ・ファイル名に使用できない文字のサニタイズ (Windows/macOS/Linux共通)
+    const sanitize = (str) => {
+        if (!str) return '';
+        return str
+            .replace(/[\\/:*?"<>|]/g, '_') // Windows基本禁止文字
+            .replace(/^\.+|\.+$/g, '_')    // 先頭・末尾のドットを '_' に (Windowsフォルダ制限)
+            .trim();
+    };
+
+    let downloadPath = 'AI_Meta_Viewer';
+    let subFolder = '';
+
+    if (settings.downloaderFolderMode === 'pageTitle' && pageTitle) {
+        subFolder = sanitize(pageTitle).substring(0, 22); // 長すぎるタイトルを制限
+    } else if (settings.downloaderFolderMode === 'domain' && domain) {
+        subFolder = sanitize(domain);
+    }
+
+    if (subFolder) {
+        downloadPath += `/${subFolder}`;
+    }
+
+    console.log('[AI Meta Viewer] Final download directory (relative to Downloads):', downloadPath);
+
+    let downloadedCount = 0;
+    for (const img of images) {
+        try {
+            let safeFilename = sanitize(img.filename);
+            if (!safeFilename || safeFilename === '_') {
+                safeFilename = `image_${Date.now()}_${downloadedCount}.png`;
+            }
+
+            const fullFilename = `${downloadPath}/${safeFilename}`;
+            debugLog('[AI Meta Viewer] Registering path & Requesting download:', fullFilename);
+
+            // イベントリスナー用にキューへパスを登録
+            if (!downloadPathQueue.has(img.url)) {
+                downloadPathQueue.set(img.url, []);
+            }
+            downloadPathQueue.get(img.url).push(fullFilename);
+
+            chrome.downloads.download({
+                url: img.url,
+                filename: fullFilename,
+                conflictAction: 'uniquify',
+                saveAs: false
+            }, (downloadId) => {
+                if (chrome.runtime.lastError) {
+                    console.error(`[AI Meta Viewer] API Error for ${fullFilename}:`, chrome.runtime.lastError.message);
+                    // 失敗した場合はキューから削除を試みる
+                    const q = downloadPathQueue.get(img.url);
+                    if (q) q.shift();
+                } else {
+                    debugLog(`[AI Meta Viewer] Download started with ID: ${downloadId}`);
+                }
+            });
+
+            downloadedCount++;
+        } catch (e) {
+            console.error(`[AI Meta Viewer] Catch block error for ${img.url}:`, e);
+        }
+    }
+
+    return downloadedCount;
+}
+
 
 /**
  * 画像を取得してメタデータを抽出

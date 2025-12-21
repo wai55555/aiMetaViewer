@@ -59,6 +59,24 @@
   "descErrorNotification": {
     "message": "Show a notification when metadata loading fails"
   },
+  "sectionDownloader": {
+    "message": "Downloader"
+  },
+  "labelDownloaderFolderMode": {
+    "message": "Save Folder Structure"
+  },
+  "descDownloaderFolderMode": {
+    "message": "Choose how to organize downloaded images in your downloads folder."
+  },
+  "optPageTitle": {
+    "message": "Page Title (e.g. AI_Meta_Viewer/PageName/)"
+  },
+  "optDomain": {
+    "message": "Domain Name (e.g. AI_Meta_Viewer/pixiv.net/)"
+  },
+  "optNone": {
+    "message": "Flat (AI_Meta_Viewer/image.png)"
+  },
   "sectionCache": {
     "message": "Cache Management"
   },

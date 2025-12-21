@@ -142,8 +142,9 @@ function detectGenerator(metadata) {
 
     // ComfyUI
     // workflowまたはgeneration_dataキーが存在する場合（Tensor.artでない場合）
-    if (metadata.workflow || metadata.generation_data) {
-        return 'ComfyUI workflow';
+    // または parameters 内に ComfyUI という文字列が含まれている場合
+    if (metadata.workflow || metadata.generation_data || (metadata.parameters && metadata.parameters.includes('ComfyUI'))) {
+        return 'ComfyUI';
     }
 
     // Civitai
@@ -428,14 +429,35 @@ function createModal(metadata) {
             // 値が長いJSON等の場合は整形
             const valueStr = typeof value === 'object' ? JSON.stringify(value, null, 2) : String(value);
 
-            // parameters_settingsの場合、Model: を色付け
+            // parameters_settingsの場合、項目ごとに異なる色でハイライト
             if (key === 'parameters_settings' && typeof valueStr === 'string') {
-                // Model: から次のカンマまでをハイライト
-                const highlightedValue = valueStr.replace(
-                    /(Model:\s*)([^,]+)/g,
-                    '$1<span style="color: #ff9500; font-weight: bold;">$2</span>'
+                let highlighted = valueStr;
+
+                // 1. Model関連 (青系)
+                highlighted = highlighted.replace(
+                    /(Model:\s*[^,]+)/gi,
+                    '<span style="color: #4a9eff; font-weight: bold;">$1</span>'
                 );
-                valueDiv.innerHTML = highlightedValue;
+
+                // 2. ADetailer関連 (紫系)
+                highlighted = highlighted.replace(
+                    /(ADetailer[^:]*:\s*[^,]+)/gi,
+                    '<span style="color: #bb86fc; font-weight: bold;">$1</span>'
+                );
+
+                // 3. Hires関連 (緑系)
+                highlighted = highlighted.replace(
+                    /(Hires\s+checkpoint:\s*[^,]+|Hires\s+(?:Module\s+\d+|CFG\s+Scale|upscale|steps|upscaler):\s*[^,]+)/gi,
+                    '<span style="color: #03dac6; font-weight: bold;">$1</span>'
+                );
+
+                // 4. Lora関連 (黄系)
+                highlighted = highlighted.replace(
+                    /(Lora\s+hashes:\s*(?:"[^"]+"|\{[^\}]+\}|[^,]+))/gi,
+                    '<span style="color: #ffcb2b; font-weight: bold;">$1</span>'
+                );
+
+                valueDiv.innerHTML = highlighted;
             } else {
                 valueDiv.textContent = valueStr;
             }
@@ -514,5 +536,305 @@ function createModal(metadata) {
         document.body.style.overflow = 'hidden';
     }
 
+    return overlay;
+}
+
+/**
+ * ページ内ダウンローダー起動ボタンを作成
+ * @returns {HTMLElement}
+ */
+function createDownloadButton() {
+    const btn = document.createElement('div');
+    btn.className = 'ai-meta-download-fab';
+    btn.innerHTML = `
+        <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="white" stroke-width="2">
+            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3" />
+        </svg>
+    `;
+    btn.title = 'Download AI Images';
+
+    // スタイル (JSで直接書いても良いがCSSの方が管理しやすい)
+    // ここでは最低限だけ設定し、詳細はstyles.cssで
+    btn.style.position = 'fixed';
+    btn.style.bottom = '20px';
+    btn.style.right = '20px'; // エラー通知と被らないように調整が必要かも
+    btn.style.zIndex = '2147483646'; // モーダルより下、バッジより上
+
+    return btn;
+}
+
+/**
+ * ダウンローダーモーダルを作成
+ * @param {Array} images - [{url, filename, metadata}, ...]
+ * @returns {HTMLElement}
+ */
+/**
+ * ダウンローダーモーダルを作成
+ * @param {Array} images - [{url, filename, metadata, isAI}, ...]
+ * @param {Object} context - {pageTitle, domain}
+ * @returns {HTMLElement}
+ */
+function createDownloaderModal(images, context) {
+    const { pageTitle, domain } = context || {};
+    const overlay = document.createElement('div');
+    overlay.className = 'ai-meta-modal-overlay';
+
+    const modal = document.createElement('div');
+    modal.className = 'ai-meta-modal ai-meta-downloader-modal';
+
+    // ヘッダー
+    const header = document.createElement('div');
+    header.className = 'ai-meta-modal-header';
+    header.innerHTML = `<h2>Select Images to Download</h2>`;
+
+    const closeBtn = document.createElement('button');
+    closeBtn.className = 'ai-meta-close-btn';
+    closeBtn.innerHTML = '&times;';
+    header.appendChild(closeBtn);
+
+    // フィルタ・設定エリア
+    const toolbar = document.createElement('div');
+    toolbar.className = 'ai-meta-downloader-toolbar';
+    toolbar.style.padding = '12px 16px';
+    toolbar.style.borderBottom = '1px solid #333';
+    toolbar.style.display = 'flex';
+    toolbar.style.justifyContent = 'space-between';
+    toolbar.style.alignItems = 'center';
+    toolbar.style.flexWrap = 'wrap';
+    toolbar.style.gap = '10px';
+
+    // フィルタボタン
+    const filterGroup = document.createElement('div');
+    filterGroup.className = 'ai-meta-filter-group';
+    filterGroup.style.display = 'flex';
+    filterGroup.style.gap = '8px';
+
+    const filterAI = document.createElement('button');
+    filterAI.textContent = 'AI Images Only';
+    filterAI.className = 'ai-meta-filter-btn active';
+    filterAI.style.padding = '4px 12px';
+    filterAI.style.borderRadius = '4px';
+    filterAI.style.border = '1px solid #4a9eff';
+    filterAI.style.background = '#4a9eff';
+    filterAI.style.color = 'white';
+    filterAI.style.cursor = 'pointer';
+
+    const filterAll = document.createElement('button');
+    filterAll.textContent = 'Show All';
+    filterAll.className = 'ai-meta-filter-btn';
+    filterAll.style.padding = '4px 12px';
+    filterAll.style.borderRadius = '4px';
+    filterAll.style.border = '1px solid #555';
+    filterAll.style.background = 'transparent';
+    filterAll.style.color = '#aaa';
+    filterAll.style.cursor = 'pointer';
+
+    filterGroup.appendChild(filterAI);
+    filterGroup.appendChild(filterAll);
+
+    // 保存先ヒント
+    const saveHint = document.createElement('div');
+    saveHint.className = 'ai-meta-save-hint';
+    saveHint.style.fontSize = '12px';
+    saveHint.style.color = '#888';
+
+    // 非同期で設定を読み込んでヒントを更新
+    chrome.storage.sync.get({ downloaderFolderMode: 'pageTitle' }, (settings) => {
+        let path = 'AI_Meta_Viewer/';
+        if (settings.downloaderFolderMode === 'pageTitle' && pageTitle) {
+            path += pageTitle.replace(/[\\/:*?"<>|]/g, '_').substring(0, 20) + '.../';
+        } else if (settings.downloaderFolderMode === 'domain' && domain) {
+            path += domain + '/';
+        }
+        saveHint.innerHTML = `Save path: <code style="color: #4a9eff;">${path}</code>`;
+    });
+
+    toolbar.appendChild(filterGroup);
+    toolbar.appendChild(saveHint);
+
+    // コンテンツ (グリッド表示)
+    const content = document.createElement('div');
+    content.className = 'ai-meta-modal-content ai-meta-downloader-grid';
+    content.style.display = 'grid';
+    content.style.gridTemplateColumns = 'repeat(auto-fill, minmax(120px, 1fr))';
+    content.style.gap = '12px';
+    content.style.padding = '16px';
+    content.style.maxHeight = '60vh';
+    content.style.overflowY = 'auto';
+
+    // 画像アイテム作成
+    const renderImages = (onlyAI = true) => {
+        content.innerHTML = '';
+        const targets = onlyAI ? images.filter(img => img.isAI) : images;
+
+        targets.forEach((img, idx) => {
+            const item = document.createElement('div');
+            item.className = 'ai-meta-downloader-item';
+            item.style.position = 'relative';
+            item.style.aspectRatio = '1';
+            item.style.cursor = 'pointer';
+            item.style.border = '2px solid #4a9eff';
+            item.style.borderRadius = '4px';
+            item.style.overflow = 'hidden';
+            item.dataset.selected = 'true';
+            item.dataset.url = img.url;
+
+            const thumb = document.createElement('img');
+            thumb.src = img.url;
+            thumb.style.width = '100%';
+            thumb.style.height = '100%';
+            thumb.style.objectFit = 'cover';
+
+            // AIバッジ（グリッド内）
+            if (img.isAI) {
+                const aiIndicator = document.createElement('div');
+                aiIndicator.textContent = 'AI';
+                aiIndicator.style.position = 'absolute';
+                aiIndicator.style.top = '4px';
+                aiIndicator.style.right = '4px';
+                aiIndicator.style.background = 'rgba(74, 158, 255, 0.9)';
+                aiIndicator.style.color = 'white';
+                aiIndicator.style.fontSize = '10px';
+                aiIndicator.style.padding = '1px 4px';
+                aiIndicator.style.borderRadius = '2px';
+                aiIndicator.style.fontWeight = 'bold';
+                item.appendChild(aiIndicator);
+            }
+
+            const checkbox = document.createElement('input');
+            checkbox.type = 'checkbox';
+            checkbox.checked = true;
+            checkbox.style.position = 'absolute';
+            checkbox.style.bottom = '4px';
+            checkbox.style.left = '4px';
+            checkbox.style.width = '16px';
+            checkbox.style.height = '16px';
+            checkbox.style.accentColor = '#4a9eff';
+
+            item.appendChild(thumb);
+            item.appendChild(checkbox);
+
+            item.addEventListener('click', (e) => {
+                const isSelected = item.dataset.selected === 'true';
+                if (isSelected) {
+                    item.dataset.selected = 'false';
+                    item.style.border = '2px solid transparent';
+                    item.style.opacity = '0.4';
+                    checkbox.checked = false;
+                } else {
+                    item.dataset.selected = 'true';
+                    item.style.border = '2px solid #4a9eff';
+                    item.style.opacity = '1';
+                    checkbox.checked = true;
+                }
+                updateDownloadBtn();
+            });
+
+            content.appendChild(item);
+        });
+        updateDownloadBtn();
+    };
+
+    // フッター
+    const footer = document.createElement('div');
+    footer.className = 'ai-meta-modal-footer';
+    footer.style.display = 'flex';
+    footer.style.justifyContent = 'space-between';
+    footer.style.alignItems = 'center';
+
+    const stats = document.createElement('span');
+    stats.style.fontSize = '13px';
+    stats.style.color = '#888';
+
+    const dlBtn = document.createElement('button');
+    dlBtn.className = 'ai-meta-copy-all-btn';
+    dlBtn.style.backgroundColor = '#4a9eff';
+    dlBtn.style.color = '#fff';
+
+    footer.appendChild(stats);
+    footer.appendChild(dlBtn);
+
+    const updateDownloadBtn = () => {
+        const selectedItems = content.querySelectorAll('.ai-meta-downloader-item[data-selected="true"]');
+        const count = selectedItems.length;
+        dlBtn.textContent = `Download Selected (${count})`;
+        dlBtn.disabled = count === 0;
+        dlBtn.style.opacity = count === 0 ? '0.5' : '1';
+        stats.textContent = `Selected: ${count} / Total on page: ${images.length}`;
+    };
+
+    // フィルタ切り替えイベント
+    filterAI.onclick = () => {
+        filterAI.style.background = '#4a9eff';
+        filterAI.style.color = 'white';
+        filterAI.style.border = '1px solid #4a9eff';
+        filterAll.style.background = 'transparent';
+        filterAll.style.color = '#aaa';
+        filterAll.style.border = '1px solid #555';
+        renderImages(true);
+    };
+
+    filterAll.onclick = () => {
+        filterAll.style.background = '#4a9eff';
+        filterAll.style.color = 'white';
+        filterAll.style.border = '1px solid #4a9eff';
+        filterAI.style.background = 'transparent';
+        filterAI.style.color = '#aaa';
+        filterAI.style.border = '1px solid #555';
+        renderImages(false);
+    };
+
+    dlBtn.onclick = () => {
+        const selectedItems = content.querySelectorAll('.ai-meta-downloader-item[data-selected="true"]');
+        const targets = Array.from(selectedItems).map(item => {
+            const url = item.dataset.url;
+            const originalData = images.find(img => img.url === url);
+            return {
+                url: url,
+                filename: originalData ? originalData.filename : 'image.png'
+            };
+        });
+
+        if (targets.length > 0) {
+            dlBtn.disabled = true;
+            dlBtn.textContent = 'Processing...';
+
+            chrome.runtime.sendMessage({
+                action: 'downloadImages',
+                images: targets,
+                context: { pageTitle, domain } // フォルダ名決定のため
+            }, (response) => {
+                if (response && response.success) {
+                    dlBtn.textContent = 'Downloads Started!';
+                    setTimeout(close, 1500);
+                } else {
+                    alert('Download failed: ' + (response ? response.error : 'Unknown error'));
+                    updateDownloadBtn();
+                }
+            });
+        }
+    };
+
+    // 初期化
+    renderImages(true); // AI画像のみをデフォルト
+
+    modal.appendChild(header);
+    modal.appendChild(toolbar);
+    modal.appendChild(content);
+    modal.appendChild(footer);
+    overlay.appendChild(modal);
+
+    // 閉じる処理
+    const close = () => {
+        if (overlay.parentNode) {
+            document.body.removeChild(overlay);
+            document.body.style.overflow = '';
+        }
+    };
+
+    closeBtn.onclick = close;
+    overlay.onclick = (e) => { if (e.target === overlay) close(); };
+
+    document.body.style.overflow = 'hidden';
     return overlay;
 }

@@ -286,7 +286,45 @@
   border-radius: 4px;
 }
 
-.ai-meta-modal-content::-webkit-scrollbar-thumb:hover,
-.ai-meta-text-area::-webkit-scrollbar-thumb:hover {
-  background: #4f4f4f;
+/* ダウンロードFAB */
+.ai-meta-download-fab {
+  width: 50px;
+  height: 50px;
+  background-color: #4a9eff;
+  border-radius: 50%;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  box-shadow: 0 4px 10px rgba(0, 0, 0, 0.4);
+  cursor: pointer;
+  transition: transform 0.2s, background-color 0.2s;
+}
+
+.ai-meta-download-fab:hover {
+  transform: scale(1.1);
+  background-color: #3b8ceb;
+}
+
+.ai-meta-download-fab:active {
+  transform: scale(0.95);
+}
+
+/* ダウンローダーモーダル */
+.ai-meta-downloader-modal {
+  width: 800px;
+  height: 80vh;
+}
+
+.ai-meta-downloader-grid {
+  padding: 16px;
+  background-color: #111;
+}
+
+.ai-meta-downloader-item {
+  transition: transform 0.1s;
+}
+
+.ai-meta-downloader-item:hover {
+  transform: scale(1.02);
+  z-index: 1;
 }
