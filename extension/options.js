@@ -11,7 +11,9 @@ const DEFAULT_SETTINGS = {
     excludedSites: [],
     ignoredMetadataKeys: ['XML:com.adobe.xmp'],
     ignoredSoftware: ['Adobe Photoshop', 'Adobe ImageReady', 'Celsys Studio Tool', 'GIMP', 'Paint.NET'],
-    downloaderFolderMode: 'pageTitle'
+    downloaderFolderMode: 'pageTitle',
+    downloaderBaseFolder: 'AI_Meta_Viewer',
+    downloaderUseRoot: false
 };
 
 // DOM Elements
@@ -29,6 +31,9 @@ const resetBtn = document.getElementById('resetBtn');
 const clearCacheBtn = document.getElementById('clearCache');
 const statusMessage = document.getElementById('statusMessage');
 const downloaderFolderModeSelect = document.getElementById('downloaderFolderMode');
+const downloaderBaseFolderInput = document.getElementById('downloaderBaseFolder');
+const downloaderUseRootCheckbox = document.getElementById('downloaderUseRoot');
+const baseFolderContainer = document.getElementById('baseFolderContainer');
 
 // Apply i18n texts
 function applyI18n() {
@@ -65,6 +70,11 @@ async function loadSettings() {
     if (ignoredMetadataKeysTextarea) ignoredMetadataKeysTextarea.value = settings.ignoredMetadataKeys.join('\n');
     if (ignoredSoftwareTextarea) ignoredSoftwareTextarea.value = settings.ignoredSoftware.join('\n');
     if (downloaderFolderModeSelect) downloaderFolderModeSelect.value = settings.downloaderFolderMode;
+    if (downloaderBaseFolderInput) downloaderBaseFolderInput.value = settings.downloaderBaseFolder || '';
+    if (downloaderUseRootCheckbox) {
+        downloaderUseRootCheckbox.checked = settings.downloaderUseRoot;
+        updateBaseFolderVisibility();
+    }
 }
 
 // Save settings
@@ -94,7 +104,9 @@ async function saveSettings() {
         excludedSites: excludedSites,
         ignoredMetadataKeys: ignoredMetadataKeys,
         ignoredSoftware: ignoredSoftware,
-        downloaderFolderMode: downloaderFolderModeSelect ? downloaderFolderModeSelect.value : 'pageTitle'
+        downloaderFolderMode: downloaderFolderModeSelect ? downloaderFolderModeSelect.value : 'pageTitle',
+        downloaderBaseFolder: downloaderBaseFolderInput ? downloaderBaseFolderInput.value.trim() : 'AI_Meta_Viewer',
+        downloaderUseRoot: downloaderUseRootCheckbox ? downloaderUseRootCheckbox.checked : false
     };
 
     // Validation
@@ -176,6 +188,21 @@ function showStatus(message, type = 'success') {
     }, 3000);
 }
 
+// Update base folder input visibility/enabled state
+function updateBaseFolderVisibility() {
+    if (!downloaderUseRootCheckbox || !baseFolderContainer) return;
+
+    if (downloaderUseRootCheckbox.checked) {
+        baseFolderContainer.style.opacity = '0.5';
+        baseFolderContainer.style.pointerEvents = 'none';
+        if (downloaderBaseFolderInput) downloaderBaseFolderInput.disabled = true;
+    } else {
+        baseFolderContainer.style.opacity = '1';
+        baseFolderContainer.style.pointerEvents = 'auto';
+        if (downloaderBaseFolderInput) downloaderBaseFolderInput.disabled = false;
+    }
+}
+
 // Event Listeners
 document.addEventListener('DOMContentLoaded', () => {
     loadSettings();
@@ -190,5 +217,9 @@ document.addEventListener('DOMContentLoaded', () => {
                 saveSettings();
             }
         });
+    }
+
+    if (downloaderUseRootCheckbox) {
+        downloaderUseRootCheckbox.addEventListener('change', updateBaseFolderVisibility);
     }
 });

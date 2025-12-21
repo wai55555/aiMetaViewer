@@ -63,13 +63,25 @@
         "message": "ダウンロードフォルダ内での画像の整理方法を選択します。"
     },
     "optPageTitle": {
-        "message": "ページタイトルごと (例: AI_Meta_Viewer/ページ名/)"
+        "message": "ページタイトルごと"
     },
     "optDomain": {
-        "message": "ドメインごと (例: AI_Meta_Viewer/pixiv.net/)"
+        "message": "ドメインごと"
     },
     "optNone": {
-        "message": "フォルダ分けしない (AI_Meta_Viewer/画像名.png)"
+        "message": "サブフォルダなし"
+    },
+    "labelDownloaderBaseFolder": {
+        "message": "メインフォルダ名"
+    },
+    "descDownloaderBaseFolder": {
+        "message": "保存先の親フォルダ名を指定します（デフォルト: AI_Meta_Viewer）。"
+    },
+    "labelDownloaderUseRoot": {
+        "message": "ダウンロードフォルダ直下に保存"
+    },
+    "descDownloaderUseRoot": {
+        "message": "チェックを入れると、メインフォルダを作成せず、ダウンロードフォルダ直下（またはサブフォルダのみ）に保存します。"
     },
     "sectionCache": {
         "message": "キャッシュ管理"

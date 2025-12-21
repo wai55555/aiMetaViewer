@@ -61,7 +61,9 @@ const DEFAULT_SETTINGS = {
     debugMode: false,
     errorNotification: false,
     minPixelCount: 250000,
-    downloaderFolderMode: 'pageTitle' // 'pageTitle', 'domain', 'none'
+    downloaderFolderMode: 'pageTitle', // 'pageTitle', 'domain', 'none'
+    downloaderBaseFolder: 'AI_Meta_Viewer',
+    downloaderUseRoot: false
 };
 
 // 現在の設定（起動時に読み込み）
@@ -151,20 +153,37 @@ async function handleDownloadImages(images, context) {
             .trim();
     };
 
-    let downloadPath = 'AI_Meta_Viewer';
+    let downloadPath = '';
+    // ルート保存設定がオフの場合のみメインフォルダを作成
+    if (!settings.downloaderUseRoot) {
+        const base = sanitize(settings.downloaderBaseFolder || 'AI_Meta_Viewer');
+        if (base && base !== '_') {
+            downloadPath = base;
+        }
+    }
+
     let subFolder = '';
 
     if (settings.downloaderFolderMode === 'pageTitle' && pageTitle) {
-        subFolder = sanitize(pageTitle).substring(0, 22); // 長すぎるタイトルを制限
+        subFolder = sanitize(pageTitle).substring(0, 22); // ユーザー指定の22文字制限を維持
     } else if (settings.downloaderFolderMode === 'domain' && domain) {
         subFolder = sanitize(domain);
     }
 
     if (subFolder) {
-        downloadPath += `/${subFolder}`;
+        if (downloadPath) {
+            downloadPath += `/${subFolder}`;
+        } else {
+            downloadPath = subFolder;
+        }
     }
 
-    console.log('[AI Meta Viewer] Final download directory (relative to Downloads):', downloadPath);
+    // どちらも空の場合はファイル名のみ（ダウンロード直下）
+    if (!downloadPath) {
+        console.log('[AI Meta Viewer] Saving directly to Downloads root');
+    } else {
+        console.log('[AI Meta Viewer] Final download directory (relative to Downloads):', downloadPath);
+    }
 
     let downloadedCount = 0;
     for (const img of images) {
@@ -193,7 +212,10 @@ async function handleDownloadImages(images, context) {
                     console.error(`[AI Meta Viewer] API Error for ${fullFilename}:`, chrome.runtime.lastError.message);
                     // 失敗した場合はキューから削除を試みる
                     const q = downloadPathQueue.get(img.url);
-                    if (q) q.shift();
+                    if (q) {
+                        q.shift();
+                        if (q.length === 0) downloadPathQueue.delete(img.url);
+                    }
                 } else {
                     debugLog(`[AI Meta Viewer] Download started with ID: ${downloadId}`);
                 }

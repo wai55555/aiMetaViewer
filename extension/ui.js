@@ -431,7 +431,12 @@ function createModal(metadata) {
 
             // parameters_settingsの場合、項目ごとに異なる色でハイライト
             if (key === 'parameters_settings' && typeof valueStr === 'string') {
-                let highlighted = valueStr;
+                // XSS対策: HTMLエンティティをエスケープしてからハイライト処理を行う
+                const escapeHtml = (str) => str.replace(/[&<>"']/g, m => ({
+                    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+                }[m]));
+
+                let highlighted = escapeHtml(valueStr);
 
                 // 1. Model関連 (青系)
                 highlighted = highlighted.replace(
