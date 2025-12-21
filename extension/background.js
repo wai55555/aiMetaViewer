@@ -193,7 +193,10 @@ async function handleDownloadImages(images, context) {
                     console.error(`[AI Meta Viewer] API Error for ${fullFilename}:`, chrome.runtime.lastError.message);
                     // 失敗した場合はキューから削除を試みる
                     const q = downloadPathQueue.get(img.url);
-                    if (q) q.shift();
+                    if (q) {
+                        q.shift();
+                        if (q.length === 0) downloadPathQueue.delete(img.url);
+                    }
                 } else {
                     debugLog(`[AI Meta Viewer] Download started with ID: ${downloadId}`);
                 }
