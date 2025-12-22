@@ -66,7 +66,7 @@ function addAnalyzingBadge(img) {
         // 画像がDOMから削除されていたらバッジも削除
         if (!img.isConnected) {
             badge.remove();
-            window.removeEventListener('scroll', onScroll);
+            window.removeEventListener('scroll', onScroll, { capture: true });
             window.removeEventListener('resize', onResize);
             return;
         }
@@ -125,7 +125,7 @@ function addAnalyzingBadge(img) {
         element: badge,
         cleanup: () => {
             badge.remove();
-            window.removeEventListener('scroll', onScroll);
+            window.removeEventListener('scroll', onScroll, { capture: true });
             window.removeEventListener('resize', onResize);
         }
     };

@@ -99,7 +99,7 @@ window.SiteAdapters = [
             if (parentLink && parentLink.href) {
                 const href = parentLink.href;
                 const cleanHref = href.split('?')[0];
-                if (/\.(png|jpg|jpeg|webp|avif)$/i.test(cleanHref)) {
+                if (/\.(png|jpg|jpeg|webp|avif|gif)$/i.test(cleanHref)) {
                     return href;
                 }
             }
