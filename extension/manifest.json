@@ -31,7 +31,10 @@
                 "<all_urls>"
             ],
             "js": [
+                "settings_loader.js",
                 "ui.js",
+                "adapters.js",
+                "badge_controller.js",
                 "scanner.js",
                 "content.js"
             ],

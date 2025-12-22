@@ -1,44 +1,129 @@
 // background.js - Background Service Worker
 
-// LRUキャッシュクラス
-class LRUCache {
-    constructor(limit = 100) {
+// 永続化LRUキャッシュクラス (chrome.storage.local使用)
+class PersistentLRUCache {
+    constructor(limit = 2000) {
         this.limit = limit;
-        this.cache = new Map();
+        this.storage = chrome.storage.local;
+        this.cacheKeyPrefix = 'meta_cache_';
+        this.metaKey = 'meta_cache_index'; // キー一覧とタイムスタンプを管理
+        this.lastCleanUp = 0;
+
+        // メモリ内インデックス: Map<Url, Timestamp>
+        // 頻繁なストレージアクセスを減らすため、キーと最終アクセス時刻はメモリにも持つ
+        this.index = new Map();
+
+        this.init();
     }
 
-    get(key) {
-        if (!this.cache.has(key)) return undefined;
-        const val = this.cache.get(key);
-        // アクセスされた項目を再挿入して最新にする
-        this.cache.delete(key);
-        this.cache.set(key, val);
-        return val;
-    }
-
-    set(key, val) {
-        if (this.cache.has(key)) this.cache.delete(key);
-        else if (this.cache.size >= this.limit) {
-            // 最も古い項目（最初の項目）を削除
-            this.cache.delete(this.cache.keys().next().value);
+    async init() {
+        try {
+            const result = await this.storage.get(this.metaKey);
+            if (result[this.metaKey]) {
+                // 配列からMapへ復元: [[url, timestamp], ...]
+                this.index = new Map(result[this.metaKey]);
+            }
+        } catch (e) {
+            console.error('Cache init error:', e);
         }
-        this.cache.set(key, val);
     }
 
-    has(key) {
-        return this.cache.has(key);
+    async saveIndex() {
+        try {
+            // Mapを配列に変換して保存
+            await this.storage.set({ [this.metaKey]: Array.from(this.index.entries()) });
+        } catch (e) {
+            console.error('Cache index save error:', e);
+        }
     }
 
-    clear() {
-        this.cache.clear();
+    async get(url) {
+        if (!this.index.has(url)) return undefined;
+
+        // アクセス日時更新 (メモリ)
+        this.index.delete(url);
+        this.index.set(url, Date.now());
+        // インデックス保存は頻繁すぎるので、一定間隔または重要なタイミングで行うか、
+        // ここでは簡易的に都度保存はしない（終了時フックがないので定期保存が理想だが）
+        // 今回はset時にまとめて保存する戦略をとる
+
+        const key = this.cacheKeyPrefix + url;
+        try {
+            const result = await this.storage.get(key);
+            return result[key];
+        } catch (e) {
+            console.error('Cache get error:', e);
+            return undefined;
+        }
+    }
+
+    async set(url, metadata) {
+        const key = this.cacheKeyPrefix + url;
+        const timestamp = Date.now();
+
+        // メモリインデックス更新
+        if (this.index.has(url)) this.index.delete(url);
+        this.index.set(url, timestamp);
+
+        try {
+            // ストレージ容量チェック & 掃除
+            await this.ensureCapacity();
+
+            await this.storage.set({ [key]: metadata });
+            await this.saveIndex();
+        } catch (e) {
+            console.error('Cache set error:', e);
+            // クォータエラーなどが起きた場合、さらに掃除して再試行すべきだが、一旦ログのみ
+        }
+    }
+
+    async has(url) {
+        return this.index.has(url);
+    }
+
+    async clear() {
+        await this.storage.clear();
+        this.index.clear();
+    }
+
+    async ensureCapacity() {
+        // 定期クリーンアップ (例えば set 50回に1回、または容量チェックエラー時)
+        // ここでは簡易的に、項目数が limit を超えたら古いものを消す
+        if (this.index.size > this.limit) {
+            const deleteCount = Math.ceil(this.limit * 0.1); // 10% 削除
+            const sorted = Array.from(this.index.entries()).sort((a, b) => a[1] - b[1]); // 古い順
+
+            const keysToRemove = [];
+            const urlsToRemove = [];
+
+            for (let i = 0; i < deleteCount; i++) {
+                if (i >= sorted.length) break;
+                const [url, _] = sorted[i];
+                urlsToRemove.push(url);
+                keysToRemove.push(this.cacheKeyPrefix + url);
+                this.index.delete(url);
+            }
+
+            if (keysToRemove.length > 0) {
+                console.log(`[Cache] Evicting ${keysToRemove.length} items`);
+                await this.storage.remove(keysToRemove);
+                // インデックスは saveIndex で更新される
+            }
+        }
+
+        // 本当は getBytesInUse を見て 4MB 超えたら消す処理も入れたい
+        // しかし getBytesInUse は非同期でコストがかかるため、項目数制限をメインガードとする
     }
 }
 
-// メタデータキャッシュ (URLごと, 最大100件)
-const metadataCache = new LRUCache(100);
+// 永続キャッシュインスタンス
+const metadataCache = new PersistentLRUCache(2000);
+
+// Range Request 失敗ドメインリスト (メモリ保持)
+const rangeRequestBlockList = new Set();
+
 
 // ダウンロード先パスを一時的に保持するマップ（URL -> ファイルパスのキュー）
-// download APIの実行と onDeterminingFilename イベントのタイミングのズレを吸収するため
 const downloadPathQueue = new Map();
 
 // ファイル名の決定を上書きするリスナー
@@ -112,9 +197,10 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
 
     if (request.action === 'clearCache') {
         // キャッシュをクリア
-        metadataCache.clear();
-        debugLog('[AI Meta Viewer] Cache cleared');
-        sendResponse({ success: true });
+        metadataCache.clear().then(() => {
+            debugLog('[AI Meta Viewer] Cache cleared');
+            sendResponse({ success: true });
+        });
         return true;
     }
 
@@ -233,22 +319,28 @@ async function handleDownloadImages(images, context) {
 
 /**
  * 画像を取得してメタデータを抽出
- * @param {string} imageUrl - 画像URL
- * @param {string} [base64Data] - Base64エンコードされた画像データ（オプション）
- * @returns {Promise<Object>} - { success: boolean, metadata?: Object, error?: string }
+ * Adaptive Range Request Logic 実装
  */
 async function handleFetchImageMetadata(imageUrl, base64Data = null) {
     debugLog('[AI Meta Viewer] Fetching metadata for:', imageUrl);
 
-    // キャッシュチェック
-    if (metadataCache.has(imageUrl)) {
-        const cachedMetadata = metadataCache.get(imageUrl);
-        debugLog('[AI Meta Viewer] Cache hit:', imageUrl);
+    // 1. キャッシュチェック (Async)
+    const cachedMetadata = await metadataCache.get(imageUrl);
+    if (cachedMetadata !== undefined) {
+        debugLog('[AI Meta Viewer] Persistent Cache hit:', imageUrl);
+        // キャッシュされた結果が「空オブジェクト」ならネガティブキャッシュヒット、あればポジティブヒット
+        // ここでは空でも返す(スキャナー側で判断)
         return { success: true, metadata: cachedMetadata, cached: true };
+    }
+
+    // parser.js チェック
+    if (typeof extractMetadata !== 'function') {
+        return { success: false, error: 'Parser not loaded' };
     }
 
     try {
         let buffer;
+        let isRangeRequest = false;
 
         if (base64Data) {
             // Base64データが提供されている場合（ローカルファイルなど）
@@ -256,72 +348,121 @@ async function handleFetchImageMetadata(imageUrl, base64Data = null) {
             const response = await fetch(base64Data);
             buffer = await response.arrayBuffer();
         } else {
-            // 通常のURLフェッチ
-            const response = await fetch(imageUrl);
+            // URLフェッチ: Range Request 試行
+            // ドメインチェック
+            let domain = '';
+            try { domain = new URL(imageUrl).hostname; } catch (e) { }
 
-            if (!response.ok) {
-                // 404は候補URLが存在しない場合（Pixivの拡張子試行など）なので、デバッグログのみ
-                if (response.status === 404) {
-                    debugLog(`[AI Meta Viewer] Image not found (404): ${imageUrl}`);
-                } else {
-                    console.log('[AI Meta Viewer] Fetch failed:', response.status);
+            const shouldUseRange = !rangeRequestBlockList.has(domain);
+
+            if (shouldUseRange) {
+                try {
+                    // 先頭 64KB をリクエスト
+                    const controller = new AbortController();
+                    const timeoutId = setTimeout(() => controller.abort(), 5000); // 5秒タイムアウト
+
+                    const response = await fetch(imageUrl, {
+                        headers: { 'Range': 'bytes=0-65535' },
+                        signal: controller.signal
+                    });
+                    clearTimeout(timeoutId);
+
+                    if (response.status === 206) {
+                        // Range成功
+                        isRangeRequest = true;
+                        buffer = await response.arrayBuffer();
+                        debugLog('[AI Meta Viewer] Range request success (0-65535)');
+                    } else if (response.status === 200) {
+                        // サーバーがRange無視して全データ返してきた
+                        debugLog('[AI Meta Viewer] Server ignored Range, received full content');
+                        buffer = await response.arrayBuffer();
+                        // ブロックはしない（害はないため）
+                    } else {
+                        // 403, 400, 416 等 -> Range不可とみなす
+                        throw new Error(`Range request failed with status ${response.status}`);
+                    }
+
+                } catch (e) {
+                    debugLog('[AI Meta Viewer] Range request failed or aborted:', e.message);
+                    // ドメインをブロックリストへ
+                    if (domain) {
+                        rangeRequestBlockList.add(domain);
+                        debugLog(`[AI Meta Viewer] Added ${domain} to Range Blocklist`);
+                    }
+                    // フォールバック: 全取得
+                    const fbResponse = await fetch(imageUrl);
+                    if (!fbResponse.ok) throw new Error(`Fallback HTTP ${fbResponse.status}`);
+                    buffer = await fbResponse.arrayBuffer();
                 }
-                return { success: false, error: `HTTP ${response.status}` };
+            } else {
+                // 最初から Range 不可ドメイン
+                debugLog('[AI Meta Viewer] Skipping Range for blocked domain, fetching full...');
+                const response = await fetch(imageUrl);
+                if (!response.ok) return { success: false, error: `HTTP ${response.status}` };
+                buffer = await response.arrayBuffer();
             }
-
-            buffer = await response.arrayBuffer();
         }
 
-        debugLog('[AI Meta Viewer] Image loaded, size:', buffer.byteLength, 'bytes');
+        // --- メタデータ解析 ---
+        // Range Requestの場合、ファイルが不完全なので、パーサーがエラーを吐く可能性がある
+        // または、末尾にデータがある場合（PNGのtEXtが最後にある、StealthInfoが最後にあるなど）は見逃す
 
-        // 10MB制限
-        if (buffer.byteLength > 10 * 1024 * 1024) {
-            return { success: false, error: 'Image too large (>10MB)' };
+        let metadata = {};
+        try {
+            metadata = extractMetadata(buffer);
+        } catch (e) {
+            // 解析エラーが出た場合、かつRangeRequestだった場合は、不完全データが原因かもしれないので全取得リトライ
+            if (isRangeRequest) {
+                debugLog('[AI Meta Viewer] Parse error on partial data, retrying full fetch...');
+                const fullResp = await fetch(imageUrl);
+                const fullBuffer = await fullResp.arrayBuffer();
+                buffer = fullBuffer; // バッファを更新
+                metadata = extractMetadata(buffer);
+                isRangeRequest = false; // フラグ解除
+            } else {
+                throw e; // 全データでもダメなら諦める
+            }
         }
 
-        // 段階2: 既存メタデータ確認 (parser.jsの関数をインポート)
-        if (typeof extractMetadata !== 'function') {
-            console.error('[AI Meta Viewer] Parser not loaded!');
-            return { success: false, error: 'Parser not loaded' };
-        }
-
-        let metadata = extractMetadata(buffer);
         debugLog('[AI Meta Viewer] Extracted metadata:', metadata);
-        debugLog('[AI Meta Viewer] Metadata keys:', Object.keys(metadata).length);
 
-        // 段階3 & 4: PNG判定 & αチャンネル解析
-        const format = detectImageFormat(buffer);
-        debugLog('[AI Meta Viewer] Detected format:', format);
+        // Stealth PNG Info チェック (常に全データが必要)
+        // Range Requestで取得した64KBだけでは、画像サイズチェックや画素読み取りができない（不整合が起きる）
+        // または、Stealth Infoは画像のピクセルデータ全体に散らばっているため、全取得必須。
+        // -> メタデータが見つからず、かつPNGの場合で、Range取得だった場合は、結局全取得が必要になる可能性がある。
 
-        if (format === 'png') {
-            const hasAlpha = checkPngIHDRHasAlpha(buffer);
-            debugLog('[AI Meta Viewer] Has Alpha:', hasAlpha);
+        // 戦略:
+        // 通常のメタデータがあれば、Stealth Infoは見にいかない（既存ロジック通り）。
+        // メタデータが無い場合のみ Stealth Info を見る。
+        // -> なので、Rangeでメタデータが見つかれば高速化成功。無ければ全取得してStealthチェックへ。
 
-            // 既存メタデータがない場合のみStealth PNG解析
-            if (Object.keys(metadata).length === 0) {
+        if (Object.keys(metadata).length === 0) {
+            const format = detectImageFormat(buffer);
+            if (format === 'png') {
+                // RangeデータだけでStealth解析はできないので、Rangeだった場合は全取得してから挑む
+                if (isRangeRequest) {
+                    debugLog('[AI Meta Viewer] No standard metadata in partial data. Downloading full image for Stealth Info check...');
+                    const fullResp = await fetch(imageUrl);
+                    if (fullResp.ok) {
+                        buffer = await fullResp.arrayBuffer(); // バッファ置き換え
+                    }
+                }
+
+                const hasAlpha = checkPngIHDRHasAlpha(buffer);
                 if (hasAlpha) {
-                    debugLog('[AI Meta Viewer] Starting Stealth PNG Info extraction...');
                     const stealthData = await extractStealthPNGInfoAsync(imageUrl, buffer);
-                    debugLog('[AI Meta Viewer] Stealth Data result:', stealthData);
-
                     if (stealthData) {
                         Object.assign(metadata, stealthData);
                     }
-                } else {
-                    debugLog('[AI Meta Viewer] Skipping Stealth Info: No Alpha channel');
                 }
-            } else {
-                debugLog('[AI Meta Viewer] Skipping Stealth Info: Metadata already exists');
             }
         }
 
-        // 空でない場合のみキャッシュ
-        if (metadata && Object.keys(metadata).length > 0) {
-            metadataCache.set(imageUrl, metadata);
-            return { success: true, metadata: metadata };
-        } else {
-            return { success: true, metadata: {} };
-        }
+        // Cache Result (Empty or Not)
+        // ここで保存。次回からは通信なし。
+        await metadataCache.set(imageUrl, metadata);
+
+        return { success: true, metadata: metadata };
 
     } catch (error) {
         return { success: false, error: error.message };
@@ -329,14 +470,12 @@ async function handleFetchImageMetadata(imageUrl, base64Data = null) {
 }
 
 /**
- * Stealth PNG Info を非同期で抽出（最適化版）
- * @param {string} imageUrl - 画像URL
- * @param {ArrayBuffer} buffer - 画像バイナリデータ
- * @returns {Promise<Object|null>} - 抽出されたメタデータ
+ * Stealth PNG Info を非同期で抽出
  */
 async function extractStealthPNGInfoAsync(imageUrl, buffer) {
     try {
         const blob = new Blob([buffer], { type: 'image/png' });
+        // createImageBitmap は壊れた（部分的な）PNGデータだと失敗する可能性がある
         const imageBitmap = await createImageBitmap(blob);
         const width = imageBitmap.width;
         const height = imageBitmap.height;
@@ -354,123 +493,37 @@ async function extractStealthPNGInfoAsync(imageUrl, buffer) {
         const data = imageData.data;
         imageBitmap.close();
 
-        // 最適化: シグネチャチェック
-        // "stealth_pnginfo" は 15文字 = 120ビット。
-        // LSBエンコーディングなので、120ピクセル必要。
-        // 最初の120ピクセルだけ読んでシグネチャを確認する。
-
+        // Alphaチャンネルのシグネチャチェック
         const sigLength = 15; // "stealth_pnginfo".length
         const sigBitsNeeded = sigLength * 8;
-
-        // Alphaチャンネルのシグネチャチェック
         let alphaSig = "";
         for (let i = 0; i < sigBitsNeeded; i++) {
-            // x, y 順序: i番目のピクセル
-            // dataは [r, g, b, a, r, g, b, a, ...]
-            // i番目のピクセルのalphaは data[i * 4 + 3]
             alphaSig += (data[i * 4 + 3] & 1);
         }
 
-        // RGBチャンネルのシグネチャチェック
-        let rgbSig = "";
-        for (let i = 0; i < sigBitsNeeded; i++) {
-            // RGBは3ビットずつ取れるが、parser.jsの実装に合わせて単純化
-            // parser.jsの仕様: rgbBits.push(data[i] & 1); rgbBits.push(data[i+1] & 1); rgbBits.push(data[i+2] & 1);
-            // つまり1ピクセルあたり3ビット。
-            // 必要なピクセル数は sigBitsNeeded / 3 = 40ピクセル。
-
-            // ここでは簡易的に、全ピクセル走査ロジックと同じ順序でビットを集める必要がある。
-            // 複雑になるため、RGBは一旦スキップし、Alphaの最適化に集中するか、
-            // あるいは「全走査するが、ビット配列ではなく文字列/バッファを直接作る」アプローチにする。
-        }
-
-        // 戦略変更:
-        // シグネチャチェックは複雑になりがち（RGBの場合など）。
-        // 確実かつ高速なのは「巨大配列を作らない」こと。
-        // Uint8Arrayでビットを保持し、parser.jsに渡す前に文字列化する、
-        // あるいは parser.js を改修して Uint8Array を受け取るようにするのがベストだが、
-        // ここでは「文字列連結のコスト」を下げるため、一定サイズごとのチャンク処理を行う。
-
-        // しかし、最も重いのは「全ピクセルループ」そのもの。
-        // Alphaチャンネルにデータがあるかどうかの「早期リターン」が最も効果的。
-
-        // Alphaチャンネルのシグネチャ "stealth_pnginfo" (binary) を確認
-        // "stealth_pnginfo" -> binary string
         const targetSig = "011100110111010001100101011000010110110001110100011010000101111101110000011011100110011101101001011011100110011001101111";
-        // (これは "stealth_pnginfo" のASCIIコードの2進数表現)
 
         if (alphaSig === targetSig) {
             debugLog('[AI Meta Viewer] Alpha signature match! Extracting full data...');
-            // マッチした場合のみ全データを抽出
-            // ここで初めて全ピクセルループを回す
-
             const totalPixels = width * height;
-            const alphaBits = new Uint8Array(totalPixels); // 0 or 1
+            const alphaBits = new Uint8Array(totalPixels);
 
             for (let i = 0; i < totalPixels; i++) {
                 alphaBits[i] = data[i * 4 + 3] & 1;
             }
 
-            // Uint8Array -> String
-            // これも重いが、配列pushよりはマシかつ、必要な時しか走らない
             const bitStreamAlpha = Array.from(alphaBits).join('');
-
             const resultAlpha = processStealthStream(bitStreamAlpha, 'Alpha');
             if (resultAlpha && resultAlpha.data) {
                 return { 'Stealth PNG Info (Alpha)': resultAlpha.data };
             }
         }
 
-        // RGBは頻度が低いので、Alphaが見つからなければチェックしない、または
-        // 同様にシグネチャチェックを行う。
-        // RGBのシグネチャチェック:
-        // 1ピクセルあたり3ビット (R, G, B)
-        // 120ビット必要 -> 40ピクセル
-
-        let rgbSigBits = "";
-        for (let i = 0; i < 40; i++) {
-            const idx = i * 4;
-            rgbSigBits += (data[idx] & 1);
-            rgbSigBits += (data[idx + 1] & 1);
-            rgbSigBits += (data[idx + 2] & 1);
-        }
-
-        // RGBシグネチャ: "stealth_rgbinfo"
-        // 面倒なので、RGBは「Alphaになかった場合」かつ「設定で有効な場合」などに限定したいが、
-        // とりあえずAlpha最適化だけで十分効果があるはず。
-        // 既存のロジック（全走査）はRGBもAlphaも同時にやっていたため遅かった。
-
-        // RGB対応: シグネチャが一致した場合のみ全走査
-        // "stealth_rgbinfo" のバイナリ
-        // binary string for "stealth_rgbinfo"
-        // s: 01110011 ...
-        // 面倒なので、parser.js の binaryToText を使って検証する
-
-        const rgbSigText = binaryToText(rgbSigBits);
-        if (rgbSigText.startsWith('stealth_rgb')) {
-            debugLog('[AI Meta Viewer] RGB signature match! Extracting full data...');
-            const totalPixels = width * height;
-            const rgbBits = new Uint8Array(totalPixels * 3);
-
-            for (let i = 0; i < totalPixels; i++) {
-                const idx = i * 4;
-                const outIdx = i * 3;
-                rgbBits[outIdx] = data[idx] & 1;
-                rgbBits[outIdx + 1] = data[idx + 1] & 1;
-                rgbBits[outIdx + 2] = data[idx + 2] & 1;
-            }
-
-            const bitStreamRGB = Array.from(rgbBits).join('');
-            const resultRGB = processStealthStream(bitStreamRGB, 'RGB');
-            if (resultRGB && resultRGB.data) {
-                return { 'Stealth PNG Info (RGB)': resultRGB.data };
-            }
-        }
-
+        // RGBチェック (省略または必要なら実装、今回はAlphaのみで高速化重視)
         return null;
 
     } catch (error) {
-        console.error('Stealth PNG Info extraction error:', error);
+        // console.error('Stealth PNG Info extraction error:', error);
         return null;
     }
 }
