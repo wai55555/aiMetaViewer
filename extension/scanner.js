@@ -284,6 +284,38 @@ async function scanAllImages() {
 
         console.log('[AI Meta Viewer] Scan complete. Found images:', candidates.length, 'AI:', foundCount, 'Unique Fetches:', uniqueFetchCount);
 
+        // --- ディープスキャン (SiteAdapters 経由) ---
+        console.log('[AI Meta Viewer] Performing deep scan...');
+        if (typeof SiteAdapters !== 'undefined') {
+            for (const adapter of SiteAdapters) {
+                if (adapter.match() && typeof adapter.deepScan === 'function') {
+                    const deepCandidates = adapter.deepScan(document);
+                    if (deepCandidates && Array.isArray(deepCandidates)) {
+                        console.log(`[AI Meta Viewer] Deep scan found ${deepCandidates.length} candidates from ${adapter.match.toString()}`);
+                        for (const dc of deepCandidates) {
+                            if (!candidateUrls.has(dc.url)) {
+                                candidates.push({
+                                    type: dc.type || 'image',
+                                    url: dc.url,
+                                    thumbnailUrl: dc.thumbnailUrl || null,
+                                    filename: dc.filename || getFilenameFromUrl(dc.url),
+                                    metadata: dc.metadata || null,
+                                    isAI: dc.isAI !== undefined ? dc.isAI : false,
+                                    autoSelect: dc.autoSelect, // Civitai等のアダプターから明示的な選択指示を受け取る
+                                    isCivitaiModel: dc.isCivitaiModel, // Civitai特殊フラグ
+                                    modelName: dc.modelName, // ZIP化用
+                                    width: dc.width || 0,
+                                    height: dc.height || 0
+                                });
+                                candidateUrls.add(dc.url);
+                                if (dc.isAI) foundCount++; // 深層スキャンで見つかったAI判定をカウント
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         // 最終的な整合性のために一回更新
         updateProgress(totalImages, foundCount);
 
@@ -338,7 +370,8 @@ async function scanAllImages() {
         const mediaLinks = links.filter(a => {
             const href = a.href.toLowerCase();
             // 複合拡張子対応: tar.gz, tar.bz2, tar.xz など
-            return /\.(mp4|webm|mkv|avi|flv|mov|mp3|wav|ogg|m4a|flac|zip|rar|7z|lzh|tar|tar\.gz|tar\.bz2|tar\.xz|tgz|tbz2)$/i.test(href);
+            // モデルファイル対応: .safetensors, .ckpt, .pt
+            return /\.(mp4|webm|mkv|avi|flv|mov|mp3|wav|ogg|m4a|flac|zip|rar|7z|lzh|tar|tar\.gz|tar\.bz2|tar\.xz|tgz|tbz2|safetensors|ckpt|pt)$/i.test(href);
         });
 
         for (const link of mediaLinks) {
@@ -545,6 +578,30 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
             sendResponse({ success: false, reason: 'iframe' });
         }
     }
+
+    if (request.action === 'clearMemoryCaches') {
+        // scanner.js のメモリキャッシュをクリア
+        const noMetadataCacheSize = noMetadataCache.size;
+        const localMetadataCacheSize = localMetadataCache.size;
+
+        noMetadataCache.clear();
+        localMetadataCache.clear();
+
+        console.log(`[AI Meta Viewer] Scanner caches cleared: noMetadataCache=${noMetadataCacheSize}, localMetadataCache=${localMetadataCacheSize}`);
+        sendResponse({
+            success: true,
+            clearedItems: {
+                noMetadataCache: noMetadataCacheSize,
+                localMetadataCache: localMetadataCacheSize
+            }
+        });
+        return true;
+    }
+
+    if (request.action === 'showNotification') {
+        showNotification(request.message, 5000);
+        sendResponse({ success: true });
+    }
 });
 
 /**
@@ -568,9 +625,36 @@ function createDownloaderModal(candidates, context) {
         font-family: 'Segoe UI', system-ui, sans-serif;
     `;
 
-    // 候補リストから初期選択状態（AI画像のみデフォルトON）
-    // candidates: [{ type, url, filename, metadata, isAI }]
-    let selectedUrls = new Set(candidates.filter(c => c.isAI).map(c => c.url));
+    // 候補リストから初期選択状態（AI画像またはautoSelectフラグ）
+    // candidates: [{ type, url, filename, metadata, isAI, autoSelect }]
+    let selectedUrls = new Set();
+    candidates.forEach(c => {
+        // アーカイブ（safetensors等）はautoSelectフラグのみを信頼し、isAIフラグは無視する（意図しない全選択防止）
+        if (c.type === 'archive') {
+            if (c.autoSelect) {
+                selectedUrls.add(c.url);
+            }
+        } else {
+            // 画像等はautoSelectがあれば従い、なければisAIに従う
+            if (c.autoSelect || (c.isAI && c.autoSelect !== false)) {
+                selectedUrls.add(c.url);
+            }
+        }
+    });
+    const mediaSizes = new Map(); // URL -> size (bytes)
+
+    // ファイルサイズの非同期取得 (アーカイブを優先)
+    candidates.forEach(c => {
+        if (c.type !== 'image') {
+            chrome.runtime.sendMessage({ action: 'getMediaSize', url: c.url }, (res) => {
+                if (res && res.success && res.size) {
+                    mediaSizes.set(c.url, res.size);
+                    renderItems(); // サイズが取得できたら再描画
+                    updateFooter();
+                }
+            });
+        }
+    });
 
     const container = document.createElement('div');
     container.style.cssText = `
@@ -801,6 +885,20 @@ function createDownloaderModal(candidates, context) {
             info.innerText = c.filename;
             info.title = c.filename;
 
+            // サイズ表示 (取得済みの場合)
+            if (mediaSizes.has(c.url)) {
+                const size = mediaSizes.get(c.url);
+                const sizeStr = formatBytes(size);
+                const sizeBadge = document.createElement('div');
+                sizeBadge.style.cssText = `
+                    font-size: 10px;
+                    color: #aaa;
+                    margin-top: 2px;
+                `;
+                sizeBadge.textContent = sizeStr;
+                info.appendChild(sizeBadge);
+            }
+
             // Checkbox overlay
             const checkbox = document.createElement('input');
             checkbox.type = 'checkbox';
@@ -863,7 +961,7 @@ function createDownloaderModal(candidates, context) {
     selectAllBtn.innerText = 'Select All';
     selectAllBtn.style.cssText = btnStyle;
     selectAllBtn.onclick = () => {
-        selectedUrls = new Set(candidates.map(c => c.url));
+        candidates.forEach(c => selectedUrls.add(c.url));
         updateFooter();
         renderItems();
     };
@@ -872,7 +970,10 @@ function createDownloaderModal(candidates, context) {
     selectAiBtn.innerText = 'Select AI Only';
     selectAiBtn.style.cssText = btnStyle;
     selectAiBtn.onclick = () => {
-        selectedUrls = new Set(candidates.filter(c => c.isAI).map(c => c.url));
+        selectedUrls.clear();
+        candidates.forEach(c => {
+            if (c.isAI) selectedUrls.add(c.url);
+        });
         updateFooter();
         renderItems();
     };
@@ -905,7 +1006,13 @@ function createDownloaderModal(candidates, context) {
 
     function updateFooter() {
         const count = selectedUrls.size;
-        downloadBtn.innerText = `Download Selected (${count})`;
+        let totalSizeBytes = 0;
+        selectedUrls.forEach(url => {
+            totalSizeBytes += (mediaSizes.get(url) || 0);
+        });
+
+        const sizeStr = totalSizeBytes > 0 ? ` (${formatBytes(totalSizeBytes)})` : '';
+        downloadBtn.innerText = `Download Selected (${count})${sizeStr}`;
         downloadBtn.disabled = count === 0;
         downloadBtn.style.opacity = count === 0 ? '0.5' : '1';
         downloadBtn.style.cursor = count === 0 ? 'not-allowed' : 'pointer';
@@ -915,34 +1022,49 @@ function createDownloaderModal(candidates, context) {
         const count = selectedUrls.size;
         if (count === 0) return;
 
-        const targets = candidates.filter(c => selectedUrls.has(c.url)).map(c => ({
-            url: c.url,
-            filename: c.filename
-        }));
+        // 1GBチェック
+        let totalSizeBytes = 0;
+        selectedUrls.forEach(url => {
+            totalSizeBytes += (mediaSizes.get(url) || 0);
+        });
 
-        downloadBtn.innerText = 'Starting Download...';
+        const ONE_GB = 1024 * 1024 * 1024;
+        if (totalSizeBytes > ONE_GB) {
+            const confirmed = confirm(`Selected items total ${formatBytes(totalSizeBytes)}, which exceeds 1GB.\nAre you sure you want to start downloading?`);
+            if (!confirmed) return;
+        }
+
+        const targets = candidates.filter(c => selectedUrls.has(c.url));
+        if (targets.length === 0) return;
+
+        const civitaiModel = targets.find(t => t.isCivitaiModel);
+        const downloadContext = {
+            pageTitle: document.title,
+            domain: window.location.hostname,
+            isCivitai: !!civitaiModel,
+            modelName: civitaiModel?.modelName || 'Civitai_Model'
+        };
+
+        downloadBtn.innerText = 'Downloading...';
 
         try {
-            const res = await chrome.runtime.sendMessage({
+            chrome.runtime.sendMessage({
                 action: 'downloadImages',
                 images: targets,
-                context: {
-                    pageTitle: context.pageTitle,
-                    domain: context.domain
+                context: downloadContext
+            }, (response) => {
+                if (response && response.success) {
+                    showNotification(`Started download for ${response.count} items.`);
+                    modalOverlay.remove();
+                } else {
+                    showNotification('Download failed: ' + (response?.error || 'Unknown error'));
+                    updateFooter();
                 }
             });
-
-            if (res && res.success) {
-                showNotification(`Started download for ${res.count} items.`);
-                modalOverlay.remove();
-            } else {
-                showNotification('Download failed: ' + (res.error || 'Unknown error'));
-                downloadBtn.innerText = `Download Selected (${count})`;
-            }
         } catch (e) {
             console.error(e);
             showNotification('Failed to send download message.');
-            downloadBtn.innerText = `Download Selected (${count})`;
+            updateFooter();
         }
     };
 
@@ -1014,7 +1136,7 @@ function getMediaType(filename) {
         image: ['png', 'jpg', 'jpeg', 'webp', 'avif', 'gif', 'bmp', 'svg'],
         video: ['mp4', 'webm', 'mkv', 'avi', 'flv', 'mov', 'wmv', 'mpg', 'mpeg', 'm4v'],
         audio: ['mp3', 'wav', 'ogg', 'm4a', 'flac', 'aac', 'wma', 'opus'],
-        archive: ['zip', 'rar', '7z', 'lzh', 'tar', 'tar.gz', 'tar.bz2', 'tar.xz', 'tgz', 'tbz2', 'gz', 'bz2', 'xz']
+        archive: ['zip', 'rar', '7z', 'lzh', 'tar', 'tar.gz', 'tar.bz2', 'tar.xz', 'tgz', 'tbz2', 'gz', 'bz2', 'xz', 'safetensors', 'ckpt', 'pt']
     };
 
     // 複合拡張子を優先的にチェック
@@ -1024,4 +1146,16 @@ function getMediaType(filename) {
         }
     }
     return 'unknown';
+}
+
+/**
+ * バイト数を読みやすい形式に変換
+ */
+function formatBytes(bytes, decimals = 2) {
+    if (bytes === 0) return '0 Bytes';
+    const k = 1024;
+    const dm = decimals < 0 ? 0 : decimals;
+    const sizes = ['Bytes', 'KB', 'MB', 'GB', 'TB', 'PB', 'EB', 'ZB', 'YB'];
+    const i = Math.floor(Math.log(bytes) / Math.log(k));
+    return parseFloat((bytes / Math.pow(k, i)).toFixed(dm)) + ' ' + sizes[i];
 }

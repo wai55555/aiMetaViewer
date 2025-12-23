@@ -29,11 +29,136 @@ const ignoredSoftwareTextarea = document.getElementById('ignoredSoftware');
 const saveBtn = document.getElementById('saveBtn');
 const resetBtn = document.getElementById('resetBtn');
 const clearCacheBtn = document.getElementById('clearCache');
+const clearAllDataBtn = document.getElementById('clearAllData');
 const statusMessage = document.getElementById('statusMessage');
 const downloaderFolderModeSelect = document.getElementById('downloaderFolderMode');
 const downloaderBaseFolderInput = document.getElementById('downloaderBaseFolder');
 const downloaderUseRootCheckbox = document.getElementById('downloaderUseRoot');
 const baseFolderContainer = document.getElementById('baseFolderContainer');
+
+// Data Statistics Elements
+const cacheItemCountSpan = document.getElementById('cacheItemCount');
+const storageUsageSpan = document.getElementById('storageUsage');
+const blockListCountSpan = document.getElementById('blockListCount');
+const statisticsErrorDiv = document.getElementById('statisticsError');
+
+/**
+ * オプション画面拡張クラス
+ * データ統計表示と全データクリア機能を管理
+ */
+class OptionsPageEnhancer {
+    /**
+     * データ統計を表示する
+     */
+    static async displayDataStatistics() {
+        try {
+            const response = await chrome.runtime.sendMessage({ action: 'getDataStatistics' });
+
+            if (response && response.success) {
+                this.updateUI(response.statistics);
+                this.hideStatisticsError();
+            } else {
+                const errorMsg = response?.error || 'Failed to retrieve data statistics';
+                this.showStatisticsError(errorMsg);
+            }
+        } catch (error) {
+            this.showStatisticsError(`Error retrieving statistics: ${error.message}`);
+        }
+    }
+
+    /**
+     * 全データクリアハンドラ
+     */
+    static async handleClearAllData() {
+        if (!confirm(chrome.i18n.getMessage('confirmClearAllData') || 'Are you sure you want to clear all extension data? This action cannot be undone.')) {
+            return;
+        }
+
+        try {
+            const response = await chrome.runtime.sendMessage({ action: 'clearAllData' });
+
+            if (response && response.success) {
+                const clearedItems = response.clearedItems;
+                const totalCleared = clearedItems.persistentCache + clearedItems.rangeBlockList + clearedItems.contentScriptCaches;
+
+                showStatus(
+                    chrome.i18n.getMessage('msgAllDataCleared') ||
+                    `All data cleared successfully! Removed ${totalCleared} items (Cache: ${clearedItems.persistentCache}, Block List: ${clearedItems.rangeBlockList}, Content Scripts: ${clearedItems.contentScriptCaches})`,
+                    'success'
+                );
+
+                // 統計を即座に更新
+                await this.displayDataStatistics();
+            } else {
+                const errorMsg = response?.error || 'Failed to clear all data';
+                showStatus(
+                    chrome.i18n.getMessage('msgAllDataClearFailed') ||
+                    `Failed to clear all data: ${errorMsg}`,
+                    'error'
+                );
+            }
+        } catch (error) {
+            showStatus(
+                chrome.i18n.getMessage('msgAllDataClearFailed') ||
+                `Failed to clear all data: ${error.message}`,
+                'error'
+            );
+        }
+    }
+
+    /**
+     * UI更新
+     * @param {Object} statistics - データ統計
+     */
+    static updateUI(statistics) {
+        if (cacheItemCountSpan) {
+            cacheItemCountSpan.textContent = statistics.persistentCache.itemCount.toLocaleString();
+        }
+
+        if (storageUsageSpan) {
+            const usage = statistics.persistentCache.storageUsage;
+            const usageText = usage > 0 ? this.formatBytes(usage) : 'Unknown';
+            storageUsageSpan.textContent = usageText;
+        }
+
+        if (blockListCountSpan) {
+            blockListCountSpan.textContent = statistics.rangeBlockList.domainCount.toLocaleString();
+        }
+    }
+
+    /**
+     * バイト数を人間が読みやすい形式にフォーマット
+     * @param {number} bytes - バイト数
+     * @returns {string} フォーマットされた文字列
+     */
+    static formatBytes(bytes) {
+        if (bytes === 0) return '0 B';
+        const k = 1024;
+        const sizes = ['B', 'KB', 'MB', 'GB'];
+        const i = Math.floor(Math.log(bytes) / Math.log(k));
+        return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+    }
+
+    /**
+     * 統計エラーを表示
+     * @param {string} message - エラーメッセージ
+     */
+    static showStatisticsError(message) {
+        if (statisticsErrorDiv) {
+            statisticsErrorDiv.textContent = message;
+            statisticsErrorDiv.style.display = 'block';
+        }
+    }
+
+    /**
+     * 統計エラーを非表示
+     */
+    static hideStatisticsError() {
+        if (statisticsErrorDiv) {
+            statisticsErrorDiv.style.display = 'none';
+        }
+    }
+}
 
 // Apply i18n texts
 function applyI18n() {
@@ -75,6 +200,9 @@ async function loadSettings() {
         downloaderUseRootCheckbox.checked = settings.downloaderUseRoot;
         updateBaseFolderVisibility();
     }
+
+    // データ統計を表示
+    await OptionsPageEnhancer.displayDataStatistics();
 }
 
 // Save settings
@@ -168,6 +296,8 @@ async function clearCache() {
 
         if (response && response.success) {
             showStatus(chrome.i18n.getMessage('msgCacheCleared'), 'success');
+            // 統計を更新
+            await OptionsPageEnhancer.displayDataStatistics();
         } else {
             showStatus(chrome.i18n.getMessage('msgCacheClearFailed'), 'error');
         }
@@ -210,6 +340,7 @@ document.addEventListener('DOMContentLoaded', () => {
     if (saveBtn) saveBtn.addEventListener('click', saveSettings);
     if (resetBtn) resetBtn.addEventListener('click', resetSettings);
     if (clearCacheBtn) clearCacheBtn.addEventListener('click', clearCache);
+    if (clearAllDataBtn) clearAllDataBtn.addEventListener('click', OptionsPageEnhancer.handleClearAllData);
 
     if (minPixelCountInput) {
         minPixelCountInput.addEventListener('keypress', (e) => {

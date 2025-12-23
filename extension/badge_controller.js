@@ -30,16 +30,16 @@ const resizeObserver = new ResizeObserver((entries) => {
 });
 
 /**
- * Remove badge and cleanup observers for an image
- * @param {HTMLImageElement} img 
+ * Remove badge and cleanup observers for an element (Image or other)
+ * @param {HTMLElement} el 
  */
-function removeBadge(img) {
-    const data = processedImages.get(img);
+function removeBadge(el) {
+    const data = processedImages.get(el);
     if (data) {
         if (data.badge) data.badge.remove();
         if (data.cleanup) data.cleanup();
-        resizeObserver.unobserve(img);
-        processedImages.delete(img);
+        resizeObserver.unobserve(el);
+        processedImages.delete(el);
     }
 }
 
@@ -162,6 +162,7 @@ function addBadgeToImage(img, metadata, originalUrl) {
 
     // ui.jsのupdateBadgeでツールチップなどを設定
     updateBadge(badge, metadata);
+    badge.style.zIndex = '2147483647'; // 最前面に表示
 
     // バッジにメタデータとオリジナルURLを保存
     badge._metadata = metadata;
@@ -369,3 +370,132 @@ function addBadgeToImage(img, metadata, originalUrl) {
         });
     }
 }
+
+/**
+ * 汎用的な要素にバッジを追加
+ * @param {HTMLElement} el 
+ * @param {Object} metadata 
+ * @param {string} originalUrl 
+ */
+function addBadgeToElement(el, metadata, originalUrl) {
+    if (processedImages.has(el)) {
+        const existing = processedImages.get(el);
+        if (existing && existing.badge) return;
+    }
+
+    const badge = createBadge();
+    updateBadge(badge, metadata);
+    badge._metadata = metadata;
+    badge._originalUrl = originalUrl;
+
+    badge.addEventListener('click', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        const currentMetadata = badge._metadata;
+        if (currentMetadata && document.body) {
+            const modal = createModal(currentMetadata);
+            document.body.appendChild(modal);
+        }
+    });
+
+    if (!document.body) return;
+    badge.style.position = 'fixed';
+    document.body.appendChild(badge);
+
+    let ticking = false;
+    const updatePosition = () => {
+        if (!el.isConnected) {
+            removeBadge(el);
+            return;
+        }
+        const rect = el.getBoundingClientRect();
+        if (rect.width === 0 || rect.height === 0 ||
+            window.getComputedStyle(el).display === 'none' ||
+            rect.bottom < 0 || rect.top > window.innerHeight ||
+            rect.right < 0 || rect.left > window.innerWidth) {
+            badge.style.display = 'none';
+            return;
+        }
+
+        const badgeHeight = 20;
+        const top = rect.top - badgeHeight;
+        const left = rect.left;
+
+        badge.style.left = `${left}px`;
+        badge.style.top = `${top}px`;
+        badge.style.display = 'block';
+        ticking = false;
+    };
+
+    const onScroll = () => {
+        if (!ticking) {
+            window.requestAnimationFrame(updatePosition);
+            ticking = true;
+        }
+    };
+
+    updatePosition();
+    window.addEventListener('scroll', onScroll, { passive: true, capture: true });
+    resizeObserver.observe(el);
+
+    // ホバー制御
+    let hoverTimer = null;
+    const showBadge = () => {
+        if (hoverTimer) clearTimeout(hoverTimer);
+        hoverTimer = setTimeout(() => {
+            badge.classList.add('visible');
+            updatePosition();
+        }, 100); // 汎用要素は即応性重視
+    };
+    const hideBadge = () => {
+        if (hoverTimer) clearTimeout(hoverTimer);
+        hoverTimer = setTimeout(() => {
+            badge.classList.remove('visible');
+        }, 100);
+    };
+
+    el.addEventListener('mouseenter', showBadge);
+    el.addEventListener('mouseleave', hideBadge);
+    badge.addEventListener('mouseenter', showBadge);
+    badge.addEventListener('mouseleave', hideBadge);
+
+    processedImages.set(el, {
+        badge: badge,
+        updatePosition: updatePosition,
+        cleanup: () => {
+            el.removeEventListener('mouseenter', showBadge);
+            el.removeEventListener('mouseleave', hideBadge);
+            window.removeEventListener('scroll', onScroll);
+            resizeObserver.unobserve(el);
+        }
+    });
+}
+/**
+ * Background Scriptからのメッセージを処理
+ */
+chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
+    if (request.action === 'clearMemoryCaches') {
+        // badge_controller.js のメモリキャッシュをクリア
+        const processedImagesSize = processedImages.size;
+
+        // 各バッジを適切にクリーンアップしてから削除
+        for (const [element, data] of processedImages.entries()) {
+            if (data) {
+                if (data.badge) data.badge.remove();
+                if (data.cleanup) data.cleanup();
+                resizeObserver.unobserve(element);
+            }
+        }
+
+        processedImages.clear();
+
+        console.log(`[AI Meta Viewer] Badge controller caches cleared: processedImages=${processedImagesSize}`);
+        sendResponse({
+            success: true,
+            clearedItems: {
+                processedImages: processedImagesSize
+            }
+        });
+        return true;
+    }
+});

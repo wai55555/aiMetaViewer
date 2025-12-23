@@ -372,11 +372,43 @@
             <!-- キャッシュ管理 -->
             <div class="section">
                 <h2 class="section-title" data-i18n="sectionCache">Cache Management</h2>
+
+                <!-- データ統計表示エリア -->
+                <div class="setting-item">
+                    <div id="dataStatistics"
+                        style="background: #f8f9fa; border: 1px solid #e9ecef; border-radius: 8px; padding: 16px; margin-bottom: 16px;">
+                        <h3 style="margin: 0 0 12px 0; font-size: 16px; color: #333;" data-i18n="titleDataStatistics">
+                            Data Statistics</h3>
+                        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px; font-size: 14px;">
+                            <div>
+                                <strong data-i18n="labelPersistentCache">Persistent Cache:</strong>
+                                <div id="persistentCacheStats" style="margin-left: 8px; color: #666;">
+                                    <div>Items: <span id="cacheItemCount">-</span></div>
+                                    <div>Storage: <span id="storageUsage">-</span></div>
+                                </div>
+                            </div>
+                            <div>
+                                <strong data-i18n="labelBlockList">Block List:</strong>
+                                <div id="blockListStats" style="margin-left: 8px; color: #666;">
+                                    <div>Domains: <span id="blockListCount">-</span></div>
+                                </div>
+                            </div>
+                        </div>
+                        <div id="statisticsError"
+                            style="color: #dc3545; font-size: 13px; margin-top: 8px; display: none;"></div>
+                    </div>
+                </div>
+
                 <div class="setting-item">
                     <p style="color: #666; font-size: 14px; margin-bottom: 12px;" data-i18n="descCache">
                         Clear metadata cache to free up memory
                     </p>
-                    <button class="btn btn-danger" id="clearCache" data-i18n="btnClearCache">🗑️ Clear Cache</button>
+                    <div class="button-group" style="margin-top: 0;">
+                        <button class="btn btn-danger" id="clearCache" data-i18n="btnClearCache">🗑️ Clear
+                            Cache</button>
+                        <button class="btn btn-danger" id="clearAllData" data-i18n="btnClearAllData">🗑️ Clear All
+                            Data</button>
+                    </div>
                 </div>
             </div>
 

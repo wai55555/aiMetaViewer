@@ -39,7 +39,46 @@ function detectImageFormat(buffer) {
     }
   }
 
+  // Safetensors: First 8 bytes is a little-endian Uint64 for header size
+  if (view.length >= 8) {
+    const headerSize = getUint64LE(view, 0);
+    // 数字として妥当な範囲か (0より大きく、100MB以下程度)
+    if (headerSize > 0 && headerSize < 100 * 1024 * 1024) {
+      // 最初の8バイトの直後、または数バイトのパディングの後に '{' (JSONの開始) があれば Safetensors
+      // 通常は 8バイト目(index 8)にあるが、念のため 12バイト目まで確認
+      for (let i = 8; i < Math.min(view.length, 12); i++) {
+        if (view[i] === 0x7B) { // '{' character
+          return 'safetensors';
+        }
+      }
+      // バッファが不足（8バイト〜）していても、数値的に妥当なら一旦 Safetensors とみなして再取得を促す
+      if (view.length < 12) {
+        return 'safetensors';
+      }
+    }
+  }
+
   return null;
+}
+
+/**
+ * Little Endian Uint64 を読み取り (数値精度に注意)
+ */
+function getUint64LE(view, offset) {
+  // JavaScriptの整数精度(53bit)に収まる範囲のみ対応
+  // ビット演算(<<)は32bit符号付きとして扱われるため、大きな値で正しく動作させるために乗算と加算を使用
+  const b0 = view[offset];
+  const b1 = view[offset + 1];
+  const b2 = view[offset + 2];
+  const b3 = view[offset + 3];
+  const b4 = view[offset + 4];
+  const b5 = view[offset + 5];
+  const b6 = view[offset + 6];
+  const b7 = view[offset + 7];
+
+  const low = b0 + (b1 * 256) + (b2 * 65536) + (b3 * 16777216);
+  const high = b4 + (b5 * 256) + (b6 * 65536) + (b7 * 16777216);
+  return low + (high * 4294967296);
 }
 
 /**
@@ -75,9 +114,26 @@ function extractPngMetadata(buffer) {
   let offset = 8;
 
   while (offset < view.length) {
+    // チャンク長を読み取るための最低4バイトがあるか
+    if (offset + 4 > view.length) break;
+
     // チャンク長を読み取り (Big Endian)
     const length = (view[offset] << 24) | (view[offset + 1] << 16) |
       (view[offset + 2] << 8) | view[offset + 3];
+
+    // データが不足しているかチェック (チャンク長4 + タイプ4 + データ + CRC4)
+    if (offset + 4 + 4 + length + 4 > view.length) {
+      // 興味のあるチャンク（tEXt, iTXt）であれば再取得を指示
+      const type = String.fromCharCode(view[offset + 4], view[offset + 5],
+        view[offset + 6], view[offset + 7]);
+
+      if (type === 'tEXt' || type === 'iTXt') {
+        return { isIncomplete: true, suggestedSize: offset + 4 + 4 + length + 4 + 1024 };
+      }
+      // それ以外（画像データなど）なら単に終了
+      break;
+    }
+
     offset += 4;
 
     // チャンク型を読み取り
@@ -261,6 +317,52 @@ function extractAvifMetadata(buffer) {
 }
 
 /**
+ * Safetensors形式のメタデータを抽出
+ * @param {ArrayBuffer} buffer - データ
+ * @returns {Object} - 抽出されたメタデータ
+ */
+function extractSafetensorsMetadata(buffer) {
+  const view = new Uint8Array(buffer);
+
+  if (view.length < 8) {
+    return { isIncomplete: true, suggestedSize: 65536 };
+  }
+
+  const headerSize = getUint64LE(view, 0);
+
+  // ヘッダーサイズが現在のバッファを超えている場合
+  if (headerSize > view.length - 8) {
+    // 巨大すぎるヘッダー（100MB超）は異常とみなす
+    if (headerSize > 100 * 1024 * 1024) return {};
+
+    return {
+      isIncomplete: true,
+      suggestedSize: headerSize + 8
+    };
+  }
+
+  if (headerSize <= 0) {
+    return {};
+  }
+
+  try {
+    const headerBytes = view.slice(8, 8 + headerSize);
+    const headerStr = new TextDecoder('utf-8').decode(headerBytes);
+    const header = JSON.parse(headerStr);
+
+    // Safetensorsは通常 __metadata__ キーにユーザー定義情報が入っている
+    if (header.__metadata__) {
+      return header.__metadata__;
+    }
+
+    return {};
+  } catch (e) {
+    console.error('Safetensors parse error:', e);
+    return {};
+  }
+}
+
+/**
  * UserCommentタグを検索
  * @param {Uint8Array} data - Exifデータ
  * @param {number} tiffStart - TIFFヘッダー開始位置
@@ -397,8 +499,14 @@ function extractMetadata(buffer) {
   const format = detectImageFormat(buffer);
 
   if (!format) {
+    // 診断ログ: 最初の16バイトをヘキサ表示
+    const view = new Uint8Array(buffer.slice(0, 16));
+    const hex = Array.from(view).map(b => b.toString(16).padStart(2, '0')).join(' ');
+    console.log(`[AI Meta Viewer] extractMetadata: format not detected. Buffer size: ${buffer.byteLength}, header hex: ${hex}`);
     return {};
   }
+
+  console.log(`[AI Meta Viewer] extractMetadata: format detected: ${format}, buffer size: ${buffer.byteLength}`);
 
   switch (format) {
     case 'png':
@@ -409,6 +517,8 @@ function extractMetadata(buffer) {
       return extractWebpMetadata(buffer);
     case 'avif':
       return extractAvifMetadata(buffer);
+    case 'safetensors':
+      return extractSafetensorsMetadata(buffer);
     default:
       return {};
   }

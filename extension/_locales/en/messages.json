@@ -139,5 +139,26 @@
   },
   "errorMinPixelCount": {
     "message": "Minimum pixel count must be 10000 or greater"
+  },
+  "titleDataStatistics": {
+    "message": "Data Statistics"
+  },
+  "labelPersistentCache": {
+    "message": "Persistent Cache"
+  },
+  "labelBlockList": {
+    "message": "Block List"
+  },
+  "btnClearAllData": {
+    "message": "🗑️ Clear All Data"
+  },
+  "confirmClearAllData": {
+    "message": "Are you sure you want to clear all extension data? This action cannot be undone."
+  },
+  "msgAllDataCleared": {
+    "message": "All data cleared successfully!"
+  },
+  "msgAllDataClearFailed": {
+    "message": "Failed to clear all data: "
   }
 }

@@ -1,7 +1,35 @@
-// content.js - Content Script for AI Image Metadata Viewer
+// content.js - Universal Content Script (Chrome & Firefox)
 
-// スクリプト読み込み確認
-console.log('[AI Meta Viewer] content.js loaded, URL:', window.location.href);
+// ブラウザAPI統一
+const browserAPI = (() => {
+    if (typeof browser !== 'undefined') {
+        return browser; // Firefox
+    } else if (typeof chrome !== 'undefined') {
+        // Chrome - 必要に応じてPromise化
+        return {
+            ...chrome,
+            runtime: {
+                ...chrome.runtime,
+                sendMessage: (message) => new Promise((resolve, reject) => {
+                    chrome.runtime.sendMessage(message, (response) => {
+                        if (chrome.runtime.lastError) {
+                            reject(new Error(chrome.runtime.lastError.message));
+                        } else {
+                            resolve(response);
+                        }
+                    });
+                })
+            }
+        };
+    }
+    throw new Error('No browser API available');
+})();
+
+// 環境検出
+const isFirefox = typeof browser !== 'undefined';
+const isChrome = typeof chrome !== 'undefined' && !isFirefox;
+
+console.log(`[AI Meta Viewer] Content script loaded (${isFirefox ? 'Firefox' : 'Chrome'}):`, window.location.href);
 
 // file:// URL では console.log が表示されないため、DOM に表示するデバッグ関数
 let debugLogContainer = null;
@@ -71,6 +99,7 @@ function init() {
     } else {
         console.log('[AI Meta Viewer] Normal page view, starting image observation');
         observeImages();
+        observeSiteSpecificElements();
     }
 }
 
@@ -89,6 +118,12 @@ const metadataCache = new Map();
  */
 async function checkImageMetadata(img) {
     debugLog('[AI Meta Viewer] checkImageMetadata() called for:', img.src);
+
+    // 拡張機能のコンテキストが無効化されている場合は処理を停止
+    if (!isExtensionContextValid()) {
+        console.warn('[AI Meta Viewer] Extension context invalidated, stopping image metadata check');
+        return;
+    }
 
     // 重複チェック
     if (processedImages.has(img)) {
@@ -182,17 +217,32 @@ async function checkImageMetadata(img) {
             }
 
             // Background Service Workerにメタデータ取得をリクエスト
-            const response = await chrome.runtime.sendMessage(message);
+            try {
+                const response = await sendMessageToBrave(message);
 
-            if (response.success && response.metadata) {
-                metadata = response.metadata;
+                if (response && response.success && response.metadata) {
+                    metadata = response.metadata;
 
-                // 空でない場合のみキャッシュして採用
-                if (Object.keys(metadata).length > 0) {
-                    metadataCache.set(url, metadata);
-                    successUrl = url;
-                    break; // 成功したらループを抜ける
+                    // 空でない場合のみキャッシュして採用
+                    if (Object.keys(metadata).length > 0) {
+                        metadataCache.set(url, metadata);
+                        successUrl = url;
+                        break; // 成功したらループを抜ける
+                    }
                 }
+            } catch (e) {
+                if (e.message && e.message.includes('Extension context invalidated')) {
+                    console.warn('[AI Meta Viewer] Extension context invalidated during message send');
+                    // 解析中バッジを削除してから処理を停止
+                    if (analyzingBadge) {
+                        removeAnalyzingBadge(analyzingBadge);
+                    }
+                    processedImages.delete(img);
+                    return;
+                }
+                console.error('[AI Meta Viewer] Error sending message to background:', e);
+                // 他のエラーの場合は次のURLを試行
+                continue;
             }
         }
 
@@ -259,6 +309,140 @@ async function checkImageMetadata(img) {
         }
 
         processedImages.delete(img);
+    }
+}
+
+/**
+ * サイト別のアダプターからターゲットを取得してメタデータをチェック
+ */
+function observeSiteSpecificElements() {
+    for (const adapter of SiteAdapters) {
+        if (adapter.match() && typeof adapter.getBadgeTargets === 'function') {
+            const targets = adapter.getBadgeTargets(document);
+            if (targets) {
+                targets.forEach(el => checkMetadataForElement(el));
+            }
+        }
+    }
+}
+
+/**
+ * 画像以外の要素のメタデータをチェックしてバッジを追加
+ */
+/**
+ * 拡張機能のコンテキストが有効かどうかをチェック
+ * Brave ブラウザ対応版
+ */
+function isExtensionContextValid() {
+    try {
+        // Braveでは chrome.runtime.id が undefined になることがある
+        if (!chrome || !chrome.runtime) {
+            return false;
+        }
+
+        // chrome.runtime.id の存在確認
+        if (typeof chrome.runtime.id === 'undefined') {
+            console.warn('[AI Meta Viewer] chrome.runtime.id is undefined - possible Brave browser issue');
+            return false;
+        }
+
+        // sendMessage 関数の存在確認
+        if (typeof chrome.runtime.sendMessage !== 'function') {
+            console.warn('[AI Meta Viewer] chrome.runtime.sendMessage is not available');
+            return false;
+        }
+
+        return true;
+    } catch (e) {
+        console.error('[AI Meta Viewer] Extension context check failed:', e);
+        return false;
+    }
+}
+
+/**
+ * Brave ブラウザ対応のメッセージ送信関数
+ */
+async function sendMessageToBrave(message, retries = 3) {
+    for (let i = 0; i < retries; i++) {
+        try {
+            if (!isExtensionContextValid()) {
+                throw new Error('Extension context invalid');
+            }
+
+            return new Promise((resolve, reject) => {
+                chrome.runtime.sendMessage(message, (response) => {
+                    if (chrome.runtime.lastError) {
+                        reject(new Error(chrome.runtime.lastError.message));
+                    } else {
+                        resolve(response);
+                    }
+                });
+            });
+        } catch (e) {
+            console.warn(`[AI Meta Viewer] Message send attempt ${i + 1} failed:`, e.message);
+
+            if (i === retries - 1) {
+                throw e;
+            }
+
+            // 短い待機後にリトライ
+            await new Promise(resolve => setTimeout(resolve, 100 * (i + 1)));
+        }
+    }
+}
+
+async function checkMetadataForElement(el) {
+    // 拡張機能のコンテキストが無効化されている場合は処理を停止
+    if (!isExtensionContextValid()) {
+        console.warn('[AI Meta Viewer] Extension context invalidated, stopping metadata check');
+        return;
+    }
+
+    if (processedImages.has(el)) {
+        const data = processedImages.get(el);
+        if (data) return; // 既に処理済み
+    }
+
+    // 抽出対象URLの特定
+    let url = null;
+    if (el.tagName === 'A') {
+        url = el.href;
+        // ローカルファイルテスト時の相対パス解決
+        if (window.location.protocol === 'file:' && document.title.includes('Civitai')) {
+            const href = el.getAttribute('href');
+            if (href && href.startsWith('/')) {
+                url = 'https://civitai.com' + href;
+            }
+        }
+    } else {
+        return;
+    }
+
+    if (!url) return;
+
+    // 処理済みフラグを一時的に立てる
+    processedImages.set(el, null);
+
+    try {
+        const response = await sendMessageToBrave({
+            action: 'fetchImageMetadata',
+            imageUrl: url
+        });
+
+        if (response && response.success && response.metadata && Object.keys(response.metadata).length > 0) {
+            addBadgeToElement(el, response.metadata, url);
+        } else {
+            // メタデータなし
+            processedImages.set(el, { badge: null });
+        }
+    } catch (e) {
+        if (e.message && e.message.includes('Extension context invalidated')) {
+            console.warn('[AI Meta Viewer] Extension context invalidated during message send');
+            // コンテキストが無効化された場合は、以降の処理を停止
+            return;
+        }
+        console.error('[AI Meta Viewer] Error checking element metadata:', e);
+        processedImages.delete(el);
     }
 }
 
@@ -336,6 +520,9 @@ function observeImages() {
                     pendingNodes.add(node);
                 }
             });
+
+            // サイト個別の要素チェックも Mutation 時に行う
+            observeSiteSpecificElements();
 
             mutation.removedNodes.forEach((node) => {
                 if (node.nodeType === 1) {
@@ -430,3 +617,58 @@ function handleDirectImageView() {
 }
 
 
+/**
+ * Background Scriptからのメッセージを処理
+ */
+chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
+    // 拡張機能のコンテキストが無効化されている場合は処理を停止
+    if (!isExtensionContextValid()) {
+        console.warn('[AI Meta Viewer] Extension context invalidated, ignoring message');
+        return false;
+    }
+
+    if (request.action === 'triggerScan') {
+        // 拡張機能アイコンクリック時のスキャン実行
+        debugLog('[AI Meta Viewer] Trigger scan requested');
+        observeImages();
+        observeSiteSpecificElements();
+        sendResponse({ success: true });
+        return true;
+    }
+
+    if (request.action === 'clearMemoryCaches') {
+        // メモリキャッシュのクリア
+        debugLog('[AI Meta Viewer] Clearing memory caches');
+
+        // metadataCache をクリア
+        const metadataCacheSize = metadataCache.size;
+        metadataCache.clear();
+
+        // processedImages をクリア (badge_controller.js で定義されている場合)
+        let processedImagesSize = 0;
+        if (typeof processedImages !== 'undefined') {
+            processedImagesSize = processedImages.size;
+            processedImages.clear();
+        }
+
+        debugLog(`[AI Meta Viewer] Cleared ${metadataCacheSize} metadata cache entries and ${processedImagesSize} processed images`);
+        sendResponse({
+            success: true,
+            clearedItems: {
+                metadataCache: metadataCacheSize,
+                processedImages: processedImagesSize
+            }
+        });
+        return true;
+    }
+
+    if (request.action === 'showNotification') {
+        // 通知表示 (ダウンロード失敗時など)
+        if (request.message) {
+            console.log(`[AI Meta Viewer] Notification: ${request.message}`);
+            // 実際の通知UIは必要に応じて実装
+        }
+        sendResponse({ success: true });
+        return true;
+    }
+});
