@@ -13,7 +13,8 @@ class PersistentLRUCache {
         // 頻繁なストレージアクセスを減らすため、キーと最終アクセス時刻はメモリにも持つ
         this.index = new Map();
 
-        this.init();
+        // initを待機可能にするためPromiseを保持
+        this.initPromise = this.init();
     }
 
     async init() {
@@ -38,6 +39,7 @@ class PersistentLRUCache {
     }
 
     async get(url) {
+        await this.initPromise;
         if (!this.index.has(url)) return undefined;
 
         // アクセス日時更新 (メモリ)
@@ -58,6 +60,7 @@ class PersistentLRUCache {
     }
 
     async set(url, metadata) {
+        await this.initPromise;
         const key = this.cacheKeyPrefix + url;
         const timestamp = Date.now();
 
@@ -78,10 +81,12 @@ class PersistentLRUCache {
     }
 
     async has(url) {
+        await this.initPromise;
         return this.index.has(url);
     }
 
     async clear() {
+        await this.initPromise;
         await this.storage.clear();
         this.index.clear();
     }
