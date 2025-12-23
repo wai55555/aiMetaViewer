@@ -46,10 +46,10 @@ window.isExcludedUrl = function () {
 
         // ワイルドカード変換 (* -> .*, ? -> .)
         // エスケープ処理も行う
-        const regexStr = '^' + pattern + '$'
+        const regexStr = ('^' + pattern + '$')
             .replace(/[.+^${}()|[\]\\]/g, '\\$&') // 正規表現特殊文字をエスケープ
-            .replace(/\*/g, '.*')
-            .replace(/\?/g, '.');
+            .replace(/\\\*/g, '.*')
+            .replace(/\\\?/g, '.');
 
         try {
             const regex = new RegExp(regexStr, 'i');
