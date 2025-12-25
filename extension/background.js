@@ -864,16 +864,19 @@ async function handleFetchImageMetadata(imageUrl, base64Data = null) {
                         debugLog(`[AI Meta Viewer] Added ${domain} to Range Blocklist. Failure reason: ${e.message}`);
                     }
 
-                    // フォールバック: 全取得
-                    const fbResponse = await fetch(imageUrl);
-                    if (!fbResponse.ok) throw new Error(`Fallback HTTP ${fbResponse.status}`);
+                    // フォールバック: 全取得 (リダイレクト許可)
+                    const fbResponse = await fetch(imageUrl, { redirect: 'follow' });
+                    if (!fbResponse.ok) {
+                        debugLog('[AI Meta Viewer] Fallback fetch failed with status:', fbResponse.status);
+                        throw new Error(`Fallback HTTP ${fbResponse.status}`);
+                    }
                     buffer = await fbResponse.arrayBuffer();
                     debugLog('[AI Meta Viewer] Fallback full fetch succeeded, buffer size:', buffer.byteLength);
                 }
             } else {
                 // 最初から Range 不可ドメイン
                 debugLog('[AI Meta Viewer] Skipping Range for blocked domain, fetching full...', domain);
-                const response = await fetch(imageUrl);
+                const response = await fetch(imageUrl, { redirect: 'follow' });
                 if (!response.ok) {
                     debugLog('[AI Meta Viewer] Full fetch failed with status:', response.status);
                     return { success: false, error: `HTTP ${response.status}` };
@@ -919,7 +922,7 @@ async function handleFetchImageMetadata(imageUrl, base64Data = null) {
                         // 再度不完全と言われたら、流石に効率が悪いので全取得に移行する
                         if (nextMetadata.isIncomplete) {
                             debugLog('[AI Meta Viewer] Still incomplete. Falling back to full fetch.');
-                            const fullResp = await fetch(imageUrl);
+                            const fullResp = await fetch(imageUrl, { redirect: 'follow' });
                             const fullBuffer = await fullResp.arrayBuffer();
                             metadata = extractMetadata(fullBuffer);
                             isRangeRequest = false;
@@ -930,14 +933,14 @@ async function handleFetchImageMetadata(imageUrl, base64Data = null) {
                         }
                     } else {
                         // Rangeリトライ失敗 -> 全取得
-                        const fullResp = await fetch(imageUrl);
+                        const fullResp = await fetch(imageUrl, { redirect: 'follow' });
                         const fullBuffer = await fullResp.arrayBuffer();
                         metadata = extractMetadata(fullBuffer);
                         isRangeRequest = false;
                     }
                 } catch (retryError) {
                     debugLog('[AI Meta Viewer] Range retry failed, falling back to full fetch:', retryError.message);
-                    const fullResp = await fetch(imageUrl);
+                    const fullResp = await fetch(imageUrl, { redirect: 'follow' });
                     const fullBuffer = await fullResp.arrayBuffer();
                     metadata = extractMetadata(fullBuffer);
                     isRangeRequest = false;
@@ -955,7 +958,7 @@ async function handleFetchImageMetadata(imageUrl, base64Data = null) {
             if (isRangeRequest) {
                 debugLog('[AI Meta Viewer] Parse error on partial data, retrying full fetch:', e.message);
                 try {
-                    const fullResp = await fetch(imageUrl);
+                    const fullResp = await fetch(imageUrl, { redirect: 'follow' });
                     if (fullResp.ok) {
                         const fullBuffer = await fullResp.arrayBuffer();
                         buffer = fullBuffer;
@@ -994,7 +997,7 @@ async function handleFetchImageMetadata(imageUrl, base64Data = null) {
                 // RangeデータだけでStealth解析はできないので、Rangeだった場合は全取得してから挑む
                 if (isRangeRequest) {
                     debugLog('[AI Meta Viewer] No standard metadata in partial data. Downloading full image for Stealth Info check...');
-                    const fullResp = await fetch(imageUrl);
+                    const fullResp = await fetch(imageUrl, { redirect: 'follow' });
                     if (fullResp.ok) {
                         buffer = await fullResp.arrayBuffer(); // バッファ置き換え
                     }

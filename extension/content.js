@@ -418,12 +418,35 @@ function observeSiteSpecificElements() {
                         safetensorsCandidates.forEach(candidate => {
                             safetensorsFound = true;
 
-                            // Civitai API の download URL を優先的に使用
-                            // 候補オブジェクトから modelVersionId を取得
+                            // Civitai API の download URL を使用してメタデータを取得
+                            // candidate.modelVersionId から API URL を構築
                             let metadataUrl = candidate.url;
                             if (candidate.modelVersionId) {
-                                metadataUrl = `https://civitai.com/api/download/models/${candidate.modelVersionId}?type=Model&format=SafeTensor&size=full&fp=fp16`;
-                                debugLog('[AI Meta Viewer] Using Civitai API URL for safetensors:', metadataUrl);
+                                // ページ上のダウンロードボタンから URL パラメータを抽出
+                                // getBadgeTargets で取得したボタンから、既存の Civitai API URL を探す
+                                const targets = adapter.getBadgeTargets?.(document) || [];
+                                let apiUrlFromPage = null;
+
+                                for (const target of targets) {
+                                    const targetHref = target.href || '';
+                                    // Civitai API URL パターンを検出
+                                    if (targetHref.includes('civitai.com/api/download/models/') &&
+                                        targetHref.includes(candidate.modelVersionId)) {
+                                        apiUrlFromPage = targetHref;
+                                        debugLog('[AI Meta Viewer] Found Civitai API URL from page button:', apiUrlFromPage);
+                                        break;
+                                    }
+                                }
+
+                                // ページから取得した URL を優先、なければデフォルトを構築
+                                if (apiUrlFromPage) {
+                                    metadataUrl = apiUrlFromPage;
+                                    debugLog('[AI Meta Viewer] Using Civitai API URL from page:', metadataUrl);
+                                } else {
+                                    // フォールバック: デフォルトパラメータで構築（ページに URL がない場合）
+                                    metadataUrl = `https://civitai.com/api/download/models/${candidate.modelVersionId}?type=Model&format=SafeTensor&size=pruned&fp=fp16`;
+                                    debugLog('[AI Meta Viewer] Using default Civitai API URL:', metadataUrl);
+                                }
                             } else {
                                 debugLog('[AI Meta Viewer] Using original safetensors URL:', metadataUrl);
                             }
