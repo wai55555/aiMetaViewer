@@ -429,9 +429,11 @@ function observeSiteSpecificElements() {
 
                                 for (const target of targets) {
                                     const targetHref = target.href || '';
-                                    // Civitai API URL パターンを検出
+                                    // Civitai API URL パターンを検出（正確なパターンマッチ）
+                                    // /models/{modelVersionId}? の形式で、false positive を防ぐ
+                                    const modelVersionPattern = new RegExp(`/models/${candidate.modelVersionId}[?/]`);
                                     if (targetHref.includes('civitai.com/api/download/models/') &&
-                                        targetHref.includes(candidate.modelVersionId)) {
+                                        modelVersionPattern.test(targetHref)) {
                                         apiUrlFromPage = targetHref;
                                         debugLog('[AI Meta Viewer] Found Civitai API URL from page button:', apiUrlFromPage);
                                         break;
