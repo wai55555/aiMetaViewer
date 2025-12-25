@@ -16,12 +16,14 @@ It automatically analyzes images on web pages and displays a badge if metadata i
 - **Advanced Link Analysis**:
   - **Discord**: Automatically detects original image links from previews to retrieve full metadata.
   - **Pixiv**: Detects original image links.
+  - **Civitai**: Detects model files (.safetensors, .ckpt) and sample images with optimized API URL handling.
   - **Local Files**: Supports images opened via `file://` URLs.
 - **Supported Formats**:
   - PNG (tEXt / iTXt / Stealth Info)
   - JPEG (Exif UserComment)
   - WebP (EXIF Chunk)
   - AVIF (Exif UserComment)
+  - Safetensors (Model metadata)
 - **Supported Generators**:
   - Stable Diffusion WebUI (A1111, Forge)
   - ComfyUI (Workflow JSON supported)
@@ -34,9 +36,13 @@ It automatically analyzes images on web pages and displays a badge if metadata i
   - Formatted JSON view.
 - **Action-Triggered Downloader**:
   - Click the extension icon to scan the entire page.
-  - Bulk download detected images.
+  - Bulk download detected images, videos, audio, and archives.
   - **Flexible Folder Naming**: Automatically organize downloads by Page Title, Domain, or Flat structure.
-  - **Smart Filtering**: Toggle between viewing only AI images or all discoverable images.
+  - **Smart Filtering**: Filter by media type (Images, Videos, Audio, Archives) or AI-generated content.
+  - **Media Type Support**: Download images, videos, audio files, and model archives (.safetensors, .ckpt, .zip, etc.).
+- **Cross-Browser Support**:
+  - Chrome/Chromium-based browsers (Chrome, Brave, Edge, etc.)
+  - Robust extension context validation with automatic recovery.
 
 ## ⚙️ Settings
 
@@ -100,17 +106,24 @@ latest version is avaiable on Chrome Web Store.
 
 ```
 aiMetaViewer/
-└─ extension/          # Source code
-   ├── manifest.json   # Manifest file
-   ├── background.js   # Service Worker (Handling downloads & parsing)
-   ├── content.js      # Content Script (Badge management)
-   ├── scanner.js      # Full-page Scan & Downloader Logic
-   ├── parser.js       # Metadata Parser
-   ├── ui.js           # UI Components (Modals & Badges)
-   ├── options.html    # Options Page
-   ├── options.js      # Options Logic
-   ├── styles.css      # Styles
-   └── icons/          # Icons
+└─ extension/              # Source code
+   ├── manifest.json       # Manifest file (Manifest V3)
+   ├── background.js       # Service Worker (Downloads, parsing, metadata extraction)
+   ├── content.js          # Content Script (Badge management, page observation)
+   ├── scanner.js          # Full-page scan & downloader UI
+   ├── parser.js           # Binary metadata parser (PNG, JPEG, WebP, AVIF, Safetensors)
+   ├── adapters.js         # Site-specific adapters (Discord, Pixiv, Civitai, etc.)
+   ├── ui.js               # UI components (Modals, badges)
+   ├── badge_controller.js # Badge lifecycle management
+   ├── settings_loader.js  # Settings management
+   ├── options.html        # Options page
+   ├── options.js          # Options logic
+   ├── styles.css          # Global styles
+   ├── scanner/            # Scanner utilities
+   │  ├── utils.js         # Helper functions (media type detection, file size formatting)
+   │  ├── progress-ui.js   # Progress overlay UI
+   │  └── thumbnail-finder.js # Thumbnail detection for videos/links
+   └── icons/              # Extension icons
 ```
 
 ## 📜 License
