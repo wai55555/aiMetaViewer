@@ -35,6 +35,47 @@ window.SiteAdapters = [
                     return discordLink.href;
                 }
             }
+
+            // 3. サムネイル画像からオリジナル URL への変換
+            // media.discordapp.net/attachments/... -> cdn.discordapp.com/attachments/...
+            const src = img.src || img.currentSrc;
+            if (src && src.includes('media.discordapp.net/attachments/')) {
+                try {
+                    // サムネイル URL の例:
+                    // https://media.discordapp.net/attachments/1284860627151753359/1326573297953148968/00103-4200756156.png?ex=694e00e8&is=694caf68&hm=506f8bf4eed254c2f3d60a8eac9bfb89e6c6c21302bcff3b59153b271ad0f59e&=&format=webp&quality=lossless&width=273&height=173
+                    // オリジナル URL:
+                    // https://cdn.discordapp.com/attachments/1284860627151753359/1326573297953148968/00103-4200756156.png?ex=694e00e8&is=694caf68&hm=506f8bf4eed254c2f3d60a8eac9bfb89e6c6c21302bcff3b59153b271ad0f59e&
+
+                    const url = new URL(src);
+                    const pathname = url.pathname;
+
+                    // /attachments/ 以降を抽出
+                    const attachmentsMatch = pathname.match(/\/attachments\/(.+)$/);
+                    if (attachmentsMatch) {
+                        const attachmentsPath = attachmentsMatch[1];
+
+                        // クエリパラメータから width/height/format/quality を除去
+                        const params = new URLSearchParams(url.search);
+                        params.delete('format');
+                        params.delete('quality');
+                        params.delete('width');
+                        params.delete('height');
+
+                        const newQuery = params.toString();
+                        const originalUrl = `https://cdn.discordapp.com/attachments/${attachmentsPath}${newQuery ? '?' + newQuery : ''}`;
+
+                        console.log('[AI Meta Viewer] Discord thumbnail converted:', {
+                            thumbnail: src.substring(0, 80),
+                            original: originalUrl.substring(0, 80)
+                        });
+
+                        return originalUrl;
+                    }
+                } catch (e) {
+                    console.error('[AI Meta Viewer] Discord thumbnail conversion error:', e);
+                }
+            }
+
             return null;
         },
         deepScan: () => null,

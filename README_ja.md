@@ -14,16 +14,18 @@ Webページ上の画像を自動的に解析し、メタデータが含まれ�
 - **高度なリンク解析**:
   - **Discord**: プレビュー画像からオリジナル画像のリンクを自動検出し、劣化のないメタデータを取得
   - **Pixiv**: オリジナル画像リンクを自動検出
+  - **Civitai**: モデルファイル（.safetensors, .ckpt）とサンプル画像を検出、最適化されたAPI URLハンドリング
   - **ローカルファイル**: `file://` URLで開いた画像にも対応
 - **対応フォーマット**:
   - PNG (tEXt / iTXt / Stealth Info)
   - JPEG (Exif UserComment)
   - WebP (EXIF チャンク)
   - AVIF (Exif UserComment)
+  - Safetensors (モデルメタデータ)
 - **生成ツール自動判定**:
   - Stable Diffusion WebUI (A1111, Forge)
   - ComfyUI (Workflow JSON対応)
-  - NovelAI (V3 / V4 / V4.5 たぶん対応)
+  - NovelAI (V3 / V4 / V4.5)
   - Tensor.art
 - **詳細ビューア**:
   - Positive Prompt / Negative Prompt / Other Settings に自動分類
@@ -31,10 +33,14 @@ Webページ上の画像を自動的に解析し、メタデータが含まれ�
   - 全メタデータのコピー機能
   - JSONデータの整形表示
 - **一括スキャン＆ダウンローダー**:
-  - 拡張機能アイコンをクリックしてページ全体の画像をスキャン
-  - AI画像を検出し、まとめてダウンロード
+  - 拡張機能アイコンをクリックしてページ全体をスキャン
+  - 画像、動画、音声、アーカイブファイルを一括ダウンロード
   - **柔軟なフォルダ構成**: ページタイトル、ドメイン名、またはフラットな構造で自動整理
-  - **フィルタリング**: AI画像のみ、またはページ内のすべての画像を切り替えて表示
+  - **メディアタイプフィルタ**: 画像、動画、音声、アーカイブで絞り込み表示
+  - **複数メディア対応**: 画像、動画、音声ファイル、モデルアーカイブ（.safetensors, .ckpt, .zip等）をダウンロード
+- **クロスブラウザ対応**:
+  - Chrome/Chromiumベースのブラウザ（Chrome, Brave, Edge等）に対応
+  - 堅牢な拡張機能コンテキスト検証と自動復旧
 
 ## 🚀 インストール方法
 [Chrome Web Store](https://chromewebstore.google.com/detail/ai-meta-viewer/glggkpjfgbabooefiijgnaemfabdmkgf?hl=en&authuser=5)

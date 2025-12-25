@@ -182,9 +182,11 @@ async function checkImageMetadata(img) {
 
     // 重複チェック
     if (processedImages.has(img)) {
-        debugLog('[AI Meta Viewer] Image already processed, skipping');
+        console.log(`[DEBUG] Image already in processedImages, skipping: ${img.src.substring(0, 60)}...`);
         return;
     }
+
+    console.log(`[DEBUG] checkImageMetadata called for: ${img.src.substring(0, 60)}...`);
 
     const src = img.src;
     if (!src) {
@@ -203,9 +205,17 @@ async function checkImageMetadata(img) {
             if (resolvedUrl) {
                 targetUrl = resolvedUrl;
                 isLinkedImage = true;
+                console.log('[AI Meta Viewer] Adapter resolved URL:', {
+                    originalSrc: img.src.substring(0, 80),
+                    resolvedUrl: Array.isArray(resolvedUrl) ? resolvedUrl.map(u => u.substring(0, 80)) : resolvedUrl.substring(0, 80)
+                });
                 break; // 最初に見つかったものを採用
             }
         }
+    }
+
+    if (!isLinkedImage) {
+        console.log('[AI Meta Viewer] No adapter resolved URL for:', img.src.substring(0, 80));
     }
 
     // サイズチェック
@@ -220,10 +230,18 @@ async function checkImageMetadata(img) {
 
     // リンク画像の場合でも、設定された最小サイズ未満は除外（デフォルト200x200）
     if (isLinkedImage && (actualWidth < settings.minImageSize || actualHeight < settings.minImageSize)) {
+        console.log('[AI Meta Viewer] Image too small (linked image):', {
+            src: img.src.substring(0, 80),
+            actualWidth,
+            actualHeight,
+            minImageSize: settings.minImageSize
+        });
         return;
     }
 
     // 処理済みフラグを立てる（重複チェック防止）
+    // 注意: 処理中であることを示すマーカーを設定
+    // 実際のバッジデータは addBadgeToImage() で設定される
     processedImages.set(img, null);
 
     // Pixivまたはローカルファイル、または全サイト設定が有効な場合、解析中バッジを表示
@@ -341,10 +359,13 @@ async function checkImageMetadata(img) {
             // バッジを追加
             addBadgeToImage(img, metadata, successUrl || img.src);
         } else {
-            // メタデータが空の場合は削除（再解析対象から外すため、nullを入れる）
-            // ただし、画像が変更されたら再解析したいので、processedImagesには入れない方が良いかも？
-            // いや、毎回チェックするのは負荷が高いので、"メタデータなし"として登録する。
-            processedImages.set(img, { badge: null });
+            // メタデータが空の場合は削除（再解析対象から外す）
+            processedImages.delete(img);
+            console.log('[AI Meta Viewer] No metadata found for:', {
+                src: img.src.substring(0, 80),
+                targetUrl: Array.isArray(targetUrl) ? targetUrl.map(u => u.substring(0, 80)) : targetUrl.substring(0, 80),
+                urlsToTry: urlsToTry.length
+            });
         }
 
     } catch (error) {
@@ -790,7 +811,7 @@ async function checkMetadataForElement(el) {
     if (!url) return;
 
     // 処理済みフラグを一時的に立てる
-    processedImages.set(el, null);
+    processedImages.set(el, { processing: true });
 
     try {
         const response = await sendMessageToBrave({
@@ -802,7 +823,7 @@ async function checkMetadataForElement(el) {
             addBadgeToElement(el, response.metadata, url);
         } else {
             // メタデータなし
-            processedImages.set(el, { badge: null });
+            processedImages.delete(el);
         }
     } catch (e) {
         // エラーの種類に応じて処理を分ける
