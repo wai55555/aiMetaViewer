@@ -159,6 +159,7 @@ function addBadgeToImage(img, metadata, originalUrl) {
 
     const badge = createBadge(); // ui.jsの関数
     const isDirectImage = isDirectImageView();
+    const isDiscord = window.location.hostname.includes('discord.com');
 
     // ui.jsのupdateBadgeでツールチップなどを設定
     updateBadge(badge, metadata);
@@ -167,6 +168,23 @@ function addBadgeToImage(img, metadata, originalUrl) {
     // バッジにメタデータとオリジナルURLを保存
     badge._metadata = metadata;
     badge._originalUrl = originalUrl;
+
+    // デバッグ情報を記録
+    const imgRect = img.getBoundingClientRect();
+    const imgInfo = {
+        src: img.src.substring(0, 80),
+        naturalWidth: img.naturalWidth,
+        naturalHeight: img.naturalHeight,
+        displayWidth: img.width,
+        displayHeight: img.height,
+        rectTop: imgRect.top,
+        rectLeft: imgRect.left,
+        rectWidth: imgRect.width,
+        rectHeight: imgRect.height,
+        isDiscord: isDiscord,
+        isDirectImage: isDirectImage
+    };
+    console.log('[AI Meta Viewer] Badge created for image:', imgInfo);
 
     // クリックイベント
     badge.addEventListener('click', (e) => {
@@ -225,7 +243,6 @@ function addBadgeToImage(img, metadata, originalUrl) {
 
         let ticking = false;
 
-
         // 遮蔽検知用のカウンター（間引き処理）
         let occlusionCheckCounter = 0;
 
@@ -247,6 +264,16 @@ function addBadgeToImage(img, metadata, originalUrl) {
                 rect.bottom < 0 || rect.top > window.innerHeight ||
                 rect.right < 0 || rect.left > window.innerWidth) {
                 badge.style.display = 'none';
+                console.log('[AI Meta Viewer] Badge hidden (out of bounds):', {
+                    rectWidth: rect.width,
+                    rectHeight: rect.height,
+                    rectTop: rect.top,
+                    rectBottom: rect.bottom,
+                    rectLeft: rect.left,
+                    rectRight: rect.right,
+                    windowHeight: window.innerHeight,
+                    windowWidth: window.innerWidth
+                });
                 return;
             }
 
@@ -258,44 +285,59 @@ function addBadgeToImage(img, metadata, originalUrl) {
             badge.style.left = `${left}px`;
             badge.style.top = `${top}px`;
 
-            // 遮蔽検知 (Occlusion Detection)
-            occlusionCheckCounter++;
-            if (forceOcclusionCheck || occlusionCheckCounter > 10) {
-                occlusionCheckCounter = 0;
+            // デバッグ: バッジ位置を記録
+            console.log('[AI Meta Viewer] Badge position updated:', {
+                badgeLeft: left,
+                badgeTop: top,
+                rectTop: rect.top,
+                rectLeft: rect.left,
+                rectWidth: rect.width,
+                rectHeight: rect.height,
+                badgeDisplay: badge.style.display,
+                badgeOpacity: badge.style.opacity,
+                badgeClasses: badge.className
+            });
 
-                // 画像の中心点を取得
-                const cx = rect.left + rect.width / 2;
-                const cy = rect.top + rect.height / 2;
+            // 遮蔽検知 (Occlusion Detection) - Discord では無効化
+            if (!isDiscord) {
+                occlusionCheckCounter++;
+                if (forceOcclusionCheck || occlusionCheckCounter > 10) {
+                    occlusionCheckCounter = 0;
 
-                let currentlyOccluded = false;
+                    // 画像の中心点を取得
+                    const cx = rect.left + rect.width / 2;
+                    const cy = rect.top + rect.height / 2;
 
-                if (cx >= 0 && cy >= 0 && cx <= window.innerWidth && cy <= window.innerHeight) {
-                    // 判定精度を上げるため、一時的にバッジを非表示(visibility: hidden)にする
-                    // display: noneだとレイアウトが変わる可能性があるためvisibility推奨だが、
-                    // elementFromPointはvisibility: hiddenの要素を無視して奥の要素を取得する
-                    const originalVisibility = badge.style.visibility;
-                    badge.style.visibility = 'hidden';
+                    let currentlyOccluded = false;
 
-                    const topElement = document.elementFromPoint(cx, cy);
+                    if (cx >= 0 && cy >= 0 && cx <= window.innerWidth && cy <= window.innerHeight) {
+                        // 判定精度を上げるため、一時的にバッジを非表示(visibility: hidden)にする
+                        // display: noneだとレイアウトが変わる可能性があるためvisibility推奨だが、
+                        // elementFromPointはvisibility: hiddenの要素を無視して奥の要素を取得する
+                        const originalVisibility = badge.style.visibility;
+                        badge.style.visibility = 'hidden';
 
-                    // 戻す
-                    badge.style.visibility = originalVisibility;
+                        const topElement = document.elementFromPoint(cx, cy);
 
-                    if (topElement) {
-                        const isSelf = topElement === img || img.contains(topElement);
-                        // バッジは隠しているので isBadge 判定は不要だが念のため
-                        const isParent = topElement.contains(img);
+                        // 戻す
+                        badge.style.visibility = originalVisibility;
 
-                        // 画像がtopElementに含まれておらず、かつ自分自身でもない場合 -> 遮蔽されている
-                        // (モーダル画像などが手前にある場合、topElementはそのモーダル画像になるはず)
-                        if (!isSelf && !isParent) {
-                            currentlyOccluded = true;
+                        if (topElement) {
+                            const isSelf = topElement === img || img.contains(topElement);
+                            // バッジは隠しているので isBadge 判定は不要だが念のため
+                            const isParent = topElement.contains(img);
+
+                            // 画像がtopElementに含まれておらず、かつ自分自身でもない場合 -> 遮蔽されている
+                            // (モーダル画像などが手前にある場合、topElementはそのモーダル画像になるはず)
+                            if (!isSelf && !isParent) {
+                                currentlyOccluded = true;
+                            }
                         }
                     }
-                }
 
-                // 状態更新
-                badge._isOccluded = currentlyOccluded;
+                    // 状態更新
+                    badge._isOccluded = currentlyOccluded;
+                }
             }
 
             // 遮蔽状態に基づいて表示切り替え
@@ -332,9 +374,9 @@ function addBadgeToImage(img, metadata, originalUrl) {
         // ResizeObserverに登録
         resizeObserver.observe(img);
 
-        // ホバー制御 (遅延表示)
+        // ホバー制御 (遅延表示) - Discord では無効化
         let hoverTimer = null;
-        const showDelay = 300; // ms
+        const showDelay = isDiscord ? 0 : 300; // Discord は即座に表示
 
         const showBadge = () => {
             if (hoverTimer) clearTimeout(hoverTimer);
@@ -346,10 +388,19 @@ function addBadgeToImage(img, metadata, originalUrl) {
 
         const hideBadge = () => {
             if (hoverTimer) clearTimeout(hoverTimer);
-            hoverTimer = setTimeout(() => {
-                badge.classList.remove('visible');
-            }, 100);
+            if (!isDiscord) {
+                // Discord では常に表示
+                hoverTimer = setTimeout(() => {
+                    badge.classList.remove('visible');
+                }, 100);
+            }
         };
+
+        // Discord では初期表示時に visible クラスを追加
+        if (isDiscord) {
+            badge.classList.add('visible');
+            console.log('[AI Meta Viewer] Discord badge initialized with visible class');
+        }
 
         img.addEventListener('mouseenter', showBadge);
         img.addEventListener('mouseleave', hideBadge);
@@ -368,6 +419,8 @@ function addBadgeToImage(img, metadata, originalUrl) {
                 resizeObserver.unobserve(img);
             }
         });
+
+        console.log('[AI Meta Viewer] Badge registered for image, total badges:', processedImages.size);
     }
 }
 

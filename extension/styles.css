@@ -21,6 +21,10 @@
   white-space: nowrap;
 }
 
+.ai-meta-badge.visible {
+  opacity: 1;
+}
+
 @keyframes fadeIn {
   from {
     opacity: 0;
