@@ -146,6 +146,15 @@
   "labelPersistentCache": {
     "message": "Persistent Cache"
   },
+  "labelItems": {
+    "message": "Items"
+  },
+  "labelStorage": {
+    "message": "Storage"
+  },
+  "labelDomains": {
+    "message": "Domains"
+  },
   "labelBlockList": {
     "message": "Block List"
   },

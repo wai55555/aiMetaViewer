@@ -121,6 +121,9 @@ function extractPngMetadata(buffer) {
     const length = (view[offset] << 24) | (view[offset + 1] << 16) |
       (view[offset + 2] << 8) | view[offset + 3];
 
+    // チャンク型を読み取るための8バイトがあるかチェック
+    if (offset + 8 > view.length) break;
+
     // データが不足しているかチェック (チャンク長4 + タイプ4 + データ + CRC4)
     if (offset + 4 + 4 + length + 4 > view.length) {
       // 興味のあるチャンク（tEXt, iTXt）であれば再取得を指示

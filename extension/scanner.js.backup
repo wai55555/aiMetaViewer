@@ -425,7 +425,248 @@ async function scanAllImages() {
     }
 }
 
+/**
+ * 動画要素の周辺からサムネイル画像を検出
+ * @param {HTMLVideoElement} video - 動画要素
+ * @returns {string|null} - サムネイル画像のURL、見つからない場合はnull
+ */
+function findVideoThumbnail(video) {
+    // 1. 親要素内の画像を検索
+    let parent = video.parentElement;
+    for (let i = 0; i < 3 && parent; i++) { // 最大3階層まで遡る
+        const images = parent.querySelectorAll('img');
+        for (const img of images) {
+            if (img !== video && img.src && img.src.startsWith('http')) {
+                // 動画要素と同じ親を持つ画像をサムネイルとして使用
+                return img.src;
+            }
+        }
+        parent = parent.parentElement;
+    }
 
+    // 2. 兄弟要素内の画像を検索
+    if (video.parentElement) {
+        const siblings = Array.from(video.parentElement.children);
+        for (const sibling of siblings) {
+            if (sibling !== video && sibling.tagName === 'IMG' && sibling.src) {
+                return sibling.src;
+            }
+            // 兄弟要素内の画像も検索
+            const nestedImages = sibling.querySelectorAll('img');
+            for (const img of nestedImages) {
+                if (img.src && img.src.startsWith('http')) {
+                    return img.src;
+                }
+            }
+        }
+    }
+
+    // 3. data-thumbnail, data-poster などの属性をチェック
+    const thumbnailAttrs = ['data-thumbnail', 'data-poster', 'data-preview', 'data-image'];
+    for (const attr of thumbnailAttrs) {
+        const value = video.getAttribute(attr);
+        if (value && value.startsWith('http')) {
+            return value;
+        }
+    }
+
+    return null;
+}
+
+/**
+ * リンク要素の周辺からサムネイル画像を検出
+ * @param {HTMLAnchorElement} link - リンク要素
+ * @returns {string|null} - サムネイル画像のURL、見つからない場合はnull
+ */
+function findLinkThumbnail(link) {
+    // 1. リンク内の画像を検索
+    const linkImages = link.querySelectorAll('img');
+    for (const img of linkImages) {
+        if (img.src && img.src.startsWith('http')) {
+            return img.src;
+        }
+    }
+
+    // 2. 親要素内の画像を検索
+    let parent = link.parentElement;
+    for (let i = 0; i < 3 && parent; i++) { // 最大3階層まで遡る
+        const images = parent.querySelectorAll('img');
+        for (const img of images) {
+            if (img.src && img.src.startsWith('http')) {
+                // リンクと近い位置にある画像をサムネイルとして使用
+                return img.src;
+            }
+        }
+        parent = parent.parentElement;
+    }
+
+    // 3. 兄弟要素内の画像を検索
+    if (link.parentElement) {
+        const siblings = Array.from(link.parentElement.children);
+        for (const sibling of siblings) {
+            if (sibling !== link) {
+                if (sibling.tagName === 'IMG' && sibling.src) {
+                    return sibling.src;
+                }
+                // 兄弟要素内の画像も検索
+                const nestedImages = sibling.querySelectorAll('img');
+                for (const img of nestedImages) {
+                    if (img.src && img.src.startsWith('http')) {
+                        return img.src;
+                    }
+                }
+            }
+        }
+    }
+
+    // 4. data属性をチェック
+    const thumbnailAttrs = ['data-thumbnail', 'data-poster', 'data-preview', 'data-image'];
+    for (const attr of thumbnailAttrs) {
+        const value = link.getAttribute(attr);
+        if (value && value.startsWith('http')) {
+            return value;
+        }
+    }
+
+    return null;
+}
+
+/**
+ * 自動的に消える通知を表示
+ * @param {string} message - 表示するメッセージ
+ * @param {number} duration - 表示時間(ミリ秒)、デフォルト3秒
+ */
+function showNotification(message, duration = 3000) {
+    const notification = document.createElement('div');
+    notification.style.cssText = `
+        position: fixed;
+        top: 20px;
+        left: 50%;
+        transform: translateX(-50%);
+        background-color: rgba(30, 30, 30, 0.95);
+        color: white;
+        padding: 12px 20px;
+        border-radius: 12px;
+        z-index: 2147483647;
+        font-family: 'Segoe UI', sans-serif;
+        font-size: 14px;
+        box-shadow: 0 8px 32px rgba(0, 0, 0, 0.6);
+        border: 1px solid rgba(255, 255, 255, 0.1);
+        backdrop-filter: blur(8px);
+        min-width: 240px;
+        text-align: center;
+        animation: ai-meta-fade-in 0.3s ease-out;
+    `;
+    notification.textContent = message;
+
+    document.body.appendChild(notification);
+
+    // フェードアウトアニメーション後に削除
+    setTimeout(() => {
+        notification.style.animation = 'ai-meta-fade-out 0.3s ease-out';
+        setTimeout(() => notification.remove(), 300);
+    }, duration);
+}
+
+/**
+ * スキャン中のオーバーレイを表示
+ */
+function showScanningOverlay(total) {
+    const overlay = document.createElement('div');
+    overlay.className = 'ai-meta-scan-overlay';
+    overlay.style.cssText = `
+        position: fixed;
+        top: 20px;
+        left: 50%;
+        transform: translateX(-50%);
+        background-color: rgba(30, 30, 30, 0.95);
+        color: white;
+        padding: 12px 20px;
+        border-radius: 12px;
+        z-index: 2147483647;
+        font-family: 'Segoe UI', sans-serif;
+        font-size: 14px;
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+        box-shadow: 0 8px 32px rgba(0, 0, 0, 0.6);
+        border: 1px solid rgba(255, 255, 255, 0.1);
+        backdrop-filter: blur(8px);
+        min-width: 240px;
+    `;
+
+    overlay.innerHTML = `
+        <div style="display: flex; align-items: center; justify-content: space-between; gap: 15px;">
+            <div style="display: flex; align-items: center; gap: 10px;">
+                <div style="width: 16px; height: 16px; border: 2px solid rgba(255,255,255,0.2); border-top-color: #4CAF50; border-radius: 50%; animation: ai-meta-spin 0.8s linear infinite;"></div>
+                <span style="font-weight: 600; letter-spacing: 0.3px;">Scanning AI Images</span>
+            </div>
+            <button id="ai-meta-scan-cancel" style="background: rgba(255,255,255,0.1); border: none; color: #ffab91; font-size: 11px; padding: 4px 8px; border-radius: 4px; cursor: pointer; transition: background 0.2s;">Cancel</button>
+        </div>
+        <div style="height: 4px; background: rgba(255,255,255,0.1); border-radius: 2px; overflow: hidden;">
+            <div id="ai-meta-scan-progress-bar" style="width: 0%; height: 100%; background: #4CAF50; transition: width 0.3s ease;"></div>
+        </div>
+        <div style="display: flex; justify-content: space-between; font-size: 12px; color: #aaa;">
+            <span id="ai-meta-scan-count">Progress: 0 / ${total}</span>
+            <span id="ai-meta-scan-found" style="color: #81C784;">Found: 0</span>
+        </div>
+    `;
+
+    // ホバーエフェクト
+    const cancelButton = overlay.querySelector('#ai-meta-scan-cancel');
+    cancelButton.onmouseover = () => cancelButton.style.background = 'rgba(255,255,255,0.2)';
+    cancelButton.onmouseout = () => cancelButton.style.background = 'rgba(255,255,255,0.1)';
+
+    const progressBar = overlay.querySelector('#ai-meta-scan-progress-bar');
+    const countText = overlay.querySelector('#ai-meta-scan-count');
+    const foundText = overlay.querySelector('#ai-meta-scan-found');
+
+    const updateProgress = (current, found) => {
+        const percent = Math.round((current / total) * 100);
+        progressBar.style.width = `${percent}%`;
+        countText.textContent = `Progress: ${current} / ${total}`;
+        foundText.textContent = `Found: ${found}`;
+    };
+
+    // アニメーション用のスタイルを追加（初回のみ）
+    if (!document.getElementById('ai-meta-scan-styles')) {
+        const style = document.createElement('style');
+        style.id = 'ai-meta-scan-styles';
+        style.textContent = `
+            @keyframes ai-meta-spin {
+                to { transform: rotate(360deg); }
+            }
+            @keyframes ai-meta-fade-in {
+                from { opacity: 0; transform: translateX(-50%) translateY(-10px); }
+                to { opacity: 1; transform: translateX(-50%) translateY(0); }
+            }
+            @keyframes ai-meta-fade-out {
+                from { opacity: 1; transform: translateX(-50%) translateY(0); }
+                to { opacity: 0; transform: translateX(-50%) translateY(-10px); }
+            }
+        `;
+        document.head.appendChild(style);
+    }
+
+    document.body.appendChild(overlay);
+    return { overlay, updateProgress, cancelButton };
+}
+
+/**
+ * URLからファイル名を推測
+ */
+function getFilenameFromUrl(urlStr) {
+    try {
+        const url = new URL(urlStr);
+        const path = url.pathname;
+        const parts = path.split('/');
+        const lastPart = parts[parts.length - 1];
+        if (lastPart && lastPart.includes('.')) {
+            return lastPart;
+        }
+    } catch (e) { }
+    return `image_${Date.now()}.png`;
+}
 
 /**
  * アダプターを使用してオリジナルURLを解決
@@ -708,20 +949,50 @@ function createDownloaderModal(candidates, context) {
                     `;
                     imgContainer.appendChild(img);
                 } else {
-                    // poster属性がない場合はプレースホルダーを表示
-                    const placeholder = document.createElement('div');
-                    placeholder.style.cssText = `
-                        width: 100%;
-                        height: 100%;
-                        display: flex;
-                        align-items: center;
-                        justify-content: center;
-                        background: #333;
-                        color: #aaa;
-                        font-size: 24px;
-                    `;
-                    placeholder.textContent = '🎬';
-                    imgContainer.appendChild(placeholder);
+                    // poster属性がない場合は動画からサムネイル生成
+                    generateVideoThumbnail(c.url).then(thumbnailDataUrl => {
+                        if (thumbnailDataUrl) {
+                            const img = document.createElement('img');
+                            img.src = thumbnailDataUrl;
+                            img.style.cssText = `
+                                width: 100%;
+                                height: 100%;
+                                object-fit: contain;
+                                display: block;
+                            `;
+                            imgContainer.appendChild(img);
+                        } else {
+                            // サムネイル生成に失敗した場合はプレースホルダー
+                            const placeholder = document.createElement('div');
+                            placeholder.style.cssText = `
+                                width: 100%;
+                                height: 100%;
+                                display: flex;
+                                align-items: center;
+                                justify-content: center;
+                                background: #333;
+                                color: #aaa;
+                                font-size: 24px;
+                            `;
+                            placeholder.textContent = '🎬';
+                            imgContainer.appendChild(placeholder);
+                        }
+                    }).catch(() => {
+                        // エラー時もプレースホルダー
+                        const placeholder = document.createElement('div');
+                        placeholder.style.cssText = `
+                            width: 100%;
+                            height: 100%;
+                            display: flex;
+                            align-items: center;
+                            justify-content: center;
+                            background: #333;
+                            color: #aaa;
+                            font-size: 24px;
+                        `;
+                        placeholder.textContent = '🎬';
+                        imgContainer.appendChild(placeholder);
+                    });
                 }
             } else {
                 // 画像・音声・アーカイブの場合
@@ -1020,4 +1291,41 @@ function createDownloaderModal(candidates, context) {
     };
 
     return modalOverlay;
+}
+
+/**
+ * ファイル名からメディアタイプを判定
+ * 複合拡張子(tar.gz等)にも対応
+ * @param {string} filename 
+ * @returns {string} 'image' | 'video' | 'audio' | 'archive' | 'unknown'
+ */
+function getMediaType(filename) {
+    const lower = filename.toLowerCase();
+
+    const types = {
+        image: ['png', 'jpg', 'jpeg', 'webp', 'avif', 'gif', 'bmp', 'svg'],
+        video: ['mp4', 'webm', 'mkv', 'avi', 'flv', 'mov', 'wmv', 'mpg', 'mpeg', 'm4v'],
+        audio: ['mp3', 'wav', 'ogg', 'm4a', 'flac', 'aac', 'wma', 'opus'],
+        archive: ['zip', 'rar', '7z', 'lzh', 'tar', 'tar.gz', 'tar.bz2', 'tar.xz', 'tgz', 'tbz2', 'gz', 'bz2', 'xz', 'safetensors', 'ckpt', 'pt']
+    };
+
+    // 複合拡張子を優先的にチェック
+    for (const [type, exts] of Object.entries(types)) {
+        for (const ext of exts) {
+            if (lower.endsWith('.' + ext)) return type;
+        }
+    }
+    return 'unknown';
+}
+
+/**
+ * バイト数を読みやすい形式に変換
+ */
+function formatBytes(bytes, decimals = 2) {
+    if (bytes === 0) return '0 Bytes';
+    const k = 1024;
+    const dm = decimals < 0 ? 0 : decimals;
+    const sizes = ['Bytes', 'KB', 'MB', 'GB', 'TB', 'PB', 'EB', 'ZB', 'YB'];
+    const i = Math.floor(Math.log(bytes) / Math.log(k));
+    return parseFloat((bytes / Math.pow(k, i)).toFixed(dm)) + ' ' + sizes[i];
 }

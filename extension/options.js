@@ -340,7 +340,7 @@ document.addEventListener('DOMContentLoaded', () => {
     if (saveBtn) saveBtn.addEventListener('click', saveSettings);
     if (resetBtn) resetBtn.addEventListener('click', resetSettings);
     if (clearCacheBtn) clearCacheBtn.addEventListener('click', clearCache);
-    if (clearAllDataBtn) clearAllDataBtn.addEventListener('click', OptionsPageEnhancer.handleClearAllData);
+    if (clearAllDataBtn) clearAllDataBtn.addEventListener('click', () => OptionsPageEnhancer.handleClearAllData());
 
     if (minPixelCountInput) {
         minPixelCountInput.addEventListener('keypress', (e) => {

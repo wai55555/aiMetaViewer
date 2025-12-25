@@ -227,7 +227,8 @@ window.SiteAdapters = [
                                             isAI: false, // 修正: AI画像として扱わないことで、scanner.jsのデフォルト全選択ロジックを回避し、autoSelectのみに依存させる
                                             autoSelect: autoSelect, // trueまたはfalseを明示
                                             isCivitaiModel: isSafetensors, // 特殊フラグ
-                                            modelName: queryData.name // ZIP化に使用
+                                            modelName: queryData.name, // ZIP化に使用
+                                            modelVersionId: version.id // Civitai API URL 構築用
                                         });
                                         console.log('[AI Meta Viewer] Civitai deepScan: Added safetensors:', file.name, 'autoSelect:', autoSelect, 'isLatestVersion:', isLatestVersion);
                                     }
@@ -266,18 +267,33 @@ window.SiteAdapters = [
             }
         },
         getBadgeTargets: (document) => {
-            // ダウンロードリンクやボタンを物理的に探す
-            // hrefに "download" を含むすべてのリンクを対象にする（APIパスの変更や多様性に対応）
-            // ただし画像リンクは除外（genericアダプターに任せる、またはここで弾く）
-            const links = Array.from(document.querySelectorAll('a[href]'));
-            return links.filter(a => {
-                const href = a.href;
-                // モデルダウンロードAPI、または一般的なダウンロードリンク
-                return href && (
-                    href.includes('/api/download/') ||
-                    (href.includes('download') && href.includes('models'))
+            // Civitaiのダウンロードボタンは <a href> ではなく、JavaScriptで処理される
+            // 代わりに、ダウンロード関連のボタンやリンクを広く探す
+
+            // 1. 直接的なsafetensorsリンク
+            const directLinks = Array.from(document.querySelectorAll('a[href*=".safetensors"]'));
+
+            // 2. ダウンロードボタン（テキストやクラスから判定）
+            const downloadButtons = Array.from(document.querySelectorAll('button, a')).filter(el => {
+                const text = el.textContent?.toLowerCase() || '';
+                const href = el.href?.toLowerCase() || '';
+                const className = el.className?.toLowerCase() || '';
+
+                // ダウンロード関連のテキストやクラスを含む
+                return (
+                    text.includes('download') ||
+                    className.includes('download') ||
+                    href.includes('download') ||
+                    href.includes('model') ||
+                    href.includes('safetensors')
                 );
             });
+
+            // 3. 重複を除去して返す
+            const allTargets = [...directLinks, ...downloadButtons];
+            const uniqueTargets = Array.from(new Set(allTargets));
+
+            return uniqueTargets;
         }
     },
     // 汎用 (拡張子チェック)
@@ -298,3 +314,152 @@ window.SiteAdapters = [
         getBadgeTargets: () => null
     }
 ];
+
+/**
+ * サイトアダプターのdeepScanを実行してバッジを追加
+ * content.js と scanner.js の両方から呼び出し可能
+ * 
+ * @description
+ * ページ読み込み完了後にdeepScanを実行し、
+ * 見つかった候補にバッジを追加する共有関数
+ */
+function executeDeepScanAndAddBadges() {
+    if (typeof SiteAdapters === 'undefined') {
+        console.log('[AI Meta Viewer] SiteAdapters not available');
+        return;
+    }
+
+    for (const adapter of SiteAdapters) {
+        if (adapter.match() && typeof adapter.deepScan === 'function') {
+            try {
+                const candidates = adapter.deepScan(document);
+                if (candidates && Array.isArray(candidates)) {
+                    console.log(`[AI Meta Viewer] executeDeepScanAndAddBadges: Found ${candidates.length} candidates`);
+
+                    // デバッグ: 全候補を表示
+                    candidates.forEach((c, i) => {
+                        console.log(`[AI Meta Viewer] Candidate ${i}: type=${c.type}, isCivitaiModel=${c.isCivitaiModel}, hasMetadata=${!!c.metadata}, filename=${c.filename}`);
+                    });
+
+                    // safetensorsファイルの候補のみを処理
+                    const safetensorsCandidates = candidates.filter(c =>
+                        c.type === 'archive' && c.isCivitaiModel && c.metadata
+                    );
+
+                    console.log(`[AI Meta Viewer] Filtered to ${safetensorsCandidates.length} safetensors candidates with metadata`);
+
+                    if (safetensorsCandidates.length === 0) {
+                        console.log('[AI Meta Viewer] No safetensors candidates with metadata found');
+                        return;
+                    }
+
+                    // ダウンロードボタンを取得
+                    const targets = adapter.getBadgeTargets?.(document) || [];
+                    console.log(`[AI Meta Viewer] Found ${targets.length} download button targets`);
+
+                    // デバッグ: ターゲットのURLを表示
+                    targets.forEach((t, i) => {
+                        console.log(`[AI Meta Viewer] Target ${i}: ${t.href}`);
+                    });
+
+                    // 各候補のURLに対応するダウンロードボタンを探してバッジを追加
+                    safetensorsCandidates.forEach(candidate => {
+                        // 候補のURLを正規化（クエリパラメータ除去）
+                        const candidateUrl = candidate.url.split('?')[0].toLowerCase();
+                        console.log(`[AI Meta Viewer] Processing candidate: ${candidate.filename}, URL: ${candidateUrl}`);
+
+                        // 対応するダウンロードボタンを探す
+                        let matched = false;
+                        targets.forEach(el => {
+                            const targetUrl = (el.href || '').split('?')[0].toLowerCase();
+
+                            // URLが一致するか、またはファイル名が一致するかチェック
+                            const urlMatch = targetUrl === candidateUrl || targetUrl.includes(candidateUrl);
+                            const filenameMatch = candidate.filename && targetUrl.includes(candidate.filename.split('.')[0]);
+
+                            if (urlMatch || filenameMatch) {
+                                console.log(`[AI Meta Viewer] Match found! urlMatch=${urlMatch}, filenameMatch=${filenameMatch}`);
+                                matched = true;
+
+                                if (typeof processedImages !== 'undefined' && !processedImages.has(el)) {
+                                    console.log(`[AI Meta Viewer] Adding badge to download button for: ${candidate.filename}`);
+
+                                    // バッジを追加
+                                    if (typeof addBadgeToElement === 'function') {
+                                        addBadgeToElement(el, candidate.metadata, candidate.url);
+                                    }
+
+                                    processedImages.set(el, {
+                                        badge: {
+                                            metadata: candidate.metadata,
+                                            url: candidate.url
+                                        }
+                                    });
+                                } else {
+                                    console.log(`[AI Meta Viewer] Element already processed or processedImages not available`);
+                                }
+                            }
+                        });
+
+                        if (!matched) {
+                            console.log(`[AI Meta Viewer] No matching download button found for: ${candidate.filename}`);
+
+                            // 代替案: DOMで候補URLを含む要素を直接検索
+                            console.log(`[AI Meta Viewer] Attempting to find element by URL in DOM...`);
+                            const allElements = document.querySelectorAll('*');
+                            for (const el of allElements) {
+                                // href属性をチェック
+                                if (el.href && typeof el.href === 'string' && el.href.toLowerCase().includes(candidateUrl)) {
+                                    console.log(`[AI Meta Viewer] Found element by href: ${el.tagName}`);
+                                    if (typeof processedImages !== 'undefined' && !processedImages.has(el)) {
+                                        if (typeof addBadgeToElement === 'function') {
+                                            addBadgeToElement(el, candidate.metadata, candidate.url);
+                                        }
+                                        processedImages.set(el, {
+                                            badge: {
+                                                metadata: candidate.metadata,
+                                                url: candidate.url
+                                            }
+                                        });
+                                        matched = true;
+                                        break;
+                                    }
+                                }
+
+                                // data属性をチェック
+                                if (el.attributes) {
+                                    for (const attr of el.attributes) {
+                                        if (attr.value && typeof attr.value === 'string' && attr.value.toLowerCase().includes(candidateUrl)) {
+                                            console.log(`[AI Meta Viewer] Found element by data attribute: ${el.tagName}`);
+                                            if (typeof processedImages !== 'undefined' && !processedImages.has(el)) {
+                                                if (typeof addBadgeToElement === 'function') {
+                                                    addBadgeToElement(el, candidate.metadata, candidate.url);
+                                                }
+                                                processedImages.set(el, {
+                                                    badge: {
+                                                        metadata: candidate.metadata,
+                                                        url: candidate.url
+                                                    }
+                                                });
+                                                matched = true;
+                                                break;
+                                            }
+                                        }
+                                    }
+                                }
+
+                                if (matched) break;
+                            }
+                        }
+
+                        if (!matched) {
+                            console.log(`[AI Meta Viewer] Could not find any element for: ${candidate.filename}`);
+                        }
+                    });
+                }
+            } catch (e) {
+                console.error('[AI Meta Viewer] executeDeepScanAndAddBadges error:', e);
+            }
+        }
+    }
+}

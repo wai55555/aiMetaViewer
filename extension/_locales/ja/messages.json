@@ -140,6 +140,15 @@
     "labelPersistentCache": {
         "message": "永続キャッシュ"
     },
+    "labelItems": {
+        "message": "項目数"
+    },
+    "labelStorage": {
+        "message": "ストレージ"
+    },
+    "labelDomains": {
+        "message": "ドメイン数"
+    },
     "labelBlockList": {
         "message": "ブロックリスト"
     },

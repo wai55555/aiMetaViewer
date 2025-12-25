@@ -51,11 +51,11 @@ const browserAPI = (() => {
 const isFirefox = typeof browser !== 'undefined';
 const isChrome = typeof chrome !== 'undefined' && !isFirefox;
 
-// 永続化LRUキャッシュクラス (chrome.storage.local使用)
+// 永続化LRUキャッシュクラス (browserAPI.storage.local使用)
 class PersistentLRUCache {
     constructor(limit = 2000) {
         this.limit = limit;
-        this.storage = chrome.storage.local;
+        this.storage = browserAPI.storage.local;
         this.cacheKeyPrefix = 'meta_cache_';
         this.metaKey = 'meta_cache_index'; // キー一覧とタイムスタンプを管理
         this.lastCleanUp = 0;
@@ -240,7 +240,7 @@ class DataManager {
             // ストレージ使用量を取得
             let storageUsage = 0;
             try {
-                const bytesInUse = await chrome.storage.local.getBytesInUse();
+                const bytesInUse = await browserAPI.storage.local.getBytesInUse();
                 storageUsage = bytesInUse;
             } catch (e) {
                 debugLog('[AI Meta Viewer] Could not get storage usage:', e.message);
@@ -277,12 +277,12 @@ class DataManager {
      */
     static async notifyContentScripts(action) {
         try {
-            const tabs = await chrome.tabs.query({});
+            const tabs = await browserAPI.tabs.query({});
             let notifiedCount = 0;
 
             for (const tab of tabs) {
                 try {
-                    await chrome.tabs.sendMessage(tab.id, { action: action });
+                    await browserAPI.tabs.sendMessage(tab.id, { action: action });
                     notifiedCount++;
                 } catch (e) {
                     // Content Script が読み込まれていないタブは無視
@@ -299,9 +299,52 @@ class DataManager {
 }
 
 /**
- * Civitai.com ドメイン管理クラス
- * Civitai.comドメインの特別処理を管理
+ * HuggingFace.co ドメイン管理クラス
+ * HuggingFace.coドメインの特別処理を管理
  */
+class HuggingFaceDomainManager {
+    /**
+     * URLがHuggingFace.coドメインかどうかを判定
+     * @param {string} url - 判定するURL
+     * @returns {boolean} HuggingFace.coドメインの場合true
+     */
+    static isHuggingFaceDomain(url) {
+        try {
+            const hostname = new URL(url).hostname.toLowerCase();
+            return hostname === 'huggingface.co' || hostname.endsWith('.huggingface.co');
+        } catch (e) {
+            return false;
+        }
+    }
+
+    /**
+     * ドメインがブロック除外対象かどうかを判定
+     * @param {string} domain - 判定するドメイン
+     * @returns {boolean} 除外対象の場合true
+     */
+    static shouldExemptFromBlocking(domain) {
+        if (!domain) return false;
+        const lowerDomain = domain.toLowerCase();
+        return lowerDomain === 'huggingface.co' || lowerDomain.endsWith('.huggingface.co');
+    }
+
+    /**
+     * 起動時にrangeRequestBlockListからHuggingFace.coを削除
+     */
+    static removeHuggingFaceFromBlockList() {
+        const huggingfaceDomains = Array.from(rangeRequestBlockList).filter(domain =>
+            this.shouldExemptFromBlocking(domain)
+        );
+
+        if (huggingfaceDomains.length > 0) {
+            huggingfaceDomains.forEach(domain => {
+                rangeRequestBlockList.delete(domain);
+                debugLog(`[AI Meta Viewer] Removed ${domain} from rangeRequestBlockList during startup cleanup`);
+            });
+            debugLog(`[AI Meta Viewer] Startup cleanup: Removed ${huggingfaceDomains.length} HuggingFace domains from block list`);
+        }
+    }
+}
 class CivitaiDomainManager {
     /**
      * URLがCivitai.comドメインかどうかを判定
@@ -422,6 +465,9 @@ loadSettings();
 
 // 起動時のCivitai.comドメインクリーンアップ
 CivitaiDomainManager.removeCivitaiFromBlockList();
+
+// 起動時のHuggingFace.coドメインクリーンアップ
+HuggingFaceDomainManager.removeHuggingFaceFromBlockList();
 
 /**
  * Content Scriptからのメッセージを処理
@@ -655,7 +701,10 @@ async function handleCivitaiZipDownload(images, context) {
 
     // 1. モデルファイル (safetensors) のダウンロード (ルート直下)
     for (const model of modelFiles) {
-        const safeFilename = sanitize(model.filename);
+        let safeFilename = sanitize(model.filename);
+        if (!safeFilename || safeFilename === '_') {
+            safeFilename = `model_${Date.now()}_${downloadedCount}.safetensors`;
+        }
         // ルートに保存するため、パスはファイル名のみ
         if (!downloadPathQueue.has(model.url)) downloadPathQueue.set(model.url, []);
         downloadPathQueue.get(model.url).push(safeFilename);
@@ -728,11 +777,18 @@ async function handleFetchImageMetadata(imageUrl, base64Data = null) {
     const isSafetensorsUrl = imageUrl.toLowerCase().includes('.safetensors') || imageUrl.toLowerCase().includes('format=safetensor');
 
     if (cachedMetadata !== undefined) {
+        debugLog('[AI Meta Viewer] Cache lookup result:', {
+            isSafetensorsUrl: isSafetensorsUrl,
+            cachedMetadataKeys: Object.keys(cachedMetadata),
+            cachedMetadataLength: Object.keys(cachedMetadata).length,
+            cachedMetadata: cachedMetadata
+        });
+
         // 空のメタデータがキャッシュされているが、Safetensors の場合は最新の取得ロジックを試す価値がある
         if (Object.keys(cachedMetadata).length === 0 && isSafetensorsUrl) {
             debugLog('[AI Meta Viewer] Cached metadata is empty for Safetensors. Bypassing cache to retry with new logic...', imageUrl);
         } else {
-            debugLog('[AI Meta Viewer] Persistent Cache hit:', imageUrl);
+            debugLog('[AI Meta Viewer] Persistent Cache hit:', imageUrl, 'Keys:', Object.keys(cachedMetadata).join(', '));
             return { success: true, metadata: cachedMetadata, cached: true };
         }
     }
@@ -764,7 +820,7 @@ async function handleFetchImageMetadata(imageUrl, base64Data = null) {
                 try {
                     // 最初は 64KB をリクエスト。不足分は解析後の isIncomplete ロジックで補填する。
                     const rangeSize = 65535;
-                    debugLog(`[AI Meta Viewer] Starting Range request (0-${rangeSize})`);
+                    debugLog(`[AI Meta Viewer] Starting Range request (0-${rangeSize}) for:`, imageUrl);
 
                     const controller = new AbortController();
                     const timeoutId = setTimeout(() => controller.abort(), 10000); // 念のため長めの10秒
@@ -775,15 +831,18 @@ async function handleFetchImageMetadata(imageUrl, base64Data = null) {
                     });
                     clearTimeout(timeoutId);
 
+                    debugLog('[AI Meta Viewer] Range request response status:', response.status);
+
                     if (response.status === 206) {
                         // Range成功
                         isRangeRequest = true;
                         buffer = await response.arrayBuffer();
-                        debugLog(`[AI Meta Viewer] Range request success (0-${rangeSize})`);
+                        debugLog(`[AI Meta Viewer] Range request success (0-${rangeSize}), buffer size:`, buffer.byteLength);
                     } else if (response.status === 200) {
                         // サーバーがRange無視して全データ返してきた
-                        debugLog('[AI Meta Viewer] Server ignored Range, received full content');
+                        debugLog('[AI Meta Viewer] Server ignored Range, received full content, status 200');
                         buffer = await response.arrayBuffer();
+                        debugLog('[AI Meta Viewer] Full content buffer size:', buffer.byteLength);
                         // ブロックはしない（害はないため）
                     } else {
                         // 403, 400, 416 等 -> Range不可とみなす
@@ -791,11 +850,14 @@ async function handleFetchImageMetadata(imageUrl, base64Data = null) {
                     }
 
                 } catch (e) {
-                    debugLog('[AI Meta Viewer] Range request failed or aborted:', e.message);
+                    debugLog('[AI Meta Viewer] Range request failed or aborted:', {
+                        errorMessage: e.message,
+                        domain: domain
+                    });
 
-                    // Civitai.com ドメインの特別処理: ブロックリストに追加しない
-                    if (domain && CivitaiDomainManager.shouldExemptFromBlocking(domain)) {
-                        debugLog(`[AI Meta Viewer] Civitai.com domain exempted from blocking: ${domain}. Range Request failure reason: ${e.message}`);
+                    // Civitai.com と HuggingFace.co ドメインの特別処理: ブロックリストに追加しない
+                    if (domain && (CivitaiDomainManager.shouldExemptFromBlocking(domain) || HuggingFaceDomainManager.shouldExemptFromBlocking(domain))) {
+                        debugLog(`[AI Meta Viewer] ${domain} domain exempted from blocking. Range Request failure reason: ${e.message}`);
                     } else if (domain) {
                         // 通常のドメインはブロックリストへ追加
                         rangeRequestBlockList.add(domain);
@@ -806,13 +868,18 @@ async function handleFetchImageMetadata(imageUrl, base64Data = null) {
                     const fbResponse = await fetch(imageUrl);
                     if (!fbResponse.ok) throw new Error(`Fallback HTTP ${fbResponse.status}`);
                     buffer = await fbResponse.arrayBuffer();
+                    debugLog('[AI Meta Viewer] Fallback full fetch succeeded, buffer size:', buffer.byteLength);
                 }
             } else {
                 // 最初から Range 不可ドメイン
-                debugLog('[AI Meta Viewer] Skipping Range for blocked domain, fetching full...');
+                debugLog('[AI Meta Viewer] Skipping Range for blocked domain, fetching full...', domain);
                 const response = await fetch(imageUrl);
-                if (!response.ok) return { success: false, error: `HTTP ${response.status}` };
+                if (!response.ok) {
+                    debugLog('[AI Meta Viewer] Full fetch failed with status:', response.status);
+                    return { success: false, error: `HTTP ${response.status}` };
+                }
                 buffer = await response.arrayBuffer();
+                debugLog('[AI Meta Viewer] Full fetch succeeded for blocked domain, buffer size:', buffer.byteLength);
             }
         }
 
@@ -822,9 +889,15 @@ async function handleFetchImageMetadata(imageUrl, base64Data = null) {
 
         let metadata = {};
         try {
+            debugLog('[AI Meta Viewer] Calling extractMetadata with buffer size:', buffer.byteLength);
             metadata = extractMetadata(buffer);
-
-            // メタデータが「不完全（バッファ不足）」と判定された場合のリトライロジック
+            debugLog('[AI Meta Viewer] extractMetadata returned:', {
+                metadataKeys: Object.keys(metadata),
+                metadataLength: Object.keys(metadata).length,
+                isIncomplete: metadata.isIncomplete,
+                suggestedSize: metadata.suggestedSize,
+                fullMetadata: metadata
+            });
             if (metadata.isIncomplete && isRangeRequest) {
                 const retrySize = metadata.suggestedSize || 131072; // 指定がない場合は 128KB 程度
                 debugLog(`[AI Meta Viewer] Metadata is incomplete. Retrying with larger range: 0-${retrySize}`);
@@ -872,6 +945,13 @@ async function handleFetchImageMetadata(imageUrl, base64Data = null) {
             } // Close if (metadata.isIncomplete && isRangeRequest)
         } catch (e) {
             // 解析エラー（JSONパース失敗など）が出た場合、かつRangeRequestだった場合は、不完全データが原因かもしれないので全取得リトライ
+            debugLog('[AI Meta Viewer] extractMetadata threw exception:', {
+                errorMessage: e.message,
+                errorStack: e.stack,
+                isRangeRequest: isRangeRequest,
+                bufferSize: buffer.byteLength
+            });
+
             if (isRangeRequest) {
                 debugLog('[AI Meta Viewer] Parse error on partial data, retrying full fetch:', e.message);
                 try {
@@ -879,7 +959,13 @@ async function handleFetchImageMetadata(imageUrl, base64Data = null) {
                     if (fullResp.ok) {
                         const fullBuffer = await fullResp.arrayBuffer();
                         buffer = fullBuffer;
+                        debugLog('[AI Meta Viewer] Full fetch succeeded, buffer size:', fullBuffer.byteLength);
                         metadata = extractMetadata(buffer);
+                        debugLog('[AI Meta Viewer] extractMetadata on full buffer returned:', {
+                            metadataKeys: Object.keys(metadata),
+                            metadataLength: Object.keys(metadata).length,
+                            fullMetadata: metadata
+                        });
                         isRangeRequest = false;
                     }
                 } catch (retryFullErr) {
@@ -926,11 +1012,21 @@ async function handleFetchImageMetadata(imageUrl, base64Data = null) {
 
         // Cache Result (Empty or Not)
         // ここで保存。次回からは通信なし。
+        debugLog('[AI Meta Viewer] Caching metadata for:', imageUrl, 'Keys:', Object.keys(metadata).join(', '));
         await metadataCache.set(imageUrl, metadata);
 
+        debugLog('[AI Meta Viewer] handleFetchImageMetadata returning success:', {
+            metadataKeys: Object.keys(metadata),
+            metadataLength: Object.keys(metadata).length,
+            metadata: metadata
+        });
         return { success: true, metadata: metadata };
 
     } catch (error) {
+        debugLog('[AI Meta Viewer] handleFetchImageMetadata outer catch:', {
+            errorMessage: error.message,
+            errorStack: error.stack
+        });
         return { success: false, error: error.message };
     }
 }

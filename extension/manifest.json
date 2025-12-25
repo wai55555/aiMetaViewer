@@ -35,6 +35,9 @@
                 "ui.js",
                 "adapters.js",
                 "badge_controller.js",
+                "scanner/utils.js",
+                "scanner/progress-ui.js",
+                "scanner/thumbnail-finder.js",
                 "scanner.js",
                 "content.js"
             ],
@@ -68,8 +71,7 @@
     "web_accessible_resources": [
         {
             "resources": [
-                "icons/*",
-                "*.js"
+                "icons/*"
             ],
             "matches": [
                 "<all_urls>"
