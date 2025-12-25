@@ -45,11 +45,11 @@ window.isExcludedUrl = function () {
         if (!pattern) continue;
 
         // ワイルドカード変換 (* -> .*, ? -> .)
-        // エスケープ処理も行う
-        const regexStr = '^' + pattern + '$'
+        // 正規表現特殊文字をエスケープしてからワイルドカードを変換
+        const regexStr = ('^' + pattern + '$')
             .replace(/[.+^${}()|[\]\\]/g, '\\$&') // 正規表現特殊文字をエスケープ
-            .replace(/\*/g, '.*')
-            .replace(/\?/g, '.');
+            .replace(/\*/g, '.*')  // * を .* に変換
+            .replace(/\?/g, '.');  // ? を . に変換
 
         try {
             const regex = new RegExp(regexStr, 'i');

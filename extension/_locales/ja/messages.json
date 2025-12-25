@@ -133,5 +133,35 @@
     },
     "errorMinPixelCount": {
         "message": "最小画素数は10000以上である必要があります"
+    },
+    "titleDataStatistics": {
+        "message": "データ統計"
+    },
+    "labelPersistentCache": {
+        "message": "永続キャッシュ"
+    },
+    "labelItems": {
+        "message": "項目数"
+    },
+    "labelStorage": {
+        "message": "ストレージ"
+    },
+    "labelDomains": {
+        "message": "ドメイン数"
+    },
+    "labelBlockList": {
+        "message": "ブロックリスト"
+    },
+    "btnClearAllData": {
+        "message": "🗑️ 全データクリア"
+    },
+    "confirmClearAllData": {
+        "message": "拡張機能の全データをクリアしますか？この操作は元に戻せません。"
+    },
+    "msgAllDataCleared": {
+        "message": "全データのクリアが完了しました！"
+    },
+    "msgAllDataClearFailed": {
+        "message": "全データのクリアに失敗しました: "
     }
 }

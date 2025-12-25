@@ -670,7 +670,27 @@ function createDownloaderModal(images, context) {
     // 画像アイテム作成
     const renderImages = (onlyAI = true) => {
         content.innerHTML = '';
-        const targets = onlyAI ? images.filter(img => img.isAI) : images;
+
+        // 設定を読み込み (settings_loader.js が window.settings をセットしている前提)
+        const settings = window.settings || { minPixelCount: 0, minImageSize: 0 };
+        const minPixels = Number(settings.minPixelCount) || 0;
+        const minSize = Number(settings.minImageSize) || 0;
+
+        const targets = images.filter(img => {
+            // AI画像は常に表示
+            if (img.isAI) return true;
+
+            // onlyAI モードなら非AIは除外
+            if (onlyAI && !img.isAI) return false;
+
+            // 非AI画像の場合、サイズチェックを再適用 (アダプターで拾われた小さなアイコン等を除外するため)
+            if (img.type === 'image' && img.width && img.height) {
+                if (img.width * img.height < minPixels) return false;
+                if (img.width < minSize || img.height < minSize) return false;
+            }
+
+            return true;
+        });
 
         targets.forEach((img, idx) => {
             const item = document.createElement('div');

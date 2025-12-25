@@ -8,10 +8,50 @@ const noMetadataCache = new Set();
 const localMetadataCache = new Map();
 
 async function scanAllImages() {
-    console.log('[AI Meta Viewer] Starting optimized full page scan (Phase 2)...');
+    // 最新の設定をロード
+    const settings = typeof loadSettings !== 'undefined' ? await loadSettings() : window.settings;
+    console.log('[AI Meta Viewer] Starting optimized full page scan (Phase 2)...', settings);
 
-    // 1. 画像収集と優先順位付け
-    const images = Array.from(document.querySelectorAll('img'));
+    // 1. 画像収集とフィルタリング
+    const allImages = Array.from(document.querySelectorAll('img'));
+    let filteredCount = 0;
+    const images = allImages.filter(img => {
+        // アダプターで解決を試みる
+        const resolved = typeof resolveOriginalUrls === 'function' ? resolveOriginalUrls(img) : null;
+        const resolvedUrls = Array.isArray(resolved) ? resolved : (resolved ? [resolved] : []);
+
+        // オリジナルの「別のURL」が見つかった場合は、サムネイルの可能性が高いので許可
+        const hasNewResolution = resolvedUrls.some(u => u !== img.src && u !== img.currentSrc);
+        if (hasNewResolution) return true;
+
+        const width = img.naturalWidth || img.width || 0;
+        const height = img.naturalHeight || img.height || 0;
+
+        // サイズが0の場合は、まだロードされていないか隠れている可能性があるため、
+        // 念のためスキャン対象に含める (フィルタリングの副作用を防ぐ)
+        if (width === 0 || height === 0) return true;
+
+        // 数値として比較することを保証
+        const minPixels = Number(settings.minPixelCount) || 0;
+        const minSize = Number(settings.minImageSize) || 0;
+
+        // 最小画素数チェック
+        if (width * height < minPixels) {
+            filteredCount++;
+            return false;
+        }
+
+        // 最小サイズチェック (幅または高さの一方が規定未満なら除外)
+        if (width < minSize || height < minSize) {
+            filteredCount++;
+            return false;
+        }
+
+        return true;
+    });
+
+    console.log(`[AI Meta Viewer] Found ${allImages.length} images, ${images.length} kept, ${filteredCount} filtered out by size settings.`);
+
     const totalImages = images.length;
 
     const viewportHeight = window.innerHeight;
@@ -19,7 +59,7 @@ async function scanAllImages() {
         const rectA = a.getBoundingClientRect();
         const rectB = b.getBoundingClientRect();
 
-        const visibleA = rectA.top < viewportHeight && rectB.bottom > 0;
+        const visibleA = rectA.top < viewportHeight && rectA.bottom > 0;
         const visibleB = rectB.top < viewportHeight && rectB.bottom > 0;
 
         if (visibleA && !visibleB) return -1;
@@ -44,6 +84,7 @@ async function scanAllImages() {
 
     try {
         const candidates = [];
+        const candidateUrls = new Set(); // 重複URL防止用
 
         // 2. URL解決とグループ化
         // Map<OriginalURL, Array<HTMLImageElement>>
@@ -57,6 +98,7 @@ async function scanAllImages() {
                 const data = processedImages.get(img);
                 if (data && data.badge) {
                     candidates.push({
+                        type: 'image',
                         url: data.badge._originalUrl || img.src,
                         thumbnailUrl: img.src, // Use current image src as thumbnail
                         filename: getFilenameFromUrl(data.badge._originalUrl || img.src),
@@ -86,9 +128,18 @@ async function scanAllImages() {
                     urlToImagesMap.get(url).push(img);
                 }
             } else {
-                skippedImages.add(img);
-                processedCount++;
-                updateProgress(processedCount, foundCount);
+                // アダプターで解決できない場合、img.srcをフォールバックとして使用
+                const src = img.src || img.currentSrc;
+                if (src && src.startsWith('http')) {
+                    if (!urlToImagesMap.has(src)) {
+                        urlToImagesMap.set(src, []);
+                    }
+                    urlToImagesMap.get(src).push(img);
+                } else {
+                    skippedImages.add(img);
+                    processedCount++;
+                    updateProgress(processedCount, foundCount);
+                }
             }
         }
 
@@ -197,23 +248,34 @@ async function scanAllImages() {
             }
 
             if (bestMetadata) {
-                candidates.push({
-                    url: bestUrl,
-                    thumbnailUrl: img.src, // Use current image src as thumbnail
-                    filename: getFilenameFromUrl(bestUrl),
-                    metadata: bestMetadata,
-                    isAI: true
-                });
-                foundCount++;
+                if (!candidateUrls.has(bestUrl)) {
+                    candidates.push({
+                        type: 'image',
+                        url: bestUrl,
+                        thumbnailUrl: img.src,
+                        filename: getFilenameFromUrl(bestUrl),
+                        metadata: bestMetadata,
+                        width: img.naturalWidth || img.width || 0,
+                        height: img.naturalHeight || img.height || 0,
+                        isAI: true
+                    });
+                    candidateUrls.add(bestUrl);
+                }
             } else {
                 // メタデータなし
-                candidates.push({
-                    url: bestUrl,
-                    thumbnailUrl: img.src, // Use current image src as thumbnail
-                    filename: getFilenameFromUrl(bestUrl),
-                    metadata: null,
-                    isAI: false
-                });
+                if (!candidateUrls.has(bestUrl)) {
+                    candidates.push({
+                        type: 'image',
+                        url: bestUrl,
+                        thumbnailUrl: img.src,
+                        filename: getFilenameFromUrl(bestUrl),
+                        metadata: null,
+                        width: img.naturalWidth || img.width || 0,
+                        height: img.naturalHeight || img.height || 0,
+                        isAI: false
+                    });
+                    candidateUrls.add(bestUrl);
+                }
             }
 
             // processedCount++; // Worker側でカウント済みのためここでは除去
@@ -222,8 +284,130 @@ async function scanAllImages() {
 
         console.log('[AI Meta Viewer] Scan complete. Found images:', candidates.length, 'AI:', foundCount, 'Unique Fetches:', uniqueFetchCount);
 
+        // --- ディープスキャン (SiteAdapters 経由) ---
+        console.log('[AI Meta Viewer] Performing deep scan...');
+        if (typeof SiteAdapters !== 'undefined') {
+            for (const adapter of SiteAdapters) {
+                if (adapter.match() && typeof adapter.deepScan === 'function') {
+                    const deepCandidates = adapter.deepScan(document);
+                    if (deepCandidates && Array.isArray(deepCandidates)) {
+                        console.log(`[AI Meta Viewer] Deep scan found ${deepCandidates.length} candidates from ${adapter.match.toString()}`);
+                        for (const dc of deepCandidates) {
+                            if (!candidateUrls.has(dc.url)) {
+                                candidates.push({
+                                    type: dc.type || 'image',
+                                    url: dc.url,
+                                    thumbnailUrl: dc.thumbnailUrl || null,
+                                    filename: dc.filename || getFilenameFromUrl(dc.url),
+                                    metadata: dc.metadata || null,
+                                    isAI: dc.isAI !== undefined ? dc.isAI : false,
+                                    autoSelect: dc.autoSelect, // Civitai等のアダプターから明示的な選択指示を受け取る
+                                    isCivitaiModel: dc.isCivitaiModel, // Civitai特殊フラグ
+                                    modelName: dc.modelName, // ZIP化用
+                                    width: dc.width || 0,
+                                    height: dc.height || 0
+                                });
+                                candidateUrls.add(dc.url);
+                                if (dc.isAI) foundCount++; // 深層スキャンで見つかったAI判定をカウント
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         // 最終的な整合性のために一回更新
         updateProgress(totalImages, foundCount);
+
+        // --- 動画・音声・アーカイブの検出 ---
+        console.log('[AI Meta Viewer] Scanning for other media types...');
+
+        // 動画要素の検出
+        const videos = Array.from(document.querySelectorAll('video'));
+        for (const video of videos) {
+            const src = video.src || video.currentSrc;
+            if (!src) continue;
+
+            // すでに画像として、あるいは別の要素で追加済みならスキップ
+            if (candidateUrls.has(src)) continue;
+
+            // サムネイル画像を検出
+            let thumbnailUrl = video.poster || null;
+
+            // poster属性がない場合、周辺の画像要素からサムネイルを探す
+            if (!thumbnailUrl) {
+                thumbnailUrl = findVideoThumbnail(video);
+            }
+
+            candidates.push({
+                type: 'video',
+                url: src,
+                thumbnailUrl: thumbnailUrl,
+                filename: getFilenameFromUrl(src),
+                metadata: null,
+                isAI: false
+            });
+            candidateUrls.add(src);
+        }
+
+        // 音声要素の検出
+        const audios = Array.from(document.querySelectorAll('audio'));
+        for (const audio of audios) {
+            const src = audio.src || audio.currentSrc;
+            if (!src) continue;
+
+            // すでに画像/動画として追加済みならスキップ
+            if (candidateUrls.has(src)) continue;
+
+            candidates.push({
+                type: 'audio',
+                url: src,
+                thumbnailUrl: null,
+                filename: getFilenameFromUrl(src),
+                metadata: null,
+                isAI: false
+            });
+            candidateUrls.add(src);
+        }
+
+        // リンクから動画・音声・アーカイブを検出
+        const links = Array.from(document.querySelectorAll('a[href]'));
+        const mediaLinks = links.filter(a => {
+            const href = a.href.toLowerCase();
+            // 複合拡張子対応: tar.gz, tar.bz2, tar.xz など
+            // モデルファイル対応: .safetensors, .ckpt, .pt
+            return /\.(mp4|webm|mkv|avi|flv|mov|mp3|wav|ogg|m4a|flac|zip|rar|7z|lzh|tar|tar\.gz|tar\.bz2|tar\.xz|tgz|tbz2|safetensors|ckpt|pt)$/i.test(href);
+        });
+
+        for (const link of mediaLinks) {
+            const href = link.href;
+            const filename = getFilenameFromUrl(href);
+            const type = getMediaType(filename);
+
+            // すでに他の要素（video/audioタグ等）で追加済みならスキップ
+            if (candidateUrls.has(href)) continue;
+
+            // 動画ファイルの場合、リンク周辺のサムネイル画像を検出
+            let thumbnailUrl = null;
+            if (type === 'video') {
+                thumbnailUrl = findLinkThumbnail(link);
+            }
+
+            candidates.push({
+                type: type,
+                url: href,
+                thumbnailUrl: thumbnailUrl,
+                filename: filename,
+                metadata: null,
+                isAI: false
+            });
+            candidateUrls.add(href);
+        }
+
+        console.log('[AI Meta Viewer] Total media found:', candidates.length,
+            'Videos:', candidates.filter(c => c.type === 'video').length,
+            'Audio:', candidates.filter(c => c.type === 'audio').length,
+            'Archives:', candidates.filter(c => c.type === 'archive').length);
 
         if (candidates.length > 0) {
             const context = {
@@ -233,7 +417,7 @@ async function scanAllImages() {
             const modal = createDownloaderModal(candidates, context);
             document.body.appendChild(modal);
         } else {
-            alert('No images suitable for download found on this page.');
+            showNotification('No media suitable for download found on this page.');
         }
 
     } finally {
@@ -241,97 +425,7 @@ async function scanAllImages() {
     }
 }
 
-/**
- * スキャン中のオーバーレイを表示
- */
-function showScanningOverlay(total) {
-    const overlay = document.createElement('div');
-    overlay.className = 'ai-meta-scan-overlay';
-    overlay.style.cssText = `
-        position: fixed;
-        top: 20px;
-        left: 50%;
-        transform: translateX(-50%);
-        background-color: rgba(30, 30, 30, 0.95);
-        color: white;
-        padding: 12px 20px;
-        border-radius: 12px;
-        z-index: 2147483647;
-        font-family: 'Segoe UI', sans-serif;
-        font-size: 14px;
-        display: flex;
-        flex-direction: column;
-        gap: 8px;
-        box-shadow: 0 8px 32px rgba(0, 0, 0, 0.6);
-        border: 1px solid rgba(255, 255, 255, 0.1);
-        backdrop-filter: blur(8px);
-        min-width: 240px;
-    `;
 
-    overlay.innerHTML = `
-        <div style="display: flex; align-items: center; justify-content: space-between; gap: 15px;">
-            <div style="display: flex; align-items: center; gap: 10px;">
-                <div style="width: 16px; height: 16px; border: 2px solid rgba(255,255,255,0.2); border-top-color: #4CAF50; border-radius: 50%; animation: ai-meta-spin 0.8s linear infinite;"></div>
-                <span style="font-weight: 600; letter-spacing: 0.3px;">Scanning AI Images</span>
-            </div>
-            <button id="ai-meta-scan-cancel" style="background: rgba(255,255,255,0.1); border: none; color: #ffab91; font-size: 11px; padding: 4px 8px; border-radius: 4px; cursor: pointer; transition: background 0.2s;">Cancel</button>
-        </div>
-        <div style="height: 4px; background: rgba(255,255,255,0.1); border-radius: 2px; overflow: hidden;">
-            <div id="ai-meta-scan-progress-bar" style="width: 0%; height: 100%; background: #4CAF50; transition: width 0.3s ease;"></div>
-        </div>
-        <div style="display: flex; justify-content: space-between; font-size: 12px; color: #aaa;">
-            <span id="ai-meta-scan-count">Progress: 0 / ${total}</span>
-            <span id="ai-meta-scan-found" style="color: #81C784;">Found: 0</span>
-        </div>
-    `;
-
-    // ホバーエフェクト
-    const cancelButton = overlay.querySelector('#ai-meta-scan-cancel');
-    cancelButton.onmouseover = () => cancelButton.style.background = 'rgba(255,255,255,0.2)';
-    cancelButton.onmouseout = () => cancelButton.style.background = 'rgba(255,255,255,0.1)';
-
-    const progressBar = overlay.querySelector('#ai-meta-scan-progress-bar');
-    const countText = overlay.querySelector('#ai-meta-scan-count');
-    const foundText = overlay.querySelector('#ai-meta-scan-found');
-
-    const updateProgress = (current, found) => {
-        const percent = Math.round((current / total) * 100);
-        progressBar.style.width = `${percent}%`;
-        countText.textContent = `Progress: ${current} / ${total}`;
-        foundText.textContent = `Found: ${found}`;
-    };
-
-    // アニメーション用のスタイルを追加（初回のみ）
-    if (!document.getElementById('ai-meta-scan-styles')) {
-        const style = document.createElement('style');
-        style.id = 'ai-meta-scan-styles';
-        style.textContent = `
-            @keyframes ai-meta-spin {
-                to { transform: rotate(360deg); }
-            }
-        `;
-        document.head.appendChild(style);
-    }
-
-    document.body.appendChild(overlay);
-    return { overlay, updateProgress, cancelButton };
-}
-
-/**
- * URLからファイル名を推測
- */
-function getFilenameFromUrl(urlStr) {
-    try {
-        const url = new URL(urlStr);
-        const path = url.pathname;
-        const parts = path.split('/');
-        const lastPart = parts[parts.length - 1];
-        if (lastPart && lastPart.includes('.')) {
-            return lastPart;
-        }
-    } catch (e) { }
-    return `image_${Date.now()}.png`;
-}
 
 /**
  * アダプターを使用してオリジナルURLを解決
@@ -349,9 +443,39 @@ function resolveOriginalUrls(img) {
 }
 
 // Backgroundからのトリガー待機
+// トップフレームでのみスキャンを実行(iframeでの重複実行を防止)
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     if (request.action === 'triggerScan') {
-        scanAllImages();
+        if (window.self === window.top) {
+            scanAllImages();
+            sendResponse({ success: true });
+        } else {
+            // iframeでは何もしない
+            sendResponse({ success: false, reason: 'iframe' });
+        }
+    }
+
+    if (request.action === 'clearMemoryCaches') {
+        // scanner.js のメモリキャッシュをクリア
+        const noMetadataCacheSize = noMetadataCache.size;
+        const localMetadataCacheSize = localMetadataCache.size;
+
+        noMetadataCache.clear();
+        localMetadataCache.clear();
+
+        console.log(`[AI Meta Viewer] Scanner caches cleared: noMetadataCache=${noMetadataCacheSize}, localMetadataCache=${localMetadataCacheSize}`);
+        sendResponse({
+            success: true,
+            clearedItems: {
+                noMetadataCache: noMetadataCacheSize,
+                localMetadataCache: localMetadataCacheSize
+            }
+        });
+        return true;
+    }
+
+    if (request.action === 'showNotification') {
+        showNotification(request.message, 5000);
         sendResponse({ success: true });
     }
 });
@@ -377,9 +501,36 @@ function createDownloaderModal(candidates, context) {
         font-family: 'Segoe UI', system-ui, sans-serif;
     `;
 
-    // 候補リストから初期選択状態（AI画像のみデフォルトONなど）
-    // candidates: [{ url, filename, metadata, isAI }]
-    let selectedUrls = new Set(candidates.filter(c => c.isAI).map(c => c.url));
+    // 候補リストから初期選択状態（AI画像またはautoSelectフラグ）
+    // candidates: [{ type, url, filename, metadata, isAI, autoSelect }]
+    let selectedUrls = new Set();
+    candidates.forEach(c => {
+        // アーカイブ（safetensors等）はautoSelectフラグのみを信頼し、isAIフラグは無視する（意図しない全選択防止）
+        if (c.type === 'archive') {
+            if (c.autoSelect) {
+                selectedUrls.add(c.url);
+            }
+        } else {
+            // 画像等はautoSelectがあれば従い、なければisAIに従う
+            if (c.autoSelect || (c.isAI && c.autoSelect !== false)) {
+                selectedUrls.add(c.url);
+            }
+        }
+    });
+    const mediaSizes = new Map(); // URL -> size (bytes)
+
+    // ファイルサイズの非同期取得 (アーカイブを優先)
+    candidates.forEach(c => {
+        if (c.type !== 'image') {
+            chrome.runtime.sendMessage({ action: 'getMediaSize', url: c.url }, (res) => {
+                if (res && res.success && res.size) {
+                    mediaSizes.set(c.url, res.size);
+                    renderItems(); // サイズが取得できたら再描画
+                    updateFooter();
+                }
+            });
+        }
+    });
 
     const container = document.createElement('div');
     container.style.cssText = `
@@ -403,22 +554,94 @@ function createDownloaderModal(candidates, context) {
         background: #252525;
         border-bottom: 1px solid #333;
         display: flex;
+        flex-direction: column;
+        gap: 12px;
+    `;
+
+    // タイトル行
+    const titleRow = document.createElement('div');
+    titleRow.style.cssText = `
+        display: flex;
         justify-content: space-between;
         align-items: center;
     `;
-    header.innerHTML = `
+    titleRow.innerHTML = `
         <div>
-            <h2 style="margin: 0; font-size: 18px; font-weight: 600;">Found Images</h2>
-            <div style="font-size: 12px; color: #aaa; margin-top: 4px;">${context.pageTitle || 'Unknown Page'}</div>
+            <h2 style="margin: 0; font-size: 18px; font-weight: 600;">Found Media</h2>
+            <div id="ai-meta-scan-page-title" style="font-size: 12px; color: #aaa; margin-top: 4px;"></div>
         </div>
         <div style="display: flex; items-align: center; gap: 15px;">
             <div style="text-align: right;">
                 <div style="font-size: 12px; color: #aaa;">Total: ${candidates.length}</div>
-                <div style="font-size: 12px; color: #4CAF50;">AI Detected: ${candidates.filter(c => c.isAI).length}</div>
+                <div style="font-size: 12px; color: #4CAF50;">AI: ${candidates.filter(c => c.isAI).length}</div>
             </div>
             <button id="ai-meta-close-btn" style="background: none; border: none; color: #aaa; cursor: pointer; font-size: 24px; padding: 0 8px;">&times;</button>
         </div>
     `;
+
+    // 安全にタイトルを設定
+    header.appendChild(titleRow);
+    const titleEl = titleRow.querySelector('#ai-meta-scan-page-title');
+    if (titleEl) titleEl.textContent = context.pageTitle || 'Unknown Page';
+
+    // メディアタイプフィルタ行
+    const filterRow = document.createElement('div');
+    filterRow.style.cssText = `
+        display: flex;
+        gap: 8px;
+        flex-wrap: wrap;
+    `;
+
+    const filterBtnStyle = `
+        padding: 6px 12px;
+        border-radius: 6px;
+        border: 1px solid #444;
+        background: #333;
+        color: #eee;
+        cursor: pointer;
+        font-size: 12px;
+        transition: all 0.2s;
+    `;
+
+    const filterBtnActiveStyle = `
+        padding: 6px 12px;
+        border-radius: 6px;
+        border: 1px solid #4CAF50;
+        background: #4CAF50;
+        color: white;
+        cursor: pointer;
+        font-size: 12px;
+        font-weight: 600;
+        transition: all 0.2s;
+    `;
+
+    let activeFilter = 'all';
+
+    const filterButtons = [
+        { type: 'all', label: `All (${candidates.length})` },
+        { type: 'image', label: `Images (${candidates.filter(c => c.type === 'image').length})` },
+        { type: 'video', label: `Videos (${candidates.filter(c => c.type === 'video').length})` },
+        { type: 'audio', label: `Audio (${candidates.filter(c => c.type === 'audio').length})` },
+        { type: 'archive', label: `Archives (${candidates.filter(c => c.type === 'archive').length})` }
+    ];
+
+    filterButtons.forEach(({ type, label }) => {
+        const btn = document.createElement('button');
+        btn.textContent = label;
+        btn.style.cssText = type === 'all' ? filterBtnActiveStyle : filterBtnStyle;
+        btn.dataset.type = type;
+        btn.onclick = () => {
+            activeFilter = type;
+            // Update button styles
+            filterRow.querySelectorAll('button').forEach(b => {
+                b.style.cssText = b.dataset.type === activeFilter ? filterBtnActiveStyle : filterBtnStyle;
+            });
+            renderItems();
+        };
+        filterRow.appendChild(btn);
+    });
+
+    header.appendChild(filterRow);
 
     // --- Content (Grid) ---
     const content = document.createElement('div');
@@ -435,7 +658,13 @@ function createDownloaderModal(candidates, context) {
     // 画像アイテム生成
     function renderItems() {
         content.innerHTML = '';
-        candidates.forEach(c => {
+
+        // フィルタリング
+        const filtered = activeFilter === 'all'
+            ? candidates
+            : candidates.filter(c => c.type === activeFilter);
+
+        filtered.forEach(c => {
             const isSelected = selectedUrls.has(c.url);
             const item = document.createElement('div');
             item.style.cssText = `
@@ -464,18 +693,98 @@ function createDownloaderModal(candidates, context) {
                 overflow: hidden;
             `;
 
-            // Image
-            const img = document.createElement('img');
-            img.src = c.thumbnailUrl || c.url; // Use thumbnail if available
-            img.style.cssText = `
-                width: 100%;
-                height: 100%;
-                object-fit: contain;
-                display: block;
-            `;
-            imgContainer.appendChild(img);
+            // Image or Video Thumbnail
+            if (c.type === 'video') {
+                // 動画の場合はサムネイル生成
+                if (c.thumbnailUrl) {
+                    // poster属性がある場合はそれを使用
+                    const img = document.createElement('img');
+                    img.src = c.thumbnailUrl;
+                    img.style.cssText = `
+                        width: 100%;
+                        height: 100%;
+                        object-fit: contain;
+                        display: block;
+                    `;
+                    imgContainer.appendChild(img);
+                } else {
+                    // poster属性がない場合はプレースホルダーを表示
+                    const placeholder = document.createElement('div');
+                    placeholder.style.cssText = `
+                        width: 100%;
+                        height: 100%;
+                        display: flex;
+                        align-items: center;
+                        justify-content: center;
+                        background: #333;
+                        color: #aaa;
+                        font-size: 24px;
+                    `;
+                    placeholder.textContent = '🎬';
+                    imgContainer.appendChild(placeholder);
+                }
+            } else {
+                // 画像・音声・アーカイブの場合
+                const img = document.createElement('img');
+                img.src = c.thumbnailUrl || c.url;
+                img.style.cssText = `
+                    width: 100%;
+                    height: 100%;
+                    object-fit: contain;
+                    display: block;
+                `;
+
+                // 画像以外の場合のエラーハンドリング
+                if (c.type !== 'image') {
+                    img.onerror = () => {
+                        const placeholder = document.createElement('div');
+                        placeholder.style.cssText = `
+                            width: 100%;
+                            height: 100%;
+                            display: flex;
+                            align-items: center;
+                            justify-content: center;
+                            background: #333;
+                            color: #aaa;
+                            font-size: 24px;
+                        `;
+                        const icons = {
+                            audio: '🎵',
+                            archive: '📦'
+                        };
+                        placeholder.textContent = icons[c.type] || '📄';
+                        imgContainer.replaceChild(placeholder, img);
+                    };
+                }
+
+                imgContainer.appendChild(img);
+            }
 
             // Badges
+            // メディアタイプバッジ (動画・音声・アーカイブ)
+            if (c.type !== 'image') {
+                const typeBadge = document.createElement('span');
+                const typeIcons = {
+                    video: '🎬',
+                    audio: '🎵',
+                    archive: '📦'
+                };
+                typeBadge.innerText = typeIcons[c.type] || '📄';
+                typeBadge.style.cssText = `
+                    position: absolute;
+                    top: 6px;
+                    right: 6px;
+                    background: rgba(0, 0, 0, 0.7);
+                    color: white;
+                    font-size: 16px;
+                    padding: 4px;
+                    border-radius: 4px;
+                    line-height: 1;
+                `;
+                imgContainer.appendChild(typeBadge);
+            }
+
+            // AIバッジ
             if (c.isAI) {
                 const badge = document.createElement('span');
                 badge.innerText = 'AI';
@@ -507,6 +816,20 @@ function createDownloaderModal(candidates, context) {
             `;
             info.innerText = c.filename;
             info.title = c.filename;
+
+            // サイズ表示 (取得済みの場合)
+            if (mediaSizes.has(c.url)) {
+                const size = mediaSizes.get(c.url);
+                const sizeStr = formatBytes(size);
+                const sizeBadge = document.createElement('div');
+                sizeBadge.style.cssText = `
+                    font-size: 10px;
+                    color: #aaa;
+                    margin-top: 2px;
+                `;
+                sizeBadge.textContent = sizeStr;
+                info.appendChild(sizeBadge);
+            }
 
             // Checkbox overlay
             const checkbox = document.createElement('input');
@@ -570,7 +893,7 @@ function createDownloaderModal(candidates, context) {
     selectAllBtn.innerText = 'Select All';
     selectAllBtn.style.cssText = btnStyle;
     selectAllBtn.onclick = () => {
-        selectedUrls = new Set(candidates.map(c => c.url));
+        candidates.forEach(c => selectedUrls.add(c.url));
         updateFooter();
         renderItems();
     };
@@ -579,7 +902,10 @@ function createDownloaderModal(candidates, context) {
     selectAiBtn.innerText = 'Select AI Only';
     selectAiBtn.style.cssText = btnStyle;
     selectAiBtn.onclick = () => {
-        selectedUrls = new Set(candidates.filter(c => c.isAI).map(c => c.url));
+        selectedUrls.clear();
+        candidates.forEach(c => {
+            if (c.isAI) selectedUrls.add(c.url);
+        });
         updateFooter();
         renderItems();
     };
@@ -612,7 +938,13 @@ function createDownloaderModal(candidates, context) {
 
     function updateFooter() {
         const count = selectedUrls.size;
-        downloadBtn.innerText = `Download Selected (${count})`;
+        let totalSizeBytes = 0;
+        selectedUrls.forEach(url => {
+            totalSizeBytes += (mediaSizes.get(url) || 0);
+        });
+
+        const sizeStr = totalSizeBytes > 0 ? ` (${formatBytes(totalSizeBytes)})` : '';
+        downloadBtn.innerText = `Download Selected (${count})${sizeStr}`;
         downloadBtn.disabled = count === 0;
         downloadBtn.style.opacity = count === 0 ? '0.5' : '1';
         downloadBtn.style.cursor = count === 0 ? 'not-allowed' : 'pointer';
@@ -622,34 +954,49 @@ function createDownloaderModal(candidates, context) {
         const count = selectedUrls.size;
         if (count === 0) return;
 
-        const targets = candidates.filter(c => selectedUrls.has(c.url)).map(c => ({
-            url: c.url,
-            filename: c.filename
-        }));
+        // 1GBチェック
+        let totalSizeBytes = 0;
+        selectedUrls.forEach(url => {
+            totalSizeBytes += (mediaSizes.get(url) || 0);
+        });
 
-        downloadBtn.innerText = 'Starting Download...';
+        const ONE_GB = 1024 * 1024 * 1024;
+        if (totalSizeBytes > ONE_GB) {
+            const confirmed = confirm(`Selected items total ${formatBytes(totalSizeBytes)}, which exceeds 1GB.\nAre you sure you want to start downloading?`);
+            if (!confirmed) return;
+        }
+
+        const targets = candidates.filter(c => selectedUrls.has(c.url));
+        if (targets.length === 0) return;
+
+        const civitaiModel = targets.find(t => t.isCivitaiModel);
+        const downloadContext = {
+            pageTitle: document.title,
+            domain: window.location.hostname,
+            isCivitai: !!civitaiModel,
+            modelName: civitaiModel?.modelName || 'Civitai_Model'
+        };
+
+        downloadBtn.innerText = 'Downloading...';
 
         try {
-            const res = await chrome.runtime.sendMessage({
+            chrome.runtime.sendMessage({
                 action: 'downloadImages',
                 images: targets,
-                context: {
-                    pageTitle: context.pageTitle,
-                    domain: context.domain
+                context: downloadContext
+            }, (response) => {
+                if (response && response.success) {
+                    showNotification(`Started download for ${response.count} items.`);
+                    modalOverlay.remove();
+                } else {
+                    showNotification('Download failed: ' + (response?.error || 'Unknown error'));
+                    updateFooter();
                 }
             });
-
-            if (res && res.success) {
-                alert(`Started download for ${res.count} images.`);
-                modalOverlay.remove();
-            } else {
-                alert('Download failed: ' + (res.error || 'Unknown error'));
-                downloadBtn.innerText = `Download Selected (${count})`;
-            }
         } catch (e) {
             console.error(e);
-            alert('Failed to send download message.');
-            downloadBtn.innerText = `Download Selected (${count})`;
+            showNotification('Failed to send download message.');
+            updateFooter();
         }
     };
 
