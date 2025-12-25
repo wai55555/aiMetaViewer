@@ -521,11 +521,13 @@ function observeSiteSpecificElements() {
             }
 
             if (metadataFetchSucceeded || retryCount >= maxRetries) {
-                if (retryCount >= maxRetries) {
-                    console.warn('[AI Meta Viewer] WARNING: Max retries reached for safetensors check');
-                } else {
+                if (metadataFetchSucceeded) {
+                    // Civitai API URL が見つかった場合は優先的に実行
                     debugLog('[AI Meta Viewer] Civitai API URL found, executing safetensors check');
-                    executeSafetensorsCheck(); // Civitai API URL が見つかったら実行
+                    executeSafetensorsCheck();
+                } else if (retryCount >= maxRetries) {
+                    // 最大試行回数に達した場合のみ警告
+                    console.warn('[AI Meta Viewer] WARNING: Max retries reached for safetensors check');
                 }
                 return; // 見つかったか、最大試行回数に達したら終了
             }

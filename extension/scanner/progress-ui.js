@@ -91,6 +91,14 @@ function showScanningOverlay(total) {
     const foundText = overlay.querySelector('#ai-meta-scan-found');
 
     const updateProgress = (current, found) => {
+        // Division by zero ガード
+        if (total <= 0) {
+            progressBar.style.width = '0%';
+            countText.textContent = `Progress: 0 / 0`;
+            foundText.textContent = `Found: ${found}`;
+            return;
+        }
+
         const percent = Math.round((current / total) * 100);
         progressBar.style.width = `${percent}%`;
         countText.textContent = `Progress: ${current} / ${total}`;
