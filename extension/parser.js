@@ -265,19 +265,48 @@ function extractWebpMetadata(buffer) {
   const view = new Uint8Array(buffer);
   const metadata = {};
 
+  // RIFFヘッダーを確認
+  if (view.length < 12) {
+    return { isIncomplete: true, suggestedSize: 65536 };
+  }
+
+  // RIFFサイズ (Little Endian)
+  const riffSize = view[4] | (view[5] << 8) | (view[6] << 16) | (view[7] << 24);
+  const totalSize = riffSize + 8;
+
   // RIFFヘッダーをスキップ (12バイト: "RIFF" + size + "WEBP")
   let offset = 12;
+  let foundMetadata = false;
 
-  while (offset < view.length - 8) {
+  while (offset < view.length) {
+    // チャンクヘッダー (型4B + サイズ4B) が読み取れるか
+    if (offset + 8 > view.length) {
+      // メタデータが見つかっていない場合、ファイルがまだ続くなら再取得
+      if (!foundMetadata && view.length < totalSize) {
+        return { isIncomplete: true, suggestedSize: totalSize };
+      }
+      break;
+    }
+
     // チャンク型を読み取り
     const chunkType = String.fromCharCode(view[offset], view[offset + 1],
       view[offset + 2], view[offset + 3]);
-    offset += 4;
 
     // チャンクサイズを読み取り (Little Endian)
-    const chunkSize = view[offset] | (view[offset + 1] << 8) |
-      (view[offset + 2] << 16) | (view[offset + 3] << 24);
-    offset += 4;
+    // 符号付き32bitの制限を避けるため、符号なしとして計算
+    const chunkSize = (view[offset + 4]) + (view[offset + 5] << 8) +
+      (view[offset + 6] << 16) + (view[offset + 7] * 16777216);
+
+    // チャンクデータがバッファ内に収まっているか
+    if (offset + 8 + chunkSize > view.length) {
+      // このチャンクが EXIF または XMP の場合、またはメタデータが未発見でファイルが続く場合
+      if (chunkType === 'EXIF' || chunkType === 'XMP ' || (!foundMetadata && view.length < totalSize)) {
+        return { isIncomplete: true, suggestedSize: Math.min(totalSize, offset + 8 + chunkSize) };
+      }
+      break;
+    }
+
+    offset += 8;
 
     // EXIFチャンク処理
     if (chunkType === 'EXIF') {
@@ -294,8 +323,21 @@ function extractWebpMetadata(buffer) {
           const parsedComment = parseExifUserComment(userCommentData, isLittleEndian);
           if (parsedComment) {
             metadata['parameters'] = parsedComment;
+            foundMetadata = true;
           }
         }
+      }
+    }
+
+    // XMP チャンク処理
+    if (chunkType === 'XMP ') {
+      const xmpData = view.slice(offset, offset + chunkSize);
+      const xmpText = new TextDecoder('utf-8').decode(xmpData);
+      const xmpMetadata = parseXmpMetadata(xmpText);
+
+      if (Object.keys(xmpMetadata).length > 0) {
+        Object.assign(metadata, xmpMetadata);
+        foundMetadata = true;
       }
     }
 
@@ -304,6 +346,11 @@ function extractWebpMetadata(buffer) {
     if (chunkSize % 2 === 1) {
       offset += 1; // パディングバイト
     }
+  }
+
+  // ループ終了後、メタデータが見つからず、かつファイル全体を読み切っていない場合
+  if (!foundMetadata && view.length < totalSize) {
+    return { isIncomplete: true, suggestedSize: totalSize };
   }
 
   return metadata;
@@ -491,6 +538,47 @@ function parseExifUserComment(data, isLittleEndian) {
     console.error('UserComment解析エラー:', e);
     return null;
   }
+}
+
+/**
+ * XMP テキストからメタデータを抽出
+ * @param {string} xmpText - XMP XML 文字列
+ * @returns {Object} - 抽出されたメタデータ
+ */
+function parseXmpMetadata(xmpText) {
+  const metadata = {};
+
+  // XMP は XML なので、簡易的な正規表現で主要なタグを抽出
+  // 1. Stable Diffusion (Automatic1111) 等で使われる parameters 属性/タグ
+  // 属性形式: parameters="..."
+  const paramAttrMatch = xmpText.match(/parameters="([^"]+)"/);
+  if (paramAttrMatch) {
+    // 実体参照をデコード (簡易版: &quot;, &lt;, &gt;, &amp;, &#10;)
+    metadata['parameters'] = paramAttrMatch[1]
+      .replace(/&quot;/g, '"')
+      .replace(/&lt;/g, '<')
+      .replace(/&gt;/g, '>')
+      .replace(/&amp;/g, '&')
+      .replace(/&#10;/g, '\n')
+      .replace(/&#13;/g, '\r');
+  } else {
+    // タグ形式: <...:parameters>...</...:parameters>
+    const paramTagMatch = xmpText.match(/<[^:>]+:parameters>([\s\S]+?)<\/[^:>]+:parameters>/);
+    if (paramTagMatch) {
+      metadata['parameters'] = paramTagMatch[1].trim();
+    }
+  }
+
+  // 2. 他の一般的なメタデータ (Description 等)
+  if (!metadata['parameters']) {
+    // dc:description 内の rdf:li
+    const descMatch = xmpText.match(/<dc:description>[\s\S]*?<rdf:li[^>]*>([\s\S]+?)<\/rdf:li>[\s\S]*?<\/dc:description>/);
+    if (descMatch) {
+      metadata['Description'] = descMatch[1].trim();
+    }
+  }
+
+  return metadata;
 }
 
 /**

@@ -39,6 +39,7 @@ function showNotification(message, duration = 3000) {
 
 /**
  * スキャン中のオーバーレイを表示
+ * セキュリティ: innerHTML を使わず、createElement で安全に構築
  */
 function showScanningOverlay(total) {
     const overlay = document.createElement('div');
@@ -64,31 +65,68 @@ function showScanningOverlay(total) {
         min-width: 240px;
     `;
 
-    overlay.innerHTML = `
-        <div style="display: flex; align-items: center; justify-content: space-between; gap: 15px;">
-            <div style="display: flex; align-items: center; gap: 10px;">
-                <div style="width: 16px; height: 16px; border: 2px solid rgba(255,255,255,0.2); border-top-color: #4CAF50; border-radius: 50%; animation: ai-meta-spin 0.8s linear infinite;"></div>
-                <span style="font-weight: 600; letter-spacing: 0.3px;">Scanning AI Images</span>
-            </div>
-            <button id="ai-meta-scan-cancel" style="background: rgba(255,255,255,0.1); border: none; color: #ffab91; font-size: 11px; padding: 4px 8px; border-radius: 4px; cursor: pointer; transition: background 0.2s;">Cancel</button>
-        </div>
-        <div style="height: 4px; background: rgba(255,255,255,0.1); border-radius: 2px; overflow: hidden;">
-            <div id="ai-meta-scan-progress-bar" style="width: 0%; height: 100%; background: #4CAF50; transition: width 0.3s ease;"></div>
-        </div>
-        <div style="display: flex; justify-content: space-between; font-size: 12px; color: #aaa;">
-            <span id="ai-meta-scan-count">Progress: 0 / ${total}</span>
-            <span id="ai-meta-scan-found" style="color: #81C784;">Found: 0</span>
-        </div>
-    `;
+    // Header row
+    const headerRow = document.createElement('div');
+    headerRow.style.cssText = 'display: flex; align-items: center; justify-content: space-between; gap: 15px;';
 
-    // ホバーエフェクト
-    const cancelButton = overlay.querySelector('#ai-meta-scan-cancel');
-    cancelButton.onmouseover = () => cancelButton.style.background = 'rgba(255,255,255,0.2)';
-    cancelButton.onmouseout = () => cancelButton.style.background = 'rgba(255,255,255,0.1)';
+    const headerLeft = document.createElement('div');
+    headerLeft.style.cssText = 'display: flex; align-items: center; gap: 10px;';
 
-    const progressBar = overlay.querySelector('#ai-meta-scan-progress-bar');
-    const countText = overlay.querySelector('#ai-meta-scan-count');
-    const foundText = overlay.querySelector('#ai-meta-scan-found');
+    const spinner = document.createElement('div');
+    spinner.style.cssText = 'width: 16px; height: 16px; border: 2px solid rgba(255,255,255,0.2); border-top-color: #4CAF50; border-radius: 50%; animation: ai-meta-spin 0.8s linear infinite;';
+
+    const label = document.createElement('span');
+    label.textContent = 'Scanning AI Images';
+    label.style.cssText = 'font-weight: 600; letter-spacing: 0.3px;';
+
+    headerLeft.appendChild(spinner);
+    headerLeft.appendChild(label);
+
+    const cancelButton = document.createElement('button');
+    cancelButton.id = 'ai-meta-scan-cancel';
+    cancelButton.textContent = 'Cancel';
+    cancelButton.style.cssText = 'background: rgba(255,255,255,0.1); border: none; color: #ffab91; font-size: 11px; padding: 4px 8px; border-radius: 4px; cursor: pointer; transition: background 0.2s;';
+
+    cancelButton.addEventListener('mouseover', () => {
+        cancelButton.style.background = 'rgba(255,255,255,0.2)';
+    });
+    cancelButton.addEventListener('mouseout', () => {
+        cancelButton.style.background = 'rgba(255,255,255,0.1)';
+    });
+
+    headerRow.appendChild(headerLeft);
+    headerRow.appendChild(cancelButton);
+
+    // Progress bar container
+    const progressContainer = document.createElement('div');
+    progressContainer.style.cssText = 'height: 4px; background: rgba(255,255,255,0.1); border-radius: 2px; overflow: hidden;';
+
+    const progressBar = document.createElement('div');
+    progressBar.id = 'ai-meta-scan-progress-bar';
+    progressBar.style.cssText = 'width: 0%; height: 100%; background: #4CAF50; transition: width 0.3s ease;';
+
+    progressContainer.appendChild(progressBar);
+
+    // Stats row
+    const statsRow = document.createElement('div');
+    statsRow.style.cssText = 'display: flex; justify-content: space-between; font-size: 12px; color: #aaa;';
+
+    const countText = document.createElement('span');
+    countText.id = 'ai-meta-scan-count';
+    countText.textContent = `Progress: 0 / ${total}`;
+
+    const foundText = document.createElement('span');
+    foundText.id = 'ai-meta-scan-found';
+    foundText.textContent = 'Found: 0';
+    foundText.style.cssText = 'color: #81C784;';
+
+    statsRow.appendChild(countText);
+    statsRow.appendChild(foundText);
+
+    // Assemble overlay
+    overlay.appendChild(headerRow);
+    overlay.appendChild(progressContainer);
+    overlay.appendChild(statsRow);
 
     const updateProgress = (current, found) => {
         // Division by zero ガード

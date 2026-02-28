@@ -70,3 +70,13 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         console.log('[AI Meta Viewer] Settings updated via message');
     }
 });
+
+/**
+ * デバッグ用ログ出力
+ * settings.debugMode が true の場合のみ出力される
+ */
+window.debugLog = function (...args) {
+    if (window.settings && window.settings.debugMode) {
+        console.log(...args);
+    }
+};

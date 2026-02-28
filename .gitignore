@@ -10,7 +10,7 @@ doc/
 rules
 GEMINI.md
 AGENT.md
-EXTENSION_SPEC.md
+webstore_images/
 
 # Dependencies
 **/node_modules
@@ -56,3 +56,19 @@ next-env.d.ts
 # NocoDB (great_lion)
 noco.db
 nc/
+
+# Browser Extension artifacts
+extension/_metadata/
+
+# Temp files
+*.webp
+test_*.js
+test*.png
+debug_*.js
+*.log
+console_log.txt
+civitai_data*.json
+build*.js
+package_firefox.js
+generate_manifest.js
+syntax_check.*

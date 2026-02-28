@@ -1,6 +1,44 @@
 // scanner/utils.js - ユーティリティ関数
 
 /**
+ * 画像要素から元のURLを解決
+ * SiteAdapters を使用してサイト別の解決ロジックを適用
+ * @param {HTMLImageElement} img - 画像要素
+ * @returns {string|string[]|null} 解決されたURL、複数URL、またはnull
+ */
+function resolveOriginalUrls(img) {
+    if (!img || typeof img !== 'object') {
+        return null;
+    }
+
+    // SiteAdapters が定義されているかチェック
+    if (typeof SiteAdapters === 'undefined' || !Array.isArray(SiteAdapters)) {
+        // フォールバック: img.src を返す
+        return img.src || img.currentSrc || null;
+    }
+
+    // マッチするアダプターを探す
+    for (const adapter of SiteAdapters) {
+        if (typeof adapter.match === 'function' && adapter.match()) {
+            if (typeof adapter.resolve === 'function') {
+                try {
+                    const resolved = adapter.resolve(img);
+                    if (resolved) {
+                        return resolved;
+                    }
+                } catch (e) {
+                    console.error('[AI Meta Viewer] Adapter resolve error:', e);
+                }
+            }
+            break; // 最初にマッチしたアダプターのみ使用
+        }
+    }
+
+    // アダプターで解決できない場合はフォールバック
+    return img.src || img.currentSrc || null;
+}
+
+/**
  * URLからファイル名を推測
  */
 function getFilenameFromUrl(urlStr) {

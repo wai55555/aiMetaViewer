@@ -29,17 +29,27 @@ const browserAPI = (() => {
 const isFirefox = typeof browser !== 'undefined';
 const isChrome = typeof chrome !== 'undefined' && !isFirefox;
 
-console.log(`[AI Meta Viewer] Content script loaded (${isFirefox ? 'Firefox' : 'Chrome'}):`, window.location.href);
+debugLog(`[AI Meta Viewer] Content script loaded (${isFirefox ? 'Firefox' : 'Chrome'}):`, window.location.href);
 
-// file:// URL では console.log が表示されないため、DOM に表示するデバッグ関数
+// file:// URL では console.log が表示されないことがあるため、DOM に表示するデバッグ機能を追加
 let debugLogContainer = null;
 const MAX_DEBUG_LOGS = 20; // 最大保持ログ数
 
-function debugLog(message, data = null) {
-    console.log(message, data); // 通常のコンソールにも出力（http/https では表示される）
+// settings_loader.js で定義された window.debugLog を拡張
+const baseDebugLog = window.debugLog;
+window.debugLog = function (message, data = null) {
+    // 基本のコンソール出力
+    if (typeof baseDebugLog === 'function') {
+        baseDebugLog(message, data);
+    } else {
+        // 万が一 baseDebugLog がない場合のフォールバック
+        if (window.settings && window.settings.debugMode) {
+            console.log(message, data);
+        }
+    }
 
     // debugMode が有効で、かつ file:// URL の場合のみ DOM に表示
-    if (settings && settings.debugMode && window.location.protocol === 'file:') {
+    if (window.settings && window.settings.debugMode && window.location.protocol === 'file:') {
         // コンテナがまだない場合は作成
         if (!debugLogContainer && document.body) {
             debugLogContainer = document.createElement('div');
@@ -52,7 +62,7 @@ function debugLog(message, data = null) {
             const logEntry = document.createElement('div');
             logEntry.style.cssText = 'padding:2px 0;border-bottom:1px solid rgba(0,255,0,0.2);';
             const timestamp = new Date().toLocaleTimeString('ja-JP', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit', fractionalSecondDigits: 3 });
-            logEntry.textContent = `[${timestamp}] ${message}${data ? ': ' + JSON.stringify(data).substring(0, 150) : ''}`;
+            logEntry.textContent = `[${timestamp}] ${message}${data ? ': ' + (typeof data === 'object' ? JSON.stringify(data).substring(0, 150) : data) : ''}`;
 
             debugLogContainer.appendChild(logEntry);
 
@@ -65,7 +75,7 @@ function debugLog(message, data = null) {
             debugLogContainer.scrollTop = debugLogContainer.scrollHeight;
         }
     }
-}
+};
 
 // 設定、除外判定、初期化ロジックは settings_loader.js に移動しました。
 
@@ -95,7 +105,7 @@ function startExtensionHealthCheck() {
                 // 少し待ってから再初期化を試行
                 setTimeout(() => {
                     if (chrome && chrome.runtime && typeof chrome.runtime.sendMessage === 'function') {
-                        console.log('[AI Meta Viewer] Extension context recovered, reinitializing...');
+                        debugLog('[AI Meta Viewer] Extension context recovered, reinitializing...');
                         init();
                         startExtensionHealthCheck();
                     }
@@ -110,25 +120,25 @@ function startExtensionHealthCheck() {
 
 // 初期化時に設定を読み込む (settings_loader.js で定義された loadSettings を使用)
 loadSettings().then(() => {
-    console.log('[AI Meta Viewer] Settings loaded:', settings);
+    debugLog('[AI Meta Viewer] Settings loaded:', settings);
 
     // 除外サイトチェック
     if (isExcludedUrl()) {
-        console.log('[AI Meta Viewer] Site excluded by settings:', window.location.href);
+        debugLog('[AI Meta Viewer] Site excluded by settings:', window.location.href);
         return;
     }
 
-    console.log('[AI Meta Viewer] Initializing extension on:', window.location.href);
+    debugLog('[AI Meta Viewer] Initializing extension on:', window.location.href);
 
     // 初期化実行
     if (document.readyState === 'loading') {
-        console.log('[AI Meta Viewer] Document still loading, waiting for DOMContentLoaded');
+        debugLog('[AI Meta Viewer] Document still loading, waiting for DOMContentLoaded');
         document.addEventListener('DOMContentLoaded', () => {
             init();
             startExtensionHealthCheck();
         });
     } else {
-        console.log('[AI Meta Viewer] Document ready, calling init()');
+        debugLog('[AI Meta Viewer] Document ready, calling init()');
         init();
         startExtensionHealthCheck();
     }
@@ -138,19 +148,19 @@ loadSettings().then(() => {
 let extensionInitialized = false;
 
 function init() {
-    console.log('[AI Meta Viewer] init() called');
+    debugLog('[AI Meta Viewer] init() called');
 
     // 既に初期化済みの場合はスキップ
     if (extensionInitialized) {
-        console.log('[AI Meta Viewer] Already initialized, skipping');
+        debugLog('[AI Meta Viewer] Already initialized, skipping');
         return;
     }
 
     if (isDirectImageView()) {
-        console.log('[AI Meta Viewer] Direct image view detected');
+        debugLog('[AI Meta Viewer] Direct image view detected');
         handleDirectImageView();
     } else {
-        console.log('[AI Meta Viewer] Normal page view, starting image observation');
+        debugLog('[AI Meta Viewer] Normal page view, starting image observation');
         observeImages();
         observeSiteSpecificElements();
     }
@@ -182,15 +192,15 @@ async function checkImageMetadata(img) {
 
     // 重複チェック
     if (processedImages.has(img)) {
-        console.log(`[DEBUG] Image already in processedImages, skipping: ${img.src.substring(0, 60)}...`);
+        debugLog(`[AI Meta Viewer] Image already processed, skipping: ${img.src.substring(0, 60)}...`);
         return;
     }
 
-    console.log(`[DEBUG] checkImageMetadata called for: ${img.src.substring(0, 60)}...`);
+    debugLog(`[AI Meta Viewer] checkImageMetadata called for: ${img.src.substring(0, 60)}...`);
 
     const src = img.src;
     if (!src) {
-        console.log('[AI Meta Viewer] No src, skipping');
+        debugLog('[AI Meta Viewer] No src, skipping');
         return;
     }
 
@@ -205,7 +215,7 @@ async function checkImageMetadata(img) {
             if (resolvedUrl) {
                 targetUrl = resolvedUrl;
                 isLinkedImage = true;
-                console.log('[AI Meta Viewer] Adapter resolved URL:', {
+                debugLog('[AI Meta Viewer] Adapter resolved URL:', {
                     originalSrc: img.src.substring(0, 80),
                     resolvedUrl: Array.isArray(resolvedUrl) ? resolvedUrl.map(u => u.substring(0, 80)) : resolvedUrl.substring(0, 80)
                 });
@@ -215,7 +225,7 @@ async function checkImageMetadata(img) {
     }
 
     if (!isLinkedImage) {
-        console.log('[AI Meta Viewer] No adapter resolved URL for:', img.src.substring(0, 80));
+        debugLog('[AI Meta Viewer] No adapter resolved URL for:', img.src.substring(0, 80));
     }
 
     // サイズチェック
@@ -223,19 +233,45 @@ async function checkImageMetadata(img) {
     const actualHeight = img.naturalHeight || img.height;
     const pixelCount = actualWidth * actualHeight;
 
+    // Pixiv判定
+    const isPixiv = window.location.hostname.includes('pixiv.net');
+    const isDiscord = window.location.hostname.includes('discord.com');
+
+    // サイズによる除外判定
+    let isTooSmall = false;
+
     // リンク画像でない場合（直接表示など）は、設定された最小画素数でチェック
     if (!isLinkedImage && pixelCount < settings.minPixelCount) {
-        return;
+        isTooSmall = true;
     }
 
     // リンク画像の場合でも、設定された最小サイズ未満は除外（デフォルト200x200）
     if (isLinkedImage && (actualWidth < settings.minImageSize || actualHeight < settings.minImageSize)) {
-        console.log('[AI Meta Viewer] Image too small (linked image):', {
+        isTooSmall = true;
+    }
+
+    // PixivやDiscordの場合は、サムネイルが小さくてもオリジナル画像にメタデータがある可能性が高いため、
+    // サイズ制限を無視してチェックを続行する
+    if (isPixiv || isDiscord) {
+        // [Discord専用: ユーザーアイコン対策] 
+        // 80x80以下の極端に小さな画像はアイコンとみなして除外する
+        if (isDiscord && actualWidth <= 80 && actualHeight <= 80) {
+            isTooSmall = true;
+        } else {
+            isTooSmall = false;
+        }
+    }
+
+    if (isTooSmall) {
+        debugLog('[AI Meta Viewer] Image too small, skipping:', {
             src: img.src.substring(0, 80),
             actualWidth,
             actualHeight,
-            minImageSize: settings.minImageSize
+            pixelCount,
+            isLinkedImage
         });
+        // 処理済みフラグを削除（画像読み込み後にサイズが確定してから再試行させるため）
+        processedImages.delete(img);
         return;
     }
 
@@ -245,7 +281,6 @@ async function checkImageMetadata(img) {
     processedImages.set(img, null);
 
     // Pixivまたはローカルファイル、または全サイト設定が有効な場合、解析中バッジを表示
-    const isPixiv = window.location.hostname.includes('pixiv.net');
     const isLocalFile = targetUrl && (Array.isArray(targetUrl) ? targetUrl[0] : targetUrl).startsWith('file://');
 
     let shouldShowBadge = isPixiv || isLocalFile;
@@ -335,9 +370,9 @@ async function checkImageMetadata(img) {
 
                 if (hasIgnoredKey) {
                     if (settings.debugMode) {
-                        console.log('[AI Meta Viewer] Ignored image due to ignored metadata key');
+                        debugLog('[AI Meta Viewer] Ignored image due to ignored metadata key');
                     }
-                    processedImages.delete(img);
+                    removeBadge(img); // バッジがあれば削除
                     return;
                 }
             }
@@ -349,9 +384,9 @@ async function checkImageMetadata(img) {
 
                 if (isIgnoredSoftware) {
                     if (settings.debugMode) {
-                        console.log('[AI Meta Viewer] Ignored software:', software);
+                        debugLog('[AI Meta Viewer] Ignored software:', software);
                     }
-                    processedImages.delete(img);
+                    removeBadge(img); // バッジがあれば削除
                     return;
                 }
             }
@@ -359,13 +394,13 @@ async function checkImageMetadata(img) {
             // バッジを追加
             addBadgeToImage(img, metadata, successUrl || img.src);
         } else {
-            // メタデータが空の場合は削除（再解析対象から外す）
-            processedImages.delete(img);
-            console.log('[AI Meta Viewer] No metadata found for:', {
+            // メタデータが空の場合は既存バッジを削除（リフレッシュ対策）
+            debugLog('[AI Meta Viewer] No metadata found, removing badge if exists:', {
                 src: img.src.substring(0, 80),
                 targetUrl: Array.isArray(targetUrl) ? targetUrl.map(u => u.substring(0, 80)) : targetUrl.substring(0, 80),
                 urlsToTry: urlsToTry.length
             });
+            removeBadge(img);
         }
 
     } catch (error) {
@@ -375,7 +410,7 @@ async function checkImageMetadata(img) {
         }
 
         if (settings.debugMode) {
-            console.log('[AI Meta Viewer] Error checking metadata:', error);
+            debugLog('[AI Meta Viewer] Error checking metadata:', error);
         }
 
         // エラー通知が有効な場合
@@ -388,215 +423,102 @@ async function checkImageMetadata(img) {
     }
 }
 
+// --- Civitai などの動的サイト用リトライロジック ---
+let civitaiRetryCount = 0;
+const MAX_CIVITAI_RETRIES = 7;
+const CIVITAI_RETRY_INTERVAL_MS = 2000;
+let civitaiMetadataFetchSucceeded = false;
+
+/**
+ * 実際のメタデータ取得コールバック
+ */
+const fetchMetadataCallback = (apiUrl) => {
+    return sendMessageToBrave({
+        action: 'fetchImageMetadata',
+        imageUrl: apiUrl
+    }).then(response => {
+        if (response && response.success && response.metadata && Object.keys(response.metadata).length > 0) {
+            debugLog('[AI Meta Viewer] Metadata fetched successfully:', Object.keys(response.metadata).join(', '));
+            return response.metadata;
+        }
+        debugLog('[AI Meta Viewer] Metadata fetch returned empty or failed for:', apiUrl);
+        return null;
+    });
+};
+
+/**
+ * safetensors のチェックを実行（深いスキャンとバッジ付与）
+ */
+function executeSafetensorsCheck() {
+    debugLog('[AI Meta Viewer] Executing safetensors check');
+    if (typeof executeDeepScanAndAddBadges === 'function') {
+        executeDeepScanAndAddBadges(fetchMetadataCallback);
+    }
+}
+
+/**
+ * Civitai の API データが利用可能になるまで待機して実行するリトライループ
+ */
+function runCivitaiRetryCheck() {
+    civitaiRetryCount++;
+    debugLog('[AI Meta Viewer] Safetensors retry check', civitaiRetryCount, '/', MAX_CIVITAI_RETRIES);
+
+    // deepScan を実行して、Civitai API URL が配置されるまで待つ
+    if (typeof SiteAdapters !== 'undefined') {
+        for (const adapter of SiteAdapters) {
+            if (adapter.match() && typeof adapter.deepScan === 'function') {
+                const candidates = adapter.deepScan(document);
+                if (candidates && Array.isArray(candidates)) {
+                    const safetensorsCandidates = candidates.filter(c => c.type === 'archive' && c.isCivitaiModel);
+                    const civitaiApiCandidates = safetensorsCandidates.filter(c => c.modelVersionId);
+
+                    if (civitaiApiCandidates.length > 0) {
+                        debugLog('[AI Meta Viewer] Found Civitai API candidates:', civitaiApiCandidates.length);
+                        civitaiMetadataFetchSucceeded = true;
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    if (civitaiMetadataFetchSucceeded || civitaiRetryCount >= MAX_CIVITAI_RETRIES) {
+        if (civitaiMetadataFetchSucceeded) {
+            debugLog('[AI Meta Viewer] Civitai API URL found, executing safetensors check');
+            executeSafetensorsCheck();
+        } else if (civitaiRetryCount >= MAX_CIVITAI_RETRIES) {
+            debugLog('[AI Meta Viewer] WARNING: Max retries reached for safetensors check');
+        }
+        return;
+    }
+
+    // 次の試行をスケジュール
+    debugLog('[AI Meta Viewer] Scheduling next safetensors check in', CIVITAI_RETRY_INTERVAL_MS, 'ms');
+    setTimeout(runCivitaiRetryCheck, CIVITAI_RETRY_INTERVAL_MS);
+}
+
 /**
  * サイト別のアダプターからターゲットを取得してメタデータをチェック
  */
 function observeSiteSpecificElements() {
-    // Civitai等のサイトではdeepScanを遅延実行
-    // ページ読み込み完了後にdeepScanを実行（タイミング問題を回避）
-    // 注意：observeGenericSafetensorsLinks()の前に実行する必要がある
-    // （observeGenericSafetensorsLinks()がscanner.jsを起動させるため）
+    // Civitai等のサイトでは初回読み込み時にリトライチェックを開始
     if (typeof executeDeepScanAndAddBadges === 'function') {
-        const executeSafetensorsCheck = () => {
-            debugLog('[AI Meta Viewer] Executing safetensors check');
-            executeDeepScanAndAddBadges();
-
-            // deepScan実行後、候補のURLに対してメタデータを取得
-            let safetensorsFound = false;
-            for (const adapter of SiteAdapters) {
-                if (adapter.match() && typeof adapter.deepScan === 'function') {
-                    const candidates = adapter.deepScan(document);
-                    if (candidates && Array.isArray(candidates)) {
-                        const safetensorsCandidates = candidates.filter(c => c.type === 'archive' && c.isCivitaiModel);
-                        debugLog('[AI Meta Viewer] Found', safetensorsCandidates.length, 'safetensors candidates');
-
-                        if (safetensorsCandidates.length === 0) {
-                            console.log('[AI Meta Viewer] No safetensors candidates found in deepScan');
-                            continue;
-                        }
-
-                        safetensorsCandidates.forEach(candidate => {
-                            safetensorsFound = true;
-
-                            // Civitai API の download URL を使用してメタデータを取得
-                            // candidate.modelVersionId から API URL を構築
-                            let metadataUrl = candidate.url;
-                            if (candidate.modelVersionId) {
-                                // ページ上のダウンロードボタンから URL パラメータを抽出
-                                // getBadgeTargets で取得したボタンから、既存の Civitai API URL を探す
-                                const targets = adapter.getBadgeTargets?.(document) || [];
-                                let apiUrlFromPage = null;
-
-                                for (const target of targets) {
-                                    const targetHref = target.href || '';
-                                    // Civitai API URL パターンを検出（正確なパターンマッチ）
-                                    // /models/{modelVersionId}? の形式で、false positive を防ぐ
-                                    const modelVersionPattern = new RegExp(`/models/${candidate.modelVersionId}[?/]`);
-                                    if (targetHref.includes('civitai.com/api/download/models/') &&
-                                        modelVersionPattern.test(targetHref)) {
-                                        apiUrlFromPage = targetHref;
-                                        debugLog('[AI Meta Viewer] Found Civitai API URL from page button:', apiUrlFromPage);
-                                        break;
-                                    }
-                                }
-
-                                // ページから取得した URL を優先、なければデフォルトを構築
-                                if (apiUrlFromPage) {
-                                    metadataUrl = apiUrlFromPage;
-                                    debugLog('[AI Meta Viewer] Using Civitai API URL from page:', metadataUrl);
-                                } else {
-                                    // フォールバック: デフォルトパラメータで構築（ページに URL がない場合）
-                                    metadataUrl = `https://civitai.com/api/download/models/${candidate.modelVersionId}?type=Model&format=SafeTensor&size=pruned&fp=fp16`;
-                                    debugLog('[AI Meta Viewer] Using default Civitai API URL:', metadataUrl);
-                                }
-                            } else {
-                                debugLog('[AI Meta Viewer] Using original safetensors URL:', metadataUrl);
-                            }
-
-                            debugLog('[AI Meta Viewer] Fetching metadata for safetensors:', metadataUrl);
-                            debugLog('[AI Meta Viewer] Candidate filename:', candidate.filename);
-
-                            // URLを直接処理（checkImageMetadataではなく、直接メタデータ取得）
-                            sendMessageToBrave({
-                                action: 'fetchImageMetadata',
-                                imageUrl: metadataUrl
-                            }).then(response => {
-                                if (response && response.success && response.metadata && Object.keys(response.metadata).length > 0) {
-                                    debugLog('[AI Meta Viewer] Got metadata for safetensors:', candidate.filename);
-                                    debugLog('[AI Meta Viewer] Metadata keys:', Object.keys(response.metadata).join(', '));
-
-                                    // メタデータを取得したら、ダウンロードボタンを探してバッジを追加
-                                    const targets = adapter.getBadgeTargets?.(document) || [];
-                                    debugLog('[AI Meta Viewer] Found', targets.length, 'download button targets for badge');
-
-                                    if (targets.length === 0) {
-                                        console.warn('[AI Meta Viewer] WARNING: No download button targets found! getBadgeTargets returned empty array');
-                                        return;
-                                    }
-
-                                    let badgeAdded = false;
-                                    targets.forEach((el, index) => {
-                                        const elInfo = `[${index}] ${el.tagName} href="${el.href || 'N/A'}" text="${(el.textContent || '').substring(0, 50)}"`;
-
-                                        if (typeof processedImages === 'undefined') {
-                                            console.error('[AI Meta Viewer] ERROR: processedImages is undefined!');
-                                            return;
-                                        }
-
-                                        if (processedImages.has(el)) {
-                                            debugLog('[AI Meta Viewer] Element already processed:', elInfo);
-                                            return;
-                                        }
-
-                                        if (typeof addBadgeToElement !== 'function') {
-                                            console.error('[AI Meta Viewer] ERROR: addBadgeToElement is not a function!');
-                                            return;
-                                        }
-
-                                        debugLog('[AI Meta Viewer] Adding badge to element:', elInfo);
-                                        try {
-                                            addBadgeToElement(el, response.metadata, candidate.url);
-                                            badgeAdded = true;
-                                            debugLog('[AI Meta Viewer] Badge added successfully to:', elInfo);
-                                        } catch (e) {
-                                            console.error('[AI Meta Viewer] ERROR adding badge:', e.message);
-                                        }
-
-                                        processedImages.set(el, {
-                                            badge: {
-                                                metadata: response.metadata,
-                                                url: candidate.url
-                                            }
-                                        });
-                                    });
-
-                                    if (badgeAdded) {
-                                        debugLog('[AI Meta Viewer] Safetensors badge added successfully');
-                                    } else {
-                                        console.warn('[AI Meta Viewer] WARNING: No badge was added to any element');
-                                    }
-                                } else {
-                                    console.warn('[AI Meta Viewer] WARNING: Metadata fetch failed or empty', {
-                                        success: response?.success,
-                                        hasMetadata: !!response?.metadata,
-                                        metadataKeys: response?.metadata ? Object.keys(response.metadata).length : 0,
-                                        error: response?.error,
-                                        fullResponse: response
-                                    });
-                                }
-                            }).catch(e => {
-                                console.error('[AI Meta Viewer] ERROR fetching safetensors metadata:', e.message);
-                            });
-                        });
-                    } else {
-                        debugLog('[AI Meta Viewer] deepScan returned no candidates');
-                    }
-                }
-            }
-            return safetensorsFound;
-        };
-
-        // 2秒ごとに確認、最大10秒間（5回試行）
-        let retryCount = 0;
-        const maxRetries = 5;
-        const retryInterval = 2000; // 2秒
-
-        let metadataFetchSucceeded = false;
-
-        const retryCheck = () => {
-            retryCount++;
-            debugLog('[AI Meta Viewer] Safetensors retry check', retryCount, '/', maxRetries);
-
-            // deepScan を実行して、Civitai API URL が配置されるまで待つ
-            for (const adapter of SiteAdapters) {
-                if (adapter.match() && typeof adapter.deepScan === 'function') {
-                    const candidates = adapter.deepScan(document);
-                    if (candidates && Array.isArray(candidates)) {
-                        const safetensorsCandidates = candidates.filter(c => c.type === 'archive' && c.isCivitaiModel);
-
-                        // Civitai API URL を持つ候補を探す
-                        const civitaiApiCandidates = safetensorsCandidates.filter(c => c.modelVersionId);
-
-                        if (civitaiApiCandidates.length > 0) {
-                            debugLog('[AI Meta Viewer] Found Civitai API candidates:', civitaiApiCandidates.length);
-                            metadataFetchSucceeded = true;
-                            break; // Civitai API URL が見つかったら終了
-                        }
-                    }
-                }
-            }
-
-            if (metadataFetchSucceeded || retryCount >= maxRetries) {
-                if (metadataFetchSucceeded) {
-                    // Civitai API URL が見つかった場合は優先的に実行
-                    debugLog('[AI Meta Viewer] Civitai API URL found, executing safetensors check');
-                    executeSafetensorsCheck();
-                } else if (retryCount >= maxRetries) {
-                    // 最大試行回数に達した場合のみ警告
-                    console.warn('[AI Meta Viewer] WARNING: Max retries reached for safetensors check');
-                }
-                return; // 見つかったか、最大試行回数に達したら終了
-            }
-
-            // 次の試行をスケジュール
-            debugLog('[AI Meta Viewer] Scheduling next safetensors check in', retryInterval, 'ms');
-            setTimeout(retryCheck, retryInterval);
-        };
-
         if (document.readyState === 'loading') {
             document.addEventListener('DOMContentLoaded', () => {
-                // Civitaiはページ読み込み後も動的にボタンを生成するため、より長く待つ
                 setTimeout(() => {
                     debugLog('[AI Meta Viewer] DOMContentLoaded - starting safetensors check');
-                    retryCheck();
-                }, 1000); // 1秒待機してから開始
+                    civitaiRetryCount = 0;
+                    civitaiMetadataFetchSucceeded = false;
+                    runCivitaiRetryCheck();
+                }, 1000);
             });
         } else {
-            // ページが既に読み込まれている場合
             setTimeout(() => {
                 debugLog('[AI Meta Viewer] Page already loaded - starting safetensors check');
-                retryCheck();
-            }, 1000); // 1秒待機してから開始
+                civitaiRetryCount = 0;
+                civitaiMetadataFetchSucceeded = false;
+                runCivitaiRetryCheck();
+            }, 1000);
         }
     }
 
@@ -709,9 +631,17 @@ function observeGenericSafetensorsLinks() {
         });
 
         // 大規模な変更を検出（バージョン切り替え時）
-        if (removedNodeCount > 5 && addedNodeCount > 5) {
+        // NOTE: Pixiv等の仮想スクロールで誤作動しないよう、要素数しきい値を上げるとともに
+        // サイトクリアが必要な Civitai 等の特定サイトに限定する
+        const isCivitai = window.location.hostname.includes('civitai.com');
+        if (isCivitai && (removedNodeCount > 10 || addedNodeCount > 10)) {
             largeChangeDetected = true;
-            debugLog('[AI Meta Viewer] Large DOM change detected - likely version switch');
+            // バージョン切り替えを検知した瞬間に、古いバッジを一掃しキャッシュを消去する
+            document.querySelectorAll('.ai-meta-badge').forEach(b => b.remove());
+            if (typeof processedImages !== 'undefined') {
+                processedImages.clear();
+            }
+            debugLog('[AI Meta Viewer] Large DOM change detected - likely version switch', { removedNodeCount, addedNodeCount });
         }
 
         // デバウンス処理
@@ -720,18 +650,44 @@ function observeGenericSafetensorsLinks() {
         }
 
         debounceTimer = setTimeout(() => {
-            // 大規模な変更が検出された場合、deepScanを再実行
+            // 大規模な変更が検出された場合、runCivitaiRetryCheckを再始動
             if (largeChangeDetected) {
-                debugLog('[AI Meta Viewer] Executing deepScan after version switch');
-                if (typeof executeDeepScanAndAddBadges === 'function') {
-                    executeDeepScanAndAddBadges();
+                debugLog('[AI Meta Viewer] Restarting runCivitaiRetryCheck after version switch');
+
+                // Civitaiの場合、ボタン要素が使い回されることがあるため、既読フラグをクリアする
+                for (const adapter of SiteAdapters) {
+                    if (adapter.match() && typeof adapter.getBadgeTargets === 'function') {
+                        const targets = adapter.getBadgeTargets(document);
+                        if (targets && Array.isArray(targets)) {
+                            targets.forEach(target => {
+                                // 既読フラグを削除
+                                if (typeof processedImages !== 'undefined' && target) {
+                                    processedImages.delete(target);
+                                }
+                                // 既存のバッジを削除（リフレッシュするため）
+                                target?.querySelectorAll?.('.ai-meta-badge').forEach(b => b.remove());
+                                // ボタン直下のバッジも探す
+                                const parent = target?.parentElement;
+                                if (parent) {
+                                    parent.querySelectorAll?.(`.ai-meta-badge[data-target-id="${target.id || ''}"]`).forEach(b => b.remove());
+                                }
+                            });
+                        }
+                    }
                 }
-                largeChangeDetected = false;
+
+                civitaiRetryCount = 0; // カウントをリセット
+                civitaiMetadataFetchSucceeded = false;
+                runCivitaiRetryCheck();
             }
+
+            largeChangeDetected = false; // フラグを必ずリセット
 
             // 新しいsafetensorsリンクをチェック
             checkExistingLinks();
-        }, 300);
+        }, 500); // デバウンス時間を少し長めに設定して安定させる
+
+
     });
 
     safetensorsObserver.observe(document.body, {
@@ -922,10 +878,11 @@ function observeImages() {
             clearTimeout(timeoutId);
         }
 
-        // 頻繁な実行を防ぐため、100msのデバウンスを入れる
+        // 頻繁な実行を防ぐため、デバウンスを入れる
+        // Pixivなどの高速スクロールに対応するため、100msから30msに短縮
         timeoutId = setTimeout(() => {
             processPendingNodes();
-        }, 100);
+        }, 30);
 
         // フルスクリーンモーダルなどが開いた際にバッジの遮蔽状態を再計算する
         // DOMの追加・削除があった場合に実行
@@ -1064,8 +1021,13 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     if (request.action === 'debugSafetensorsLinks') {
         // デバッグ用：safetensorsリンクを手動検索
         const links = document.querySelectorAll('a[href*=".safetensors"]');
-        console.log(`[AI Meta Viewer] Found ${links.length} safetensors links:`, Array.from(links).map(l => l.href));
-        links.forEach(link => checkMetadataForElement(link));
+        debugLog(`[AI Meta Viewer] Found ${links.length} safetensors links:`, Array.from(links).map(l => l.href));
+        if (links.length > 0) {
+            // scanner.jsが読み込まれているかチェック
+            if (typeof triggerSafetensorsScan === 'function') {
+                triggerSafetensorsScan(Array.from(links));
+            }
+        }
         sendResponse({ success: true, count: links.length });
         return true;
     }

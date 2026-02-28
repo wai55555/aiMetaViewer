@@ -62,6 +62,9 @@
     "descDownloaderFolderMode": {
         "message": "ダウンロードフォルダ内での画像の整理方法を選択します。"
     },
+    "optIdPageTitle": {
+        "message": "スレッドID _ ページタイトル"
+    },
     "optPageTitle": {
         "message": "ページタイトルごと"
     },

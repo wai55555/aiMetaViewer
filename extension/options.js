@@ -11,9 +11,10 @@ const DEFAULT_SETTINGS = {
     excludedSites: [],
     ignoredMetadataKeys: ['XML:com.adobe.xmp'],
     ignoredSoftware: ['Adobe Photoshop', 'Adobe ImageReady', 'Celsys Studio Tool', 'GIMP', 'Paint.NET'],
-    downloaderFolderMode: 'pageTitle',
+    downloaderFolderMode: 'id_pageTitle',
     downloaderBaseFolder: 'AI_Meta_Viewer',
-    downloaderUseRoot: false
+    downloaderUseRoot: false,
+    version: '1.4.0'
 };
 
 // DOM Elements

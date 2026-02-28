@@ -68,6 +68,9 @@
   "descDownloaderFolderMode": {
     "message": "Choose how to organize downloaded images in your downloads folder."
   },
+  "optIdPageTitle": {
+    "message": "Thread ID _ Page Title"
+  },
   "optPageTitle": {
     "message": "Page Title"
   },
