@@ -22,6 +22,11 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
  */
 async function handleScanRequest(request, sendResponse) {
     try {
+        // Run only in top frame to avoid duplicates from iframes
+        if (window.self !== window.top) {
+            return;
+        }
+
         const settings = typeof loadSettings !== 'undefined' ? await loadSettings() : window.settings;
         debugLog('[AI Meta Viewer] Scan request received, settings:', settings);
 
@@ -35,8 +40,8 @@ async function handleScanRequest(request, sendResponse) {
             overlay.remove();
         });
 
-        // Execute scan
-        const result = await executeScan(settings);
+        // Execute scan (Pass cancellation signal)
+        const result = await executeScan(settings, () => isCancelled);
 
         if (isCancelled) {
             sendResponse({ success: false, error: 'Scan cancelled' });
@@ -68,6 +73,9 @@ async function handleScanRequest(request, sendResponse) {
  * Legacy scanAllImages function for backward compatibility
  */
 async function scanAllImages() {
+    if (window.self !== window.top) {
+        return;
+    }
     const settings = typeof loadSettings !== 'undefined' ? await loadSettings() : window.settings;
     debugLog('[AI Meta Viewer] Starting full page scan...');
 

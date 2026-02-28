@@ -144,7 +144,7 @@ function createDownloaderModal(candidates, context) {
     titleLeft.appendChild(titleSubtitle);
 
     const titleRight = document.createElement('div');
-    titleRight.style.cssText = 'display: flex; items-align: center; gap: 15px;';
+    titleRight.style.cssText = 'display: flex; align-items: center; gap: 15px;';
 
     const titleStats = document.createElement('div');
     titleStats.style.cssText = 'text-align: right;';
@@ -252,7 +252,9 @@ function createDownloaderModal(candidates, context) {
 
     // Render items
     function renderItems() {
-        content.innerHTML = '';
+        while (content.firstChild) {
+            content.removeChild(content.firstChild);
+        }
 
         const filtered = activeFilter === 'all'
             ? candidates

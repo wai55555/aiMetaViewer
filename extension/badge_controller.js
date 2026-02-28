@@ -449,7 +449,7 @@ function addBadgeToImage(img, metadata, originalUrl) {
                 img.removeEventListener('load', updatePosition);
                 img.removeEventListener('mouseenter', showBadge);
                 img.removeEventListener('mouseleave', hideBadge);
-                window.removeEventListener('scroll', onScroll);
+                window.removeEventListener('scroll', onScroll, { capture: true });
                 resizeObserver.unobserve(img);
             }
         });

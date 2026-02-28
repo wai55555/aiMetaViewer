@@ -646,12 +646,24 @@ function createDownloaderModal(images, context) {
     // 非同期で設定を読み込んでヒントを更新
     chrome.storage.sync.get({ downloaderFolderMode: 'pageTitle' }, (settings) => {
         let path = 'AI_Meta_Viewer/';
-        if (settings.downloaderFolderMode === 'pageTitle' && pageTitle) {
+        if (settings.downloaderFolderMode === 'id_pageTitle') {
+            path += '123456_Page Title (Sample)/';
+        } else if (settings.downloaderFolderMode === 'pageTitle' && pageTitle) {
             path += pageTitle.replace(/[\\/:*?"<>|]/g, '_').substring(0, 20) + '.../';
         } else if (settings.downloaderFolderMode === 'domain' && domain) {
             path += domain + '/';
         }
-        saveHint.innerHTML = `Save path: <code style="color: #4a9eff;">${path}</code>`;
+
+        // 安全な要素操作に置き換え
+        while (saveHint.firstChild) {
+            saveHint.removeChild(saveHint.firstChild);
+        }
+        const textNode = document.createTextNode('Save path: ');
+        const codeNode = document.createElement('code');
+        codeNode.style.color = '#4a9eff;';
+        codeNode.textContent = path;
+        saveHint.appendChild(textNode);
+        saveHint.appendChild(codeNode);
     });
 
     toolbar.appendChild(filterGroup);

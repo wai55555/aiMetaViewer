@@ -13,7 +13,7 @@
  * @param {Object} settings - ユーザー設定
  * @returns {Promise<Object>} { success, candidates, error }
  */
-async function executeScan(settings) {
+async function executeScan(settings, isCancelledFn = () => false) {
     try {
         debugLog('[AI Meta Viewer] Starting scan with settings:', settings);
 
@@ -41,17 +41,14 @@ async function executeScan(settings) {
         let currentFound = foundCount;
 
         // 5. メタデータフェッチ
-        let isCancelled = false;
         const onProgress = (processed, found) => {
             currentProcessed = processed;
             currentFound = found;
         };
 
-        const isCancelledFn = () => isCancelled;
-
         const batchResult = await fetchMetadataBatch(urlsToFetch, urlToImagesMap, onProgress, isCancelledFn);
 
-        if (isCancelled) {
+        if (isCancelledFn()) {
             return { success: false, error: 'Scan cancelled by user', candidates: [] };
         }
 

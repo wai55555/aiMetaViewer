@@ -244,7 +244,9 @@ function buildCandidatesFromResults(images, fetchResults, urlToImagesMap) {
 
     for (const img of images) {
         const urls = resolveOriginalUrls(img);
-        const urlArray = Array.isArray(urls) ? urls : [urls];
+        const urlArray = (Array.isArray(urls) ? urls : [urls]).filter(u => typeof u === 'string' && u.length > 0);
+
+        if (urlArray.length === 0) continue; // 有効なURLがない場合はスキップ
 
         let bestMetadata = null;
         let bestUrl = urlArray[0];
