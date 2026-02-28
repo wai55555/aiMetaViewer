@@ -114,7 +114,7 @@ function createCancellableScan(settings) {
     let isCancelled = false;
 
     const promise = (async () => {
-        const result = await executeScan(settings);
+        const result = await executeScan(settings, () => isCancelled);
         return result;
     })();
 

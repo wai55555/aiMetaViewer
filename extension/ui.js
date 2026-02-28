@@ -660,7 +660,7 @@ function createDownloaderModal(images, context) {
         }
         const textNode = document.createTextNode('Save path: ');
         const codeNode = document.createElement('code');
-        codeNode.style.color = '#4a9eff;';
+        codeNode.style.color = '#4a9eff';
         codeNode.textContent = path;
         saveHint.appendChild(textNode);
         saveHint.appendChild(codeNode);

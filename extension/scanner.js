@@ -24,6 +24,7 @@ async function handleScanRequest(request, sendResponse) {
     try {
         // Run only in top frame to avoid duplicates from iframes
         if (window.self !== window.top) {
+            sendResponse({ success: false, error: 'Skipped: Frame is not top' });
             return;
         }
 
