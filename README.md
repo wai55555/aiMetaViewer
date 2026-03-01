@@ -16,12 +16,12 @@ It automatically analyzes images on web pages and displays a badge if metadata i
 - **Advanced Link Analysis**:
   - **Discord**: Automatically detects original image links from previews to retrieve full metadata.
   - **Pixiv**: Detects original image links.
-  - **Civitai**: Detects model files (.safetensors, .ckpt) and sample images with optimized API URL handling.
+  - **Civitai**: Detects model versions, files (.safetensors, .ckpt), and sample images with instant badge refresh on version change.
   - **Local Files**: Supports images opened via `file://` URLs.
 - **Supported Formats**:
   - PNG (tEXt / iTXt / Stealth Info)
   - JPEG (Exif UserComment)
-  - WebP (EXIF Chunk)
+  - WebP (EXIF / XMP Chunk)
   - AVIF (Exif UserComment)
   - Safetensors (Model metadata)
 - **Supported Generators**:
@@ -37,7 +37,7 @@ It automatically analyzes images on web pages and displays a badge if metadata i
 - **Action-Triggered Downloader**:
   - Click the extension icon to scan the entire page.
   - Bulk download detected images, videos, audio, and archives.
-  - **Flexible Folder Naming**: Automatically organize downloads by Page Title, Domain, or Flat structure.
+  - **Flexible Folder Naming**: Automatically organize downloads by ID_Page Title, Page Title, Domain, or Flat structure.
   - **Smart Filtering**: Filter by media type (Images, Videos, Audio, Archives) or AI-generated content.
   - **Media Type Support**: Download images, videos, audio files, and model archives (.safetensors, .ckpt, .zip, etc.).
 - **Cross-Browser Support**:
@@ -51,7 +51,7 @@ Right-click the extension icon -> "Options" to configure:
 - **Image Processing**: Set minimum pixel count threshold for metadata check.
 - **Excluded Sites**: Disable extension on specific sites using wildcards (e.g., `civitai.com*`).
 - **Downloader Configuration**: 
-  - Choose your preferred folder organization (Page Title, Domain, or None).
+  - Choose your preferred folder organization (ID_Page Title, Page Title, Domain, or None).
   - Customize the main folder name (default: `AI_Meta_Viewer`).
   - Option to save directly to the Downloads root.
 - **Notifications**: Toggle error notifications.
@@ -110,19 +110,22 @@ aiMetaViewer/
    ├── manifest.json       # Manifest file (Manifest V3)
    ├── background.js       # Service Worker (Downloads, parsing, metadata extraction)
    ├── content.js          # Content Script (Badge management, page observation)
-   ├── scanner.js          # Full-page scan & downloader UI
-   ├── parser.js           # Binary metadata parser (PNG, JPEG, WebP, AVIF, Safetensors)
-   ├── adapters.js         # Site-specific adapters (Discord, Pixiv, Civitai, etc.)
-   ├── ui.js               # UI components (Modals, badges)
-   ├── badge_controller.js # Badge lifecycle management
-   ├── settings_loader.js  # Settings management
-   ├── options.html        # Options page
-   ├── options.js          # Options logic
-   ├── styles.css          # Global styles
-   ├── scanner/            # Scanner utilities
-   │  ├── utils.js         # Helper functions (media type detection, file size formatting)
-   │  ├── progress-ui.js   # Progress overlay UI
-   │  └── thumbnail-finder.js # Thumbnail detection for videos/links
+    ├── scanner.js          # Scanner entry point & messaging
+    ├── scanner/            # Scanner module (Business logic & UI)
+    │  ├── core.js          # Image collection & filtering logic
+    │  ├── controller.js    # State management & event handling
+    │  ├── ui.js            # Downloader modal UI
+    │  ├── utils.js         # Helper functions
+    │  ├── progress-ui.js   # Progress overlay UI
+    │  └── thumbnail-finder.js # Video/Link thumbnail detection
+    ├── parser.js           # Binary metadata parser
+    ├── adapters.js         # Site-specific adapters
+    ├── ui.js               # UI components (Metadata modal)
+    ├── badge_controller.js # Badge positioning & lifecycle
+    ├── settings_loader.js  # Settings handling
+    ├── options.html        # Settings page
+    ├── options.js          # Settings logic
+    ├── styles.css          # Global styles
    └── icons/              # Extension icons
 ```
 
