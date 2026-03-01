@@ -67,10 +67,12 @@ window.SiteAdapters = [
 
                         const originalUrl = `https://cdn.discordapp.com/attachments/${attachmentsPath}${newQuery ? '?' + newQuery : ''}`;
 
-                        console.log('[AI Meta Viewer] Discord thumbnail converted:', {
-                            thumbnail: src.substring(0, 80),
-                            original: originalUrl.substring(0, 80)
-                        });
+                        if (typeof debugLog === 'function') {
+                            debugLog('[AI Meta Viewer] Discord thumbnail converted:', {
+                                thumbnail: src.substring(0, 80),
+                                original: originalUrl.substring(0, 80)
+                            });
+                        }
 
                         return originalUrl;
                     }

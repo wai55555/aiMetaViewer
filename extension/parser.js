@@ -593,11 +593,19 @@ function extractMetadata(buffer) {
     // 診断ログ: 最初の16バイトをヘキサ表示
     const view = new Uint8Array(buffer.slice(0, 16));
     const hex = Array.from(view).map(b => b.toString(16).padStart(2, '0')).join(' ');
-    console.log(`[AI Meta Viewer] extractMetadata: format not detected. Buffer size: ${buffer.byteLength}, header hex: ${hex}`);
+    if (typeof debugLog === 'function') {
+      debugLog(`[AI Meta Viewer] extractMetadata: format not detected. Buffer size: ${buffer.byteLength}, header hex: ${hex}`);
+    } else {
+      console.log(`[AI Meta Viewer] extractMetadata: format not detected. Buffer size: ${buffer.byteLength}, header hex: ${hex}`);
+    }
     return {};
   }
 
-  console.log(`[AI Meta Viewer] extractMetadata: format detected: ${format}, buffer size: ${buffer.byteLength}`);
+  if (typeof debugLog === 'function') {
+    debugLog(`[AI Meta Viewer] extractMetadata: format detected: ${format}, buffer size: ${buffer.byteLength}`);
+  } else {
+    console.log(`[AI Meta Viewer] extractMetadata: format detected: ${format}, buffer size: ${buffer.byteLength}`);
+  }
 
   switch (format) {
     case 'png':

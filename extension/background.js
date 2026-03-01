@@ -81,12 +81,17 @@ class PersistentLRUCache {
     }
 
     async saveIndex() {
-        try {
-            // Mapを配列に変換して保存
-            await this.storage.set({ [this.metaKey]: Array.from(this.index.entries()) });
-        } catch (e) {
-            console.error('Cache index save error:', e);
-        }
+        if (this.saveTimer) clearTimeout(this.saveTimer);
+
+        // 2秒間リクエストがなければ保存 (デバウンス)
+        this.saveTimer = setTimeout(async () => {
+            try {
+                await this.storage.set({ [this.metaKey]: Array.from(this.index.entries()) });
+                // debugLog('[Cache] Index saved');
+            } catch (e) {
+                console.error('Cache index save error:', e);
+            }
+        }, 2000);
     }
 
     async get(url) {
@@ -506,6 +511,13 @@ chrome.runtime.onInstalled.addListener(async (details) => {
  * Content Scriptからのメッセージを処理
  */
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
+    // Brave 診断用テスト
+    if (request.action === 'brave_diagnostic_test') {
+        debugLog('[AI Meta Viewer] Brave diagnostic test message received');
+        sendResponse({ success: true, message: 'Brave background alive' });
+        return true;
+    }
+
     if (request.action === 'fetchImageMetadata') {
         handleFetchImageMetadata(request.imageUrl, request.imageData)
             .then(sendResponse)
@@ -849,6 +861,27 @@ async function handleFetchImageMetadata(imageUrl, base64Data = null) {
     try {
         let buffer;
         let isRangeRequest = false;
+        let domain = '';
+        try { domain = new URL(imageUrl).hostname; } catch (e) { }
+
+        // リダイレクト解決済みのURLを保持
+        let activeUrl = imageUrl;
+
+        /**
+         * 安全ガード付きの全取得 Fetch
+         */
+        const safeFetchFull = async (url) => {
+            const response = await fetch(url, { redirect: 'follow' });
+            if (!response.ok) throw new Error(`HTTP ${response.status}`);
+
+            const contentLength = parseInt(response.headers.get('Content-Length') || '0', 10);
+            if (contentLength > FULL_FETCH_SIZE_LIMIT) {
+                if (response.body) response.body.cancel();
+                throw new Error(`File size (${contentLength} bytes) exceeds safety limit (${FULL_FETCH_SIZE_LIMIT} bytes).`);
+            }
+
+            return await response.arrayBuffer();
+        };
 
         if (base64Data) {
             // Base64データが提供されている場合（ローカルファイルなど）
@@ -857,167 +890,75 @@ async function handleFetchImageMetadata(imageUrl, base64Data = null) {
             buffer = await response.arrayBuffer();
         } else {
             // URLフェッチ: Range Request 試行
-            // ドメインチェック
-            let domain = '';
-            try { domain = new URL(imageUrl).hostname; } catch (e) { }
-
             const shouldUseRange = !rangeRequestBlockList.has(domain);
 
             if (shouldUseRange) {
                 try {
-                    // 最初は 64KB をリクエスト。不足分は解析後の isIncomplete ロジックで補填する。
+                    // 最初は 64KB をリクエスト。
                     const rangeSize = 65535;
 
-                    // URL タイプの診断ログ
+                    // URL タイプの判定
                     const isCivitaiApiUrl = imageUrl.includes('civitai.com/api/download/models/');
                     const isCloudflareCDN = imageUrl.includes('cloudflarestorage.com');
-                    const isHuggingFaceUrl = imageUrl.includes('huggingface.co');
 
-                    debugLog('[AI Meta Viewer] URL Type Analysis:', {
-                        isCivitaiApiUrl: isCivitaiApiUrl,
-                        isCloudflareCDN: isCloudflareCDN,
-                        isHuggingFaceUrl: isHuggingFaceUrl,
-                        domain: domain
-                    });
-
-                    if (isCloudflareCDN) {
-                        debugLog('[AI Meta Viewer] ⚠ WARNING: Using Cloudflare CDN URL (Range Request may fail):', imageUrl.substring(0, 100));
-                    } else if (isCivitaiApiUrl) {
-                        debugLog('[AI Meta Viewer] ✓ Using Civitai API URL (Range Request should work):', imageUrl.substring(0, 100));
-                    }
-
-                    // --- リダイレクト解消ロジック ---
-                    let finalUrl = imageUrl;
-                    try {
-                        // 最終的な署名付きURLを取得するために HEAD リクエストを送る
-                        // (Rangeリクエスト時にヘッダーが消失するのを防ぐため)
-                        debugLog('[AI Meta Viewer] Resolving final URL for:', imageUrl.substring(0, 100));
-                        const headResp = await fetch(imageUrl, { method: 'HEAD', redirect: 'follow' });
-                        if (headResp.ok) {
-                            finalUrl = headResp.url;
-                            if (finalUrl !== imageUrl) {
-                                debugLog('[AI Meta Viewer] ✓ Final URL resolved:', finalUrl.substring(0, 100));
+                    if (isCivitaiApiUrl || isCloudflareCDN) {
+                        debugLog('[AI Meta Viewer] Resolving final URL for Range request:', imageUrl.substring(0, 80));
+                        try {
+                            const headResp = await fetch(imageUrl, { method: 'HEAD', redirect: 'follow' });
+                            if (headResp.ok) {
+                                activeUrl = headResp.url;
+                                debugLog('[AI Meta Viewer] ✓ Final URL resolved:', activeUrl.substring(0, 80));
                             }
+                        } catch (headErr) {
+                            debugLog('[AI Meta Viewer] ⚠ URL resolution failed, using original:', headErr.message);
                         }
-                    } catch (headErr) {
-                        debugLog('[AI Meta Viewer] ⚠ HEAD request failed to resolve final URL, using original:', headErr.message);
                     }
 
-                    debugLog(`[AI Meta Viewer] Starting Range request (0-${rangeSize}) for:`, finalUrl);
+                    debugLog(`[AI Meta Viewer] Starting Range request (0-${rangeSize}) for:`, activeUrl.substring(0, 80));
 
                     const controller = new AbortController();
                     const timeoutId = setTimeout(() => controller.abort(), 10000);
 
-                    const response = await fetch(finalUrl, {
+                    const response = await fetch(activeUrl, {
                         headers: { 'Range': `bytes=0-${rangeSize}` },
                         signal: controller.signal
                     });
                     clearTimeout(timeoutId);
 
-                    debugLog('[AI Meta Viewer] Range request response status:', response.status);
-
                     if (response.status === 206) {
-                        // Range成功
                         isRangeRequest = true;
                         buffer = await response.arrayBuffer();
-                        debugLog(`[AI Meta Viewer] ✓ Range request success (0-${rangeSize}), buffer size:`, buffer.byteLength, 'bytes');
                     } else if (response.status === 200) {
-                        // サーバーがRangeを無視して全データを返してきた
-                        // 安全ガード: Content-Length が FULL_FETCH_SIZE_LIMIT を超える場合は読み込みを中断
+                        // サーバーがRangeを無視した場合
                         const contentLength = parseInt(response.headers.get('Content-Length') || '0', 10);
-                        debugLog('[AI Meta Viewer] ⚠ Server ignored Range, received full content (200). Content-Length:', contentLength, 'bytes');
-
                         if (contentLength > FULL_FETCH_SIZE_LIMIT) {
-                            // レスポンスbodyをキャンセルして、メモリ消費を防ぐ
-                            response.body?.cancel();
-                            throw new Error(`Server returned full content (200) but Content-Length (${contentLength} bytes) exceeds safety limit (${FULL_FETCH_SIZE_LIMIT} bytes). Aborting to prevent memory overflow.`);
+                            if (response.body) response.body.cancel();
+                            throw new Error(`Full content returned but exceeds limit: ${contentLength} bytes`);
                         }
-
                         buffer = await response.arrayBuffer();
-                        debugLog('[AI Meta Viewer] Full content buffer size:', buffer.byteLength, 'bytes');
-                        // ブロックはしない（サイズが許容範囲内なら問題なし）
                     } else {
-                        // 403, 400, 416 等 -> Range不可とみなす
                         throw new Error(`Range request failed with status ${response.status}`);
                     }
 
                 } catch (e) {
-                    debugLog('[AI Meta Viewer] Range request failed or aborted:', {
-                        errorMessage: e.message,
-                        domain: domain
-                    });
-
-                    // Civitai.com と HuggingFace.co ドメインの特別処理: ブロックリストに追加しない
-                    if (domain && (CivitaiDomainManager.shouldExemptFromBlocking(domain) || HuggingFaceDomainManager.shouldExemptFromBlocking(domain))) {
-                        debugLog(`[AI Meta Viewer] ${domain} domain exempted from blocking. Range Request failure reason: ${e.message}`);
-                    } else if (domain) {
-                        // 通常のドメインはブロックリストへ追加
+                    debugLog('[AI Meta Viewer] Range request failed, falling back to safe full fetch:', e.message);
+                    if (domain && !CivitaiDomainManager.shouldExemptFromBlocking(domain) && !HuggingFaceDomainManager.shouldExemptFromBlocking(domain)) {
                         rangeRequestBlockList.add(domain);
-                        debugLog(`[AI Meta Viewer] Added ${domain} to Range Blocklist. Failure reason: ${e.message}`);
                     }
-
-                    // フォールバック: 全取得 (リダイレクト許可)
-                    const fbResponse = await fetch(imageUrl, { redirect: 'follow' });
-                    if (!fbResponse.ok) {
-                        debugLog('[AI Meta Viewer] Fallback fetch failed with status:', fbResponse.status);
-                        throw new Error(`Fallback HTTP ${fbResponse.status}`);
-                    }
-
-                    // 安全ガード: フォールバック全取得でも Content-Length をチェック
-                    const fbContentLength = parseInt(fbResponse.headers.get('Content-Length') || '0', 10);
-                    debugLog('[AI Meta Viewer] Fallback fetch Content-Length:', fbContentLength, 'bytes');
-
-                    if (fbContentLength > FULL_FETCH_SIZE_LIMIT) {
-                        fbResponse.body?.cancel();
-                        debugLog('[AI Meta Viewer] ⛔ Fallback fetch aborted: Content-Length exceeds safety limit.', {
-                            contentLength: fbContentLength,
-                            limit: FULL_FETCH_SIZE_LIMIT
-                        });
-                        throw new Error(`Fallback fetch aborted: Content-Length (${fbContentLength} bytes) exceeds safety limit.`);
-                    }
-
-                    buffer = await fbResponse.arrayBuffer();
-                    debugLog('[AI Meta Viewer] Fallback full fetch succeeded, buffer size:', buffer.byteLength);
+                    buffer = await safeFetchFull(imageUrl);
                 }
             } else {
-                // 最初から Range 不可ドメイン
                 debugLog('[AI Meta Viewer] Skipping Range for blocked domain, fetching full...', domain);
-                const response = await fetch(imageUrl, { redirect: 'follow' });
-                if (!response.ok) {
-                    debugLog('[AI Meta Viewer] Full fetch failed with status:', response.status);
-                    return { success: false, error: `HTTP ${response.status}` };
-                }
-
-                // 安全ガード: ブロックリスト済みドメインへの全取得でも Content-Length をチェック
-                const blockedFetchContentLength = parseInt(response.headers.get('Content-Length') || '0', 10);
-                debugLog('[AI Meta Viewer] Blocked domain full fetch Content-Length:', blockedFetchContentLength, 'bytes');
-
-                if (blockedFetchContentLength > FULL_FETCH_SIZE_LIMIT) {
-                    response.body?.cancel();
-                    debugLog('[AI Meta Viewer] ⛔ Blocked domain fetch aborted: Content-Length exceeds safety limit.', {
-                        contentLength: blockedFetchContentLength,
-                        limit: FULL_FETCH_SIZE_LIMIT
-                    });
-                    return { success: false, error: `File too large (${blockedFetchContentLength} bytes) to read into memory.` };
-                }
-
-                buffer = await response.arrayBuffer();
-                debugLog('[AI Meta Viewer] Full fetch succeeded for blocked domain, buffer size:', buffer.byteLength);
+                buffer = await safeFetchFull(imageUrl);
             }
         }
 
         // --- メタデータ解析 ---
         let metadata = {};
         try {
-            debugLog('[AI Meta Viewer] Calling extractMetadata with buffer size:', buffer.byteLength, 'bytes');
             metadata = extractMetadata(buffer);
-            debugLog('[AI Meta Viewer] extractMetadata returned:', {
-                metadataKeys: Object.keys(metadata),
-                metadataLength: Object.keys(metadata).length,
-                isIncomplete: metadata.isIncomplete,
-                suggestedSize: metadata.suggestedSize
-            });
 
+            // メタデータ不足時の再試行ロジック (Safetensors 等)
             if (metadata.isIncomplete && isRangeRequest) {
                 const retrySize = metadata.suggestedSize || 131072;
                 debugLog(`[AI Meta Viewer] ⚠ Metadata is incomplete. Retrying with larger range: 0-${retrySize}`);
@@ -1025,7 +966,7 @@ async function handleFetchImageMetadata(imageUrl, base64Data = null) {
                 try {
                     const controller = new AbortController();
                     const timeoutId = setTimeout(() => controller.abort(), 10000);
-                    const retryResponse = await fetch(imageUrl, {
+                    const retryResponse = await fetch(activeUrl, {
                         headers: { 'Range': `bytes=0-${retrySize}` },
                         signal: controller.signal
                     });
@@ -1035,66 +976,44 @@ async function handleFetchImageMetadata(imageUrl, base64Data = null) {
                         const newBuffer = await retryResponse.arrayBuffer();
                         const nextMetadata = extractMetadata(newBuffer);
                         if (nextMetadata.isIncomplete) {
-                            debugLog('[AI Meta Viewer] ⚠ Still incomplete after retry. Falling back to full fetch.');
-                            const fullResp = await fetch(imageUrl, { redirect: 'follow' });
-                            const fullBuffer = await fullResp.arrayBuffer();
+                            debugLog('[AI Meta Viewer] ⚠ Still incomplete. Falling back to safe full fetch.');
+                            const fullBuffer = await safeFetchFull(activeUrl);
                             metadata = extractMetadata(fullBuffer);
-                            isRangeRequest = false;
                         } else {
                             metadata = nextMetadata;
                             buffer = newBuffer;
                         }
                     } else {
-                        debugLog('[AI Meta Viewer] ⚠ Retry Range request failed. Falling back to full fetch.');
-                        const fullResp = await fetch(imageUrl, { redirect: 'follow' });
-                        const fullBuffer = await fullResp.arrayBuffer();
+                        debugLog('[AI Meta Viewer] ⚠ Retry Range failed, falling back to safe full fetch.');
+                        const fullBuffer = await safeFetchFull(activeUrl);
                         metadata = extractMetadata(fullBuffer);
-                        isRangeRequest = false;
                     }
+                    isRangeRequest = false;
                 } catch (retryError) {
-                    debugLog('[AI Meta Viewer] ⚠ Range retry failed, falling back to full fetch:', retryError.message);
-                    const fullResp = await fetch(imageUrl, { redirect: 'follow' });
-                    const fullBuffer = await fullResp.arrayBuffer();
+                    debugLog('[AI Meta Viewer] ⚠ Range retry failed, final attempt with safe full fetch:', retryError.message);
+                    const fullBuffer = await safeFetchFull(activeUrl);
                     metadata = extractMetadata(fullBuffer);
                     isRangeRequest = false;
                 }
             }
         } catch (e) {
-            // 解析エラー時の詳細なバイナリ診断
-            const bufferArray = new Uint8Array(buffer.slice(0, 16));
-            const hexDump = Array.from(bufferArray).map(b => b.toString(16).padStart(2, '0')).join(' ');
-            const asciiDump = Array.from(bufferArray).map(b => (b >= 32 && b <= 126) ? String.fromCharCode(b) : '.').join('');
-
-            debugLog('[AI Meta Viewer] ❌ extractMetadata failed. Buffer Diagnostic:', {
-                errorMessage: e.message,
-                isRangeRequest: isRangeRequest,
-                hex: hexDump,
-                ascii: asciiDump
-            });
-
+            debugLog('[AI Meta Viewer] Parse failed, trying safe full fetch fallback:', e.message);
             if (isRangeRequest) {
-                debugLog('[AI Meta Viewer] Parse error on partial data, retrying full fetch...');
-                try {
-                    const fullResp = await fetch(imageUrl, { redirect: 'follow' });
-                    if (fullResp.ok) {
-                        const fullBuffer = await fullResp.arrayBuffer();
-                        buffer = fullBuffer;
-                        metadata = extractMetadata(buffer);
-                        isRangeRequest = false;
-                    }
-                } catch (retryFullErr) {
-                    debugLog('[AI Meta Viewer] Full retry fetch failed:', retryFullErr.message);
-                }
+                const fullBuffer = await safeFetchFull(activeUrl);
+                buffer = fullBuffer;
+                metadata = extractMetadata(buffer);
+                isRangeRequest = false;
+            } else {
+                throw e;
             }
         }
 
-        // Stealth PNG Info チェック (メタデータが空の場合のみ)
+        // Stealth PNG Info チェック
         if (Object.keys(metadata).length === 0) {
             const format = detectImageFormat(buffer);
             if (format === 'png') {
                 if (isRangeRequest) {
-                    const fullResp = await fetch(imageUrl, { redirect: 'follow' });
-                    if (fullResp.ok) buffer = await fullResp.arrayBuffer();
+                    buffer = await safeFetchFull(activeUrl);
                 }
                 const hasAlpha = checkPngIHDRHasAlpha(buffer);
                 if (hasAlpha) {
@@ -1108,7 +1027,7 @@ async function handleFetchImageMetadata(imageUrl, base64Data = null) {
         return { success: true, metadata: metadata };
 
     } catch (error) {
-        debugLog('[AI Meta Viewer] handleFetchImageMetadata outer error:', error.message);
+        debugLog('[AI Meta Viewer] handleFetchImageMetadata error:', error.message);
         return { success: false, error: error.message };
     }
 }
@@ -1221,9 +1140,9 @@ debugLog('[AI Meta Viewer] Chrome APIs available:', {
     runtime: !!chrome.runtime,
     storage: !!chrome.storage,
     tabs: !!chrome.tabs,
-    downloads: !!chrome.downloads
+    downloads: !!chrome.downloads,
+    action: !!chrome.action
 });
-
 debugLog('[AI Meta Viewer] Background script initialization complete');
 
 // Brave ブラウザ診断機能
@@ -1236,16 +1155,4 @@ debugLog('Chrome APIs in background:', {
     action: !!chrome.action
 });
 
-// Brave 専用メッセージハンドラー
-chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
-    if (request.action === 'brave_diagnostic_test') {
-        debugLog('[AI Meta Viewer] Brave diagnostic test message received');
-        sendResponse({
-            success: true,
-            message: 'Background script responding',
-            timestamp: Date.now(),
-            sender: sender
-        });
-        return true;
-    }
-});
+

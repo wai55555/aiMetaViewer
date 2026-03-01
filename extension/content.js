@@ -251,14 +251,20 @@ async function checkImageMetadata(img) {
     }
 
     // PixivやDiscordの場合は、サムネイルが小さくてもオリジナル画像にメタデータがある可能性が高いため、
-    // サイズ制限を無視してチェックを続行する
-    if (isPixiv || isDiscord) {
-        // [Discord専用: ユーザーアイコン対策] 
-        // 80x80以下の極端に小さな画像はアイコンとみなして除外する
-        if (isDiscord && actualWidth <= 80 && actualHeight <= 80) {
+    // アダプターで解決できた（isLinkedImage === true）場合のみサイズ制限を無視する
+    if (isLinkedImage && (isPixiv || isDiscord)) {
+        isTooSmall = false;
+    }
+
+    // [Discord専用: ユーザーアイコン対策]
+    // リンク解決の有無に関わらず、表示サイズが極端に小さいものやAvatar画像は除外する
+    if (isDiscord) {
+        const displayWidth = img.width || img.clientWidth || actualWidth;
+        const displayHeight = img.height || img.clientHeight || actualHeight;
+
+        // 表示サイズが80x80以下のもの、またはURLがアバターのものは強制的に除外
+        if ((displayWidth <= 80 && displayHeight <= 80) || (src && src.includes('/avatars/'))) {
             isTooSmall = true;
-        } else {
-            isTooSmall = false;
         }
     }
 
@@ -340,7 +346,9 @@ async function checkImageMetadata(img) {
                 }
             } catch (e) {
                 if (e.message && e.message.includes('Extension context invalidated')) {
-                    console.warn('[AI Meta Viewer] Extension context invalidated during message send');
+                    if (settings.debugMode) {
+                        console.warn('[AI Meta Viewer] Extension context invalidated during message send');
+                    }
                     // 解析中バッジを削除してから処理を停止
                     if (analyzingBadge) {
                         removeAnalyzingBadge(analyzingBadge);
@@ -756,7 +764,12 @@ async function sendMessageToBrave(message) {
                 }
             });
         } catch (e) {
-            console.error('[AI Meta Viewer] Error in sendMessageToBrave:', e);
+            const errorMsg = e.message || '';
+            if (!errorMsg.includes('Extension context invalidated') &&
+                !errorMsg.includes('receiving end does not exist') &&
+                !errorMsg.includes('Could not establish connection')) {
+                console.error('[AI Meta Viewer] Error in sendMessageToBrave:', e);
+            }
             reject(e);
         }
     });
@@ -765,7 +778,10 @@ async function sendMessageToBrave(message) {
 async function checkMetadataForElement(el) {
     // 拡張機能のコンテキストが無効化されている場合は処理を停止
     if (!isExtensionContextValid()) {
-        console.warn('[AI Meta Viewer] Extension context invalidated, stopping metadata check');
+        // すでに読み込まれている設定があればデバッグログを表示
+        if (window.settings && window.settings.debugMode) {
+            console.warn('[AI Meta Viewer] Extension context invalidated, stopping metadata check');
+        }
         return;
     }
 
@@ -970,13 +986,13 @@ function isDirectImageView() {
 function handleDirectImageView() {
     debugLog('[AI Meta Viewer] handleDirectImageView() called');
     if (!document.body) {
-        console.log('[AI Meta Viewer] No document.body, returning');
+        debugLog('[AI Meta Viewer] No document.body, returning');
         return;
     }
 
     const img = document.querySelector('img');
     if (!img) {
-        console.log('[AI Meta Viewer] No img element found');
+        debugLog('[AI Meta Viewer] No img element found');
         return;
     }
 
@@ -994,7 +1010,7 @@ function handleDirectImageView() {
     img.style.height = 'auto';
     img.style.boxShadow = '0 0 20px rgba(0,0,0,0.5)';
 
-    console.log('[AI Meta Viewer] Calling checkImageMetadata()');
+    debugLog('[AI Meta Viewer] Calling checkImageMetadata()');
     checkImageMetadata(img);
 }
 
