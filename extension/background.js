@@ -1155,4 +1155,3 @@ debugLog('Chrome APIs in background:', {
     action: !!chrome.action
 });
 
-
