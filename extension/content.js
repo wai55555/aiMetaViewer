@@ -589,113 +589,97 @@ function observeGenericSafetensorsLinks() {
         }, 1000);
     }
 
-    // 新しく追加されるsafetensorsリンクを監視
-    // バージョン切り替え時の画面更新も検出
-    let debounceTimer = null;
-    let largeChangeDetected = false;
+    // --- SPA ナビゲーション検出 (ポーリング方式) ---
+    // Civitai 等の SPA では DOM 変更と URL 変更のタイミングが一致しないことがある。
+    // 200ms ごとの定期監視によって確実に URL 変化を捕捉し、一括処理を行う。
+    let lastKnownUrl = window.location.href;
+    debugLog('[AI Meta Viewer] SPA URL Polling Monitor started. Current URL:', lastKnownUrl);
 
-    safetensorsObserver = new MutationObserver((mutations) => {
-        // 大規模な変更を検出（複数のノード削除 = バージョン切り替え）
-        let removedNodeCount = 0;
-        let addedNodeCount = 0;
+    const checkUrlChange = () => {
+        const currentUrl = window.location.href;
+        if (currentUrl !== lastKnownUrl) {
+            debugLog('[AI Meta Viewer] SPA URL CHANGE DETECTED (Polling)');
+            debugLog('  Old URL:', lastKnownUrl);
+            debugLog('  New URL:', currentUrl);
 
-        mutations.forEach((mutation) => {
-            removedNodeCount += mutation.removedNodes.length;
-            addedNodeCount += mutation.addedNodes.length;
+            lastKnownUrl = currentUrl;
 
-            mutation.addedNodes.forEach((node) => {
-                if (node.nodeType === Node.ELEMENT_NODE) {
-                    // 追加されたノード自体がsafetensorsリンクの場合
-                    if (node.tagName === 'A' && node.href && node.href.includes('.safetensors')) {
-                        if (!processedImages.has(node)) {
-                            debugLog('[AI Meta Viewer] New safetensors link detected:', node.href);
-                            checkMetadataForElement(node);
-                        }
-                    }
+            // バージョン切り替え等の URL 変更が確認された場合、クリーンアップを開始
+            debugLog('[AI Meta Viewer] Triggering batch cleanup for new version components...');
 
-                    // 追加されたノード内のsafetensorsリンクをチェック
-                    const innerLinks = node.querySelectorAll?.('a[href*=".safetensors"]');
-                    innerLinks?.forEach(link => {
-                        if (!processedImages.has(link)) {
-                            debugLog('[AI Meta Viewer] New inner safetensors link detected:', link.href);
-                            checkMetadataForElement(link);
-                        }
-                    });
-                }
+            const beforeBadgeCount = document.querySelectorAll('.ai-meta-badge').length;
+            const beforeMapSize = typeof processedImages !== 'undefined' ? processedImages.size : 0;
+
+            // 1. 全てのバッジ（解析中含む）をDOMから削除
+            const existingBadges = document.querySelectorAll('.ai-meta-badge, .ai-meta-badge-analyzing');
+            existingBadges.forEach(b => {
+                try { b.remove(); } catch (e) { debugLog('Error removing badge:', e); }
             });
 
-            // 削除されたノードからバッジを削除
-            mutation.removedNodes.forEach((node) => {
-                if (node.nodeType === Node.ELEMENT_NODE) {
-                    if (node.tagName === 'A' && node.href && node.href.includes('.safetensors')) {
-                        processedImages.delete(node);
-                    }
-                    const innerLinks = node.querySelectorAll?.('a[href*=".safetensors"]');
-                    innerLinks?.forEach(link => {
-                        processedImages.delete(link);
-                    });
-                }
-            });
-        });
-
-        // 大規模な変更を検出（バージョン切り替え時）
-        // NOTE: Pixiv等の仮想スクロールで誤作動しないよう、要素数しきい値を上げるとともに
-        // サイトクリアが必要な Civitai 等の特定サイトに限定する
-        const isCivitai = window.location.hostname.includes('civitai.com');
-        if (isCivitai && (removedNodeCount > 10 || addedNodeCount > 10)) {
-            largeChangeDetected = true;
-            // バージョン切り替えを検知した瞬間に、古いバッジを一掃しキャッシュを消去する
-            document.querySelectorAll('.ai-meta-badge').forEach(b => b.remove());
+            // 2. 処理済み管理マップをクリア（これにより新しい要素として認識させる）
             if (typeof processedImages !== 'undefined') {
                 processedImages.clear();
+                debugLog('[AI Meta Viewer] processedImages Map cleared.');
             }
-            debugLog('[AI Meta Viewer] Large DOM change detected - likely version switch', { removedNodeCount, addedNodeCount });
-        }
 
-        // デバウンス処理
-        if (debounceTimer) {
-            clearTimeout(debounceTimer);
-        }
+            debugLog(`[AI Meta Viewer] Cleanup complete. Badges removed: ${existingBadges.length} (Current in DOM: ${document.querySelectorAll('.ai-meta-badge').length}), Map entries cleared: ${beforeMapSize}`);
 
-        debounceTimer = setTimeout(() => {
-            // 大規模な変更が検出された場合、runCivitaiRetryCheckを再始動
-            if (largeChangeDetected) {
-                debugLog('[AI Meta Viewer] Restarting runCivitaiRetryCheck after version switch');
-
-                // Civitaiの場合、ボタン要素が使い回されることがあるため、既読フラグをクリアする
-                for (const adapter of SiteAdapters) {
-                    if (adapter.match() && typeof adapter.getBadgeTargets === 'function') {
-                        const targets = adapter.getBadgeTargets(document);
-                        if (targets && Array.isArray(targets)) {
-                            targets.forEach(target => {
-                                // 既読フラグを削除
-                                if (typeof processedImages !== 'undefined' && target) {
-                                    processedImages.delete(target);
-                                }
-                                // 既存のバッジを削除（リフレッシュするため）
-                                target?.querySelectorAll?.('.ai-meta-badge').forEach(b => b.remove());
-                                // ボタン直下のバッジも探す
-                                const parent = target?.parentElement;
-                                if (parent) {
-                                    parent.querySelectorAll?.(`.ai-meta-badge[data-target-id="${target.id || ''}"]`).forEach(b => b.remove());
-                                }
-                            });
-                        }
-                    }
-                }
-
-                civitaiRetryCount = 0; // カウントをリセット
+            // 3. Civitai の再スキャンプロセスを開始 (少し待ってDOMが新しいURLに対応するのを待つ)
+            setTimeout(() => {
+                debugLog('[AI Meta Viewer] Triggering runCivitaiRetryCheck for updated page content...');
+                civitaiRetryCount = 0;
                 civitaiMetadataFetchSucceeded = false;
                 runCivitaiRetryCheck();
+            }, 800);
+        }
+    };
+
+    // 200ms ごとに URL 変化をチェック
+    if (window.aiMetaUrlInterval) clearInterval(window.aiMetaUrlInterval);
+    window.aiMetaUrlInterval = setInterval(checkUrlChange, 200);
+
+    // 新しく追加されるsafetensorsリンクを監視
+    let debounceTimer = null;
+
+    safetensorsObserver = new MutationObserver((mutations) => {
+        // ノードの追加・削除の監視 (URLチェックは setInterval 側に任せる)
+        mutations.forEach((mutation) => {
+            if (mutation.addedNodes.length > 0) {
+                mutation.addedNodes.forEach((node) => {
+                    if (node.nodeType === Node.ELEMENT_NODE) {
+                        const links = [];
+                        if (node.tagName === 'A' && node.href && node.href.includes('.safetensors')) links.push(node);
+                        const innerLinks = node.querySelectorAll?.('a[href*=".safetensors"]');
+                        if (innerLinks) innerLinks.forEach(l => links.push(l));
+
+                        links.forEach(link => {
+                            if (!processedImages.has(link)) {
+                                debugLog('[AI Meta Viewer] New link added to DOM:', link.href);
+                                checkMetadataForElement(link);
+                            }
+                        });
+                    }
+                });
             }
 
-            largeChangeDetected = false; // フラグを必ずリセット
+            if (mutation.removedNodes.length > 0) {
+                mutation.removedNodes.forEach((node) => {
+                    if (node.nodeType === Node.ELEMENT_NODE) {
+                        const links = [];
+                        if (node.tagName === 'A' && node.href && node.href.includes('.safetensors')) links.push(node);
+                        const innerLinks = node.querySelectorAll?.('a[href*=".safetensors"]');
+                        if (innerLinks) innerLinks.forEach(l => links.push(l));
+                        links.forEach(link => processedImages.delete(link));
+                    }
+                });
+            }
+        });
 
-            // 新しいsafetensorsリンクをチェック
+        // デバウンス処理（safetensorsリンクの再チェック用）
+        if (debounceTimer) clearTimeout(debounceTimer);
+        debounceTimer = setTimeout(() => {
             checkExistingLinks();
-        }, 500); // デバウンス時間を少し長めに設定して安定させる
-
-
+        }, 500);
     });
 
     safetensorsObserver.observe(document.body, {
