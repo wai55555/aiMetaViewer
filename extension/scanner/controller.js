@@ -13,13 +13,16 @@
  * @param {Object} settings - ユーザー設定
  * @returns {Promise<Object>} { success, candidates, error }
  */
-async function executeScan(settings, isCancelledFn = () => false) {
+async function executeScan(settings, isCancelledFn = () => false, onInternalProgress = null) {
     try {
         debugLog('[AI Meta Viewer] Starting scan with settings:', settings);
 
         // 1. 画像収集とフィルタリング
         const images = collectAndFilterImages(settings);
         const totalImages = images.length;
+
+        // 初期進捗を通知
+        if (onInternalProgress) onInternalProgress(0, 0, totalImages);
 
         if (totalImages === 0) {
             return { success: false, error: 'No images found on this page', candidates: [] };
@@ -40,10 +43,20 @@ async function executeScan(settings, isCancelledFn = () => false) {
         let currentProcessed = processedCount;
         let currentFound = foundCount;
 
+        // キャッシュチェック後の進捗を通知
+        if (onInternalProgress) onInternalProgress(currentProcessed, currentFound, totalImages);
+
         // 5. メタデータフェッチ
-        const onProgress = (processed, found) => {
-            currentProcessed = processed;
-            currentFound = found;
+        // NOTE: fetchMetadataBatch が返す processed/found はフェッチ分のみの値。
+        // キャッシュヒット分（processedCount/foundCount）をオフセットとして加算し、
+        // UIには常に「全体の累積値」を渡すことで進捗が退行しないようにする。
+        const cachedProcessedOffset = processedCount;
+        const cachedFoundOffset = foundCount;
+
+        const onProgress = (batchProcessed, batchFound) => {
+            currentProcessed = cachedProcessedOffset + batchProcessed;
+            currentFound = cachedFoundOffset + batchFound;
+            if (onInternalProgress) onInternalProgress(currentProcessed, currentFound, totalImages);
         };
 
         const batchResult = await fetchMetadataBatch(urlsToFetch, urlToImagesMap, onProgress, isCancelledFn);

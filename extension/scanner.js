@@ -41,8 +41,8 @@ async function handleScanRequest(request, sendResponse) {
             overlay.remove();
         });
 
-        // Execute scan (Pass cancellation signal)
-        const result = await executeScan(settings, () => isCancelled);
+        // Execute scan (Pass cancellation signal and progress callback)
+        const result = await executeScan(settings, () => isCancelled, updateProgress);
 
         if (isCancelled) {
             sendResponse({ success: false, error: 'Scan cancelled' });

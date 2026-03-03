@@ -128,11 +128,14 @@ function showScanningOverlay(total) {
     overlay.appendChild(progressContainer);
     overlay.appendChild(statsRow);
 
-    const updateProgress = (current, found) => {
+    const updateProgress = (current, found, newTotal = total) => {
+        // total を更新
+        total = newTotal;
+
         // Division by zero ガード
         if (total <= 0) {
             progressBar.style.width = '0%';
-            countText.textContent = `Progress: 0 / 0`;
+            countText.textContent = `Progress: ${current} / 0`;
             foundText.textContent = `Found: ${found}`;
             return;
         }
