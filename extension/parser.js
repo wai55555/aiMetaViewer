@@ -112,6 +112,8 @@ function extractPngMetadata(buffer) {
 
   // PNGシグネチャをスキップ (8バイト)
   let offset = 8;
+  let isFirstChunkAfterIHDR = true;
+  let isComfyUIStyle = false;
 
   while (offset < view.length) {
     // チャンク長を読み取るための最低4バイトがあるか
@@ -124,14 +126,30 @@ function extractPngMetadata(buffer) {
     // チャンク型を読み取るための8バイトがあるかチェック
     if (offset + 8 > view.length) break;
 
+    // 興味のあるチャンク（tEXt, iTXt）であれば再取得を指示
+    const typeStr = String.fromCharCode(view[offset + 4], view[offset + 5],
+      view[offset + 6], view[offset + 7]);
+
+    // ComfyUI / Pillow の指紋チェック (IHDRの直後がピッタリ65536bytesのIDAT)
+    if (typeStr !== 'IHDR') {
+      if (isFirstChunkAfterIHDR) {
+        if (typeStr === 'IDAT' && length === 65536) {
+          isComfyUIStyle = true;
+        }
+        isFirstChunkAfterIHDR = false;
+      }
+    }
+
     // データが不足しているかチェック (チャンク長4 + タイプ4 + データ + CRC4)
     if (offset + 4 + 4 + length + 4 > view.length) {
-      // 興味のあるチャンク（tEXt, iTXt）であれば再取得を指示
-      const type = String.fromCharCode(view[offset + 4], view[offset + 5],
-        view[offset + 6], view[offset + 7]);
-
-      if (type === 'tEXt' || type === 'iTXt') {
-        return { isIncomplete: true, suggestedSize: offset + 4 + 4 + length + 4 + 1024 };
+      if (typeStr === 'tEXt' || typeStr === 'iTXt') {
+        Object.assign(metadata, { isIncomplete: true, suggestedSize: offset + 4 + 4 + length + 4 + 1024 });
+        return metadata;
+      }
+      // ComfyUIスタイルの画像でIDATの途中で切れた場合、ファイル末尾にメタデータがある可能性が高い
+      if (isComfyUIStyle && typeStr === 'IDAT') {
+        Object.assign(metadata, { isIncomplete: true, requiresTailFetch: true });
+        return metadata;
       }
       // それ以外（画像データなど）なら単に終了
       break;
@@ -209,6 +227,72 @@ function extractPngMetadata(buffer) {
     }
 
     offset += length + 4; // データ + CRC
+  }
+
+  return metadata;
+}
+
+/**
+ * PNG形式のファイル末尾のバイナリ（部分フェッチ用）からメタデータを抽出
+ * @param {ArrayBuffer} buffer - 画像バイナリデータの末尾部分
+ * @returns {Object} - 抽出されたメタデータ
+ */
+function extractPngTailMetadata(buffer) {
+  const view = new Uint8Array(buffer);
+  const metadata = {};
+
+  // バッファ全体を走査して tEXt, iTXt チャンクを探す
+  let offset = 0;
+  while (offset < view.length - 8) {
+    const chunkType = String.fromCharCode(view[offset], view[offset + 1], view[offset + 2], view[offset + 3]);
+
+    if (chunkType === 'tEXt' || chunkType === 'iTXt') {
+      // チャンクの手前4バイトがLength
+      if (offset >= 4) {
+        const length = (view[offset - 4] << 24) | (view[offset - 3] << 16) | (view[offset - 2] << 8) | view[offset - 1];
+        if (offset + 4 + length + 4 <= view.length) {
+          const type = chunkType;
+          let currentOffset = offset + 4; // Length(4) + Type(4)
+
+          // tEXtチャンク処理
+          if (type === 'tEXt') {
+            const chunkData = view.slice(currentOffset, currentOffset + length);
+            const nullIndex = chunkData.indexOf(0);
+            if (nullIndex !== -1) {
+              const keyword = new TextDecoder('utf-8').decode(chunkData.slice(0, nullIndex));
+              const text = new TextDecoder('utf-8').decode(chunkData.slice(nullIndex + 1));
+              metadata[keyword] = text;
+            }
+          }
+
+          // iTXtチャンク処理
+          if (type === 'iTXt') {
+            const chunkData = view.slice(currentOffset, currentOffset + length);
+            let pos = 0;
+            const keywordEnd = chunkData.indexOf(0, pos);
+            if (keywordEnd !== -1) {
+              const keyword = new TextDecoder('utf-8').decode(chunkData.slice(pos, keywordEnd));
+              pos = keywordEnd + 1;
+              const compressionFlag = chunkData[pos];
+              pos += 2; // Flag(1) + Method(1)
+              const langEnd = chunkData.indexOf(0, pos);
+              if (langEnd !== -1) {
+                pos = langEnd + 1;
+                const transEnd = chunkData.indexOf(0, pos);
+                if (transEnd !== -1) {
+                  pos = transEnd + 1;
+                  if (compressionFlag === 0) { // 非圧縮対応
+                    const text = new TextDecoder('utf-8').decode(chunkData.slice(pos));
+                    metadata[keyword] = text;
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+    offset++;
   }
 
   return metadata;

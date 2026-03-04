@@ -14,7 +14,7 @@ const DEFAULT_SETTINGS = {
     downloaderFolderMode: 'id_pageTitle',
     downloaderBaseFolder: 'AI_Meta_Viewer',
     downloaderUseRoot: false,
-    version: '1.5.1'
+    version: '1.5.1.1'
 };
 
 // DOM Elements
