@@ -126,6 +126,12 @@ class PersistentLRUCache {
         // 文字列化した際のおよそのサイズを計算 (簡易的に文字数を使用)
         const size = JSON.stringify(metadata).length;
 
+        // 【修正】単体で制限サイズを超える巨大なメタデータはキャッシュしない
+        if (size > this.byteLimit) {
+            debugLog(`[Cache] Metadata size (${size}) exceeds byteLimit (${this.byteLimit}). Skipping cache.`);
+            return;
+        }
+
         // 既存エントリがあればサイズを差し引く
         const oldEntry = this.index.get(url);
         if (oldEntry) {
