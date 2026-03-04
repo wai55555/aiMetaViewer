@@ -102,6 +102,46 @@ function findSequence(array, sequence) {
 }
 
 /**
+ * PNGのテキスト系チャンク（tEXt/iTXt）をパースして結果を格納するヘルパー
+ * @param {string} type - チャンク型 ('tEXt' or 'iTXt')
+ * @param {Uint8Array} chunkData - チャンクのデータ部
+ * @param {Object} metadata - 格納先オブジェクト
+ */
+function parsePngTextChunk(type, chunkData, metadata) {
+  if (type === 'tEXt') {
+    const nullIndex = chunkData.indexOf(0);
+    if (nullIndex !== -1) {
+      const keyword = new TextDecoder('utf-8').decode(chunkData.slice(0, nullIndex));
+      const text = new TextDecoder('utf-8').decode(chunkData.slice(nullIndex + 1));
+      metadata[keyword] = text;
+    }
+  } else if (type === 'iTXt') {
+    let pos = 0;
+    const keywordEnd = chunkData.indexOf(0, pos);
+    if (keywordEnd === -1) return;
+
+    const keyword = new TextDecoder('utf-8').decode(chunkData.slice(pos, keywordEnd));
+    pos = keywordEnd + 1;
+
+    const compressionFlag = chunkData[pos];
+    pos += 2; // compressionFlag(1) + compressionMethod(1)
+
+    const langEnd = chunkData.indexOf(0, pos);
+    if (langEnd === -1) return;
+    pos = langEnd + 1;
+
+    const transEnd = chunkData.indexOf(0, pos);
+    if (transEnd === -1) return;
+    pos = transEnd + 1;
+
+    if (compressionFlag === 0) { // 非圧縮のみ対応
+      const text = new TextDecoder('utf-8').decode(chunkData.slice(pos));
+      metadata[keyword] = text;
+    }
+  }
+}
+
+/**
  * PNG形式のメタデータを抽出
  * @param {ArrayBuffer} buffer - 画像バイナリデータ
  * @returns {Object} - 抽出されたメタデータ
@@ -162,63 +202,10 @@ function extractPngMetadata(buffer) {
       view[offset + 2], view[offset + 3]);
     offset += 4;
 
-    // tEXtチャンク処理
-    if (type === 'tEXt') {
+    // tEXt / iTXt チャンク処理 (共通ヘルパー呼び出し)
+    if (type === 'tEXt' || type === 'iTXt') {
       const chunkData = view.slice(offset, offset + length);
-      const nullIndex = chunkData.indexOf(0);
-      if (nullIndex !== -1) {
-        const keyword = new TextDecoder('utf-8').decode(chunkData.slice(0, nullIndex));
-        const text = new TextDecoder('utf-8').decode(chunkData.slice(nullIndex + 1));
-
-        // フィルタリングを廃止し、すべて保存
-        metadata[keyword] = text;
-      }
-    }
-
-    // iTXtチャンク処理
-    if (type === 'iTXt') {
-      const chunkData = view.slice(offset, offset + length);
-      let pos = 0;
-
-      // キーワード抽出
-      const keywordEnd = chunkData.indexOf(0, pos);
-      if (keywordEnd === -1) {
-        offset += length + 4; // CRCをスキップ
-        continue;
-      }
-      const keyword = new TextDecoder('utf-8').decode(chunkData.slice(pos, keywordEnd));
-      pos = keywordEnd + 1;
-
-      // 圧縮フラグ
-      const compressionFlag = chunkData[pos];
-      pos += 1;
-
-      // 圧縮メソッド
-      pos += 1; // スキップ
-
-      // LanguageTag
-      const langEnd = chunkData.indexOf(0, pos);
-      if (langEnd === -1) {
-        offset += length + 4;
-        continue;
-      }
-      pos = langEnd + 1;
-
-      // TranslatedKeyword
-      const transEnd = chunkData.indexOf(0, pos);
-      if (transEnd === -1) {
-        offset += length + 4;
-        continue;
-      }
-      pos = transEnd + 1;
-
-      // テキストデータ
-      if (compressionFlag === 0) { // 非圧縮のみ対応
-        const text = new TextDecoder('utf-8').decode(chunkData.slice(pos));
-
-        // フィルタリングを廃止し、すべて保存
-        metadata[keyword] = text;
-      }
+      parsePngTextChunk(type, chunkData, metadata);
     }
 
     // IENDチャンクで終了
@@ -254,40 +241,10 @@ function extractPngTailMetadata(buffer) {
           const type = chunkType;
           let currentOffset = offset + 4; // Length(4) + Type(4)
 
-          // tEXtチャンク処理
-          if (type === 'tEXt') {
+          // tEXt / iTXt チャンク処理 (共通ヘルパー呼び出し)
+          if (type === 'tEXt' || type === 'iTXt') {
             const chunkData = view.slice(currentOffset, currentOffset + length);
-            const nullIndex = chunkData.indexOf(0);
-            if (nullIndex !== -1) {
-              const keyword = new TextDecoder('utf-8').decode(chunkData.slice(0, nullIndex));
-              const text = new TextDecoder('utf-8').decode(chunkData.slice(nullIndex + 1));
-              metadata[keyword] = text;
-            }
-          }
-
-          // iTXtチャンク処理
-          if (type === 'iTXt') {
-            const chunkData = view.slice(currentOffset, currentOffset + length);
-            let pos = 0;
-            const keywordEnd = chunkData.indexOf(0, pos);
-            if (keywordEnd !== -1) {
-              const keyword = new TextDecoder('utf-8').decode(chunkData.slice(pos, keywordEnd));
-              pos = keywordEnd + 1;
-              const compressionFlag = chunkData[pos];
-              pos += 2; // Flag(1) + Method(1)
-              const langEnd = chunkData.indexOf(0, pos);
-              if (langEnd !== -1) {
-                pos = langEnd + 1;
-                const transEnd = chunkData.indexOf(0, pos);
-                if (transEnd !== -1) {
-                  pos = transEnd + 1;
-                  if (compressionFlag === 0) { // 非圧縮対応
-                    const text = new TextDecoder('utf-8').decode(chunkData.slice(pos));
-                    metadata[keyword] = text;
-                  }
-                }
-              }
-            }
+            parsePngTextChunk(type, chunkData, metadata);
           }
         }
       }
@@ -326,13 +283,18 @@ function extractJpegMetadata(buffer) {
     return metadata; // 不正なTIFFヘッダー
   }
 
-  // UserCommentタグを検索 (0x9286)
-  const userCommentData = findUserComment(view, tiffStart, isLittleEndian);
+  // 1. ImageDescription (0x010E)
+  const descData = getExifTagValue(view, tiffStart, isLittleEndian, 0x010E);
+  if (descData) {
+    const text = new TextDecoder('utf-8').decode(descData).replace(/\0+$/, '');
+    if (text) metadata['Description'] = text;
+  }
 
+  // 2. UserComment (0x9286)
+  const userCommentData = getExifTagValue(view, tiffStart, isLittleEndian, 0x9286);
   if (userCommentData) {
     const parsedComment = parseExifUserComment(userCommentData, isLittleEndian);
     if (parsedComment) {
-      // parametersキーワードとして保存
       metadata['parameters'] = parsedComment;
     }
   }
@@ -385,6 +347,10 @@ function extractWebpMetadata(buffer) {
     if (offset + 8 + chunkSize > view.length) {
       // このチャンクが EXIF または XMP の場合、またはメタデータが未発見でファイルが続く場合
       if (chunkType === 'EXIF' || chunkType === 'XMP ' || (!foundMetadata && view.length < totalSize)) {
+        // ComfyUI の WebP 等で、巨大な画像チャンク（VP8 / VP8L）の後にメタデータがあるパターンを考慮
+        if ((chunkType === 'VP8 ' || chunkType === 'VP8L') && chunkSize > 65536) {
+          return { isIncomplete: true, requiresTailFetch: true };
+        }
         return { isIncomplete: true, suggestedSize: Math.min(totalSize, offset + 8 + chunkSize) };
       }
       break;
@@ -396,13 +362,28 @@ function extractWebpMetadata(buffer) {
     if (chunkType === 'EXIF') {
       const exifData = view.slice(offset, offset + chunkSize);
 
-      // エンディアン判定
-      const endianMarker = String.fromCharCode(exifData[0], exifData[1]);
+      // Exifヘッダー ("Exif\0\0") がある場合はスキップ。WebPは直接TIFFデータが入ることもあるが、仕様上はExifヘッダ付き
+      let exifStart = 0;
+      if (exifData[0] === 0x45 && exifData[1] === 0x78) { // "Exif\0\0"
+        exifStart = 6;
+      }
+
+      const endianMarker = String.fromCharCode(exifData[exifStart], exifData[exifStart + 1]);
       const isLittleEndian = endianMarker === 'II';
 
       if (endianMarker === 'II' || endianMarker === 'MM') {
-        const userCommentData = findUserComment(exifData, 0, isLittleEndian);
+        // 1. ImageDescription (0x010E) - ComfyUI WebP等
+        const descData = getExifTagValue(exifData, exifStart, isLittleEndian, 0x010E);
+        if (descData) {
+          const text = new TextDecoder('utf-8').decode(descData).replace(/\0+$/, '');
+          if (text) {
+            metadata['Description'] = text;
+            foundMetadata = true;
+          }
+        }
 
+        // 2. UserComment (0x9286) - Stable Diffusion等
+        const userCommentData = getExifTagValue(exifData, exifStart, isLittleEndian, 0x9286);
         if (userCommentData) {
           const parsedComment = parseExifUserComment(userCommentData, isLittleEndian);
           if (parsedComment) {
@@ -435,6 +416,65 @@ function extractWebpMetadata(buffer) {
   // ループ終了後、メタデータが見つからず、かつファイル全体を読み切っていない場合
   if (!foundMetadata && view.length < totalSize) {
     return { isIncomplete: true, suggestedSize: totalSize };
+  }
+
+  return metadata;
+}
+
+/**
+ * WebP形式のファイル末尾のバイナリからメタデータを抽出
+ * @param {ArrayBuffer} buffer - 画像バイナリデータの末尾部分
+ * @returns {Object} - 抽出されたメタデータ
+ */
+function extractWebpTailMetadata(buffer) {
+  const view = new Uint8Array(buffer);
+  const metadata = {};
+
+  // バッファ内で "EXIF" または "XMP " を検索
+  // WebP の EXIF ヘッダ: 'EXIF' (4B) + Size (4B)
+  for (let i = 0; i < view.length - 8; i++) {
+    const tag = String.fromCharCode(view[i], view[i + 1], view[i + 2], view[i + 3]);
+
+    if (tag === 'EXIF') {
+      const size = (view[i + 4]) + (view[i + 5] << 8) + (view[i + 6] << 16) + (view[i + 7] * 16777216);
+      const dataStart = i + 8;
+      if (dataStart + size <= view.length) {
+        const exifData = view.slice(dataStart, dataStart + size);
+
+        let exifStart = 0;
+        if (exifData[0] === 0x45 && exifData[1] === 0x78) { exifStart = 6; }
+
+        const endianMarker = String.fromCharCode(exifData[exifStart], exifData[exifStart + 1]);
+        const isLittleEndian = endianMarker === 'II';
+
+        if (endianMarker === 'II' || endianMarker === 'MM') {
+          // ImageDescription
+          const descData = getExifTagValue(exifData, exifStart, isLittleEndian, 0x010E);
+          if (descData) {
+            const text = new TextDecoder('utf-8').decode(descData).replace(/\0+$/, '');
+            if (text) metadata['Description'] = text;
+          }
+
+          // UserComment
+          const userCommentData = getExifTagValue(exifData, exifStart, isLittleEndian, 0x9286);
+          if (userCommentData) {
+            const parsedComment = parseExifUserComment(userCommentData, isLittleEndian);
+            if (parsedComment) metadata['parameters'] = parsedComment;
+          }
+        }
+      }
+    }
+
+    if (tag === 'XMP ') {
+      const size = (view[i + 4]) + (view[i + 5] << 8) + (view[i + 6] << 16) + (view[i + 7] * 16777216);
+      const dataStart = i + 8;
+      if (dataStart + size <= view.length) {
+        const xmpData = view.slice(dataStart, dataStart + size);
+        const xmpText = new TextDecoder('utf-8').decode(xmpData);
+        const xmpMetadata = parseXmpMetadata(xmpText);
+        Object.assign(metadata, xmpMetadata);
+      }
+    }
   }
 
   return metadata;
@@ -497,43 +537,39 @@ function extractSafetensorsMetadata(buffer) {
 }
 
 /**
- * UserCommentタグを検索
+ * 特定の Exif タグの値を検索
  * @param {Uint8Array} data - Exifデータ
  * @param {number} tiffStart - TIFFヘッダー開始位置
  * @param {boolean} isLittleEndian - Little Endianかどうか
- * @returns {Uint8Array|null} - UserCommentデータ、見つからない場合はnull
+ * @param {number} targetTagId - 検索するタグID (例: 0x9286)
+ * @returns {Uint8Array|null} - タグのデータ、見つからない場合はnull
  */
-function findUserComment(data, tiffStart, isLittleEndian) {
-  // UserCommentタグID: 0x9286
-  const tagBytes = isLittleEndian ? [0x86, 0x92] : [0x92, 0x86];
+function getExifTagValue(data, tiffStart, isLittleEndian, targetTagId) {
+  const tagBytes = isLittleEndian
+    ? [targetTagId & 0xFF, (targetTagId >> 8) & 0xFF]
+    : [(targetTagId >> 8) & 0xFF, targetTagId & 0xFF];
 
   for (let i = tiffStart; i < data.length - 12; i++) {
     if (data[i] === tagBytes[0] && data[i + 1] === tagBytes[1]) {
-      // タグが見つかった
-      // データ型 (2バイト) をスキップ
-      // データ数 (4バイト) を読み取り
+      // 形式 (2バイト), 個数 (4バイト)
       const count = isLittleEndian
         ? data[i + 4] | (data[i + 5] << 8) | (data[i + 6] << 16) | (data[i + 7] << 24)
         : (data[i + 4] << 24) | (data[i + 5] << 16) | (data[i + 6] << 8) | data[i + 7];
 
-      // データオフセット (4バイト) を読み取り
       const dataOffset = isLittleEndian
         ? data[i + 8] | (data[i + 9] << 8) | (data[i + 10] << 16) | (data[i + 11] << 24)
         : (data[i + 8] << 24) | (data[i + 9] << 16) | (data[i + 10] << 8) | data[i + 11];
 
-      // データが4バイト以下の場合、オフセット位置に直接データが入っている
       if (count <= 4) {
         return data.slice(i + 8, i + 8 + count);
       }
 
-      // データが4バイト超の場合、オフセットを使用
       const actualOffset = tiffStart + dataOffset;
       if (actualOffset + count <= data.length) {
         return data.slice(actualOffset, actualOffset + count);
       }
     }
   }
-
   return null;
 }
 

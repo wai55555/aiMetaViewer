@@ -1012,19 +1012,34 @@ async function handleFetchImageMetadata(imageUrl, base64Data = null) {
 
                         if (tailResponse.status === 206 || tailResponse.status === 200) {
                             const tailBuffer = await tailResponse.arrayBuffer();
-                            // parser.js の extractPngTailMetadata を使用して末尾を走査
-                            const tailMetadata = extractPngTailMetadata(tailBuffer);
-                            Object.assign(metadata, tailMetadata);
+
+                            // 画像形式に応じて適切な末尾解析器を呼び出す
+                            const format = detectImageFormat(buffer);
+                            let tailMetadata = {};
+
+                            if (format === 'png') {
+                                tailMetadata = extractPngTailMetadata(tailBuffer);
+                            } else if (format === 'webp') {
+                                tailMetadata = extractWebpTailMetadata(tailBuffer);
+                            }
+
+                            const foundKeys = Object.keys(tailMetadata);
+                            if (foundKeys.length > 0) {
+                                debugLog(`[AI Meta Viewer] ✅ Tail meta found: ${foundKeys.join(', ')}`);
+                                Object.assign(metadata, tailMetadata);
+                            } else {
+                                debugLog('[AI Meta Viewer] ⚠ Tail Range fetched but no metadata found in tail.');
+                            }
 
                             // フラグクリア
                             delete metadata.isIncomplete;
                             delete metadata.requiresTailFetch;
                         } else {
-                            debugLog('[AI Meta Viewer] ⚠ Tail Range failed, giving up padding metadata.');
+                            debugLog(`[AI Meta Viewer] ⚠ Tail Range failed (Status: ${tailResponse.status}), giving up.`);
                         }
                         isRangeRequest = false; // これ以上のフェッチを防ぐ
                     } catch (tailError) {
-                        debugLog('[AI Meta Viewer] ⚠ Tail Range throwed error:', tailError.message);
+                        debugLog('[AI Meta Viewer] ⚠ Tail Range threw error:', tailError.message);
                         isRangeRequest = false;
                     }
                 }
