@@ -55,13 +55,13 @@ const isChrome = typeof chrome !== 'undefined' && !isFirefox;
 class PersistentLRUCache {
     constructor(limit = 2000) {
         this.limit = limit;
+        this.byteLimit = 4 * 1024 * 1024; // 4MB ソフトリミット (Quotaは5MB)
         this.storage = browserAPI.storage.local;
         this.cacheKeyPrefix = 'meta_cache_';
-        this.metaKey = 'meta_cache_index'; // キー一覧とタイムスタンプを管理
-        this.lastCleanUp = 0;
+        this.metaKey = 'meta_cache_index';
+        this.totalBytes = 0; // 推定合計バイト数
 
-        // メモリ内インデックス: Map<Url, Timestamp>
-        // 頻繁なストレージアクセスを減らすため、キーと最終アクセス時刻はメモリにも持つ
+        // メモリ内インデックス: Map<Url, { t: timestamp, s: size }>
         this.index = new Map();
 
         // initを待機可能にするためPromiseを保持
@@ -72,8 +72,15 @@ class PersistentLRUCache {
         try {
             const result = await this.storage.get(this.metaKey);
             if (result[this.metaKey]) {
-                // 配列からMapへ復元: [[url, timestamp], ...]
+                // 配列からMapへ復元
                 this.index = new Map(result[this.metaKey]);
+
+                // 合計サイズの再計算
+                this.totalBytes = 0;
+                for (const value of this.index.values()) {
+                    // 旧バージョン互換性: 数値(timestamp)だった場合はサイズ0とする
+                    this.totalBytes += (typeof value === 'object' ? (value.s || 0) : 0);
+                }
             }
         } catch (e) {
             console.error('Cache init error:', e);
@@ -83,11 +90,9 @@ class PersistentLRUCache {
     async saveIndex() {
         if (this.saveTimer) clearTimeout(this.saveTimer);
 
-        // 2秒間リクエストがなければ保存 (デバウンス)
         this.saveTimer = setTimeout(async () => {
             try {
                 await this.storage.set({ [this.metaKey]: Array.from(this.index.entries()) });
-                // debugLog('[Cache] Index saved');
             } catch (e) {
                 console.error('Cache index save error:', e);
             }
@@ -96,14 +101,13 @@ class PersistentLRUCache {
 
     async get(url) {
         await this.initPromise;
-        if (!this.index.has(url)) return undefined;
+        const entry = this.index.get(url);
+        if (!entry) return undefined;
 
-        // アクセス日時更新 (メモリ)
+        // アクセス日時更新 (LRU)
+        const size = typeof entry === 'object' ? entry.s : 0;
         this.index.delete(url);
-        this.index.set(url, Date.now());
-        // インデックス保存は頻繁すぎるので、一定間隔または重要なタイミングで行うか、
-        // ここでは簡易的に都度保存はしない（終了時フックがないので定期保存が理想だが）
-        // 今回はset時にまとめて保存する戦略をとる
+        this.index.set(url, { t: Date.now(), s: size });
 
         const key = this.cacheKeyPrefix + url;
         try {
@@ -118,21 +122,34 @@ class PersistentLRUCache {
     async set(url, metadata) {
         await this.initPromise;
         const key = this.cacheKeyPrefix + url;
-        const timestamp = Date.now();
 
-        // メモリインデックス更新
-        if (this.index.has(url)) this.index.delete(url);
-        this.index.set(url, timestamp);
+        // 文字列化した際のおよそのサイズを計算 (簡易的に文字数を使用)
+        const size = JSON.stringify(metadata).length;
+
+        // 【修正】単体で制限サイズを超える巨大なメタデータはキャッシュしない
+        if (size > this.byteLimit) {
+            debugLog(`[Cache] Metadata size (${size}) exceeds byteLimit (${this.byteLimit}). Skipping cache.`);
+            return;
+        }
+
+        // 既存エントリがあればサイズを差し引く
+        const oldEntry = this.index.get(url);
+        if (oldEntry) {
+            this.totalBytes -= (typeof oldEntry === 'object' ? oldEntry.s : 0);
+            this.index.delete(url);
+        }
 
         try {
             // ストレージ容量チェック & 掃除
-            await this.ensureCapacity();
+            await this.ensureCapacity(size);
+
+            this.index.set(url, { t: Date.now(), s: size });
+            this.totalBytes += size;
 
             await this.storage.set({ [key]: metadata });
             await this.saveIndex();
         } catch (e) {
             console.error('Cache set error:', e);
-            // クォータエラーなどが起きた場合、さらに掃除して再試行すべきだが、一旦ログのみ
         }
     }
 
@@ -145,35 +162,44 @@ class PersistentLRUCache {
         await this.initPromise;
         await this.storage.clear();
         this.index.clear();
+        this.totalBytes = 0;
     }
 
-    async ensureCapacity() {
-        // 定期クリーンアップ (例えば set 50回に1回、または容量チェックエラー時)
-        // ここでは簡易的に、項目数が limit を超えたら古いものを消す
-        if (this.index.size > this.limit) {
-            const deleteCount = Math.ceil(this.limit * 0.1); // 10% 削除
-            const sorted = Array.from(this.index.entries()).sort((a, b) => a[1] - b[1]); // 古い順
+    async ensureCapacity(newSize = 0) {
+        // 項目数制限 または バイト数制限に抵触する場合
+        if (this.index.size >= this.limit || (this.totalBytes + newSize) > this.byteLimit) {
+            debugLog(`[Cache] Capacity check: count=${this.index.size}, totalBytes=${this.totalBytes}, adding=${newSize}`);
+
+            // 古い順にソート (t: timestamp が小さい順)
+            const sorted = Array.from(this.index.entries())
+                .sort((a, b) => {
+                    const timeA = typeof a[1] === 'object' ? a[1].t : a[1];
+                    const timeB = typeof b[1] === 'object' ? b[1].t : b[1];
+                    return timeA - timeB;
+                });
 
             const keysToRemove = [];
-            const urlsToRemove = [];
+            const targetBytes = this.byteLimit * 0.7; // 70%まで空ける
+            const targetCount = this.limit * 0.9;     // 90%まで空ける
 
-            for (let i = 0; i < deleteCount; i++) {
-                if (i >= sorted.length) break;
-                const [url, _] = sorted[i];
-                urlsToRemove.push(url);
+            for (const [url, value] of sorted) {
+                // 削除条件を満たさなくなるまでループ
+                if (this.index.size < targetCount && this.totalBytes < targetBytes) break;
+
+                const size = typeof value === 'object' ? (value.s || 0) : 0;
                 keysToRemove.push(this.cacheKeyPrefix + url);
+
+                this.totalBytes -= size;
                 this.index.delete(url);
+
+                if (keysToRemove.length >= 100) break; // 一度に消しすぎないガード
             }
 
             if (keysToRemove.length > 0) {
-                debugLog(`[Cache] Evicting ${keysToRemove.length} items`);
+                debugLog(`[Cache] Evicting ${keysToRemove.length} items to free space. Remaining totalBytes=${this.totalBytes}`);
                 await this.storage.remove(keysToRemove);
-                // インデックスは saveIndex で更新される
             }
         }
-
-        // 本当は getBytesInUse を見て 4MB 超えたら消す処理も入れたい
-        // しかし getBytesInUse は非同期でコストがかかるため、項目数制限をメインガードとする
     }
 }
 
@@ -241,6 +267,7 @@ class DataManager {
             // PersistentLRUCache の統計
             await metadataCache.initPromise; // 初期化完了を待つ
             const cacheItemCount = metadataCache.index.size;
+            const totalBytes = metadataCache.totalBytes;
 
             // ストレージ使用量を取得
             let storageUsage = 0;
@@ -248,7 +275,7 @@ class DataManager {
                 const bytesInUse = await browserAPI.storage.local.getBytesInUse();
                 storageUsage = bytesInUse;
             } catch (e) {
-                debugLog('[AI Meta Viewer] Could not get storage usage:', e.message);
+                storageUsage = totalBytes; // フォールバック
             }
 
             // rangeRequestBlockList の統計
@@ -257,6 +284,8 @@ class DataManager {
             return {
                 persistentCache: {
                     itemCount: cacheItemCount,
+                    totalBytes: totalBytes,
+                    byteLimit: metadataCache.byteLimit,
                     storageUsage: storageUsage
                 },
                 rangeBlockList: {
@@ -862,6 +891,7 @@ async function handleFetchImageMetadata(imageUrl, base64Data = null) {
         let buffer;
         let isRangeRequest = false;
         let domain = '';
+        let totalFileSize = 0; // 追加：Rangeリクエスト時の総サイズ保持
         try { domain = new URL(imageUrl).hostname; } catch (e) { }
 
         // リダイレクト解決済みのURLを保持
@@ -893,10 +923,8 @@ async function handleFetchImageMetadata(imageUrl, base64Data = null) {
             const shouldUseRange = !rangeRequestBlockList.has(domain);
 
             if (shouldUseRange) {
+                const rangeSize = 65535;
                 try {
-                    // 最初は 64KB をリクエスト。
-                    const rangeSize = 65535;
-
                     // URL タイプの判定
                     const isCivitaiApiUrl = imageUrl.includes('civitai.com/api/download/models/');
                     const isCloudflareCDN = imageUrl.includes('cloudflarestorage.com');
@@ -927,7 +955,17 @@ async function handleFetchImageMetadata(imageUrl, base64Data = null) {
 
                     if (response.status === 206) {
                         isRangeRequest = true;
-                        buffer = await response.arrayBuffer();
+                        buffer = await response.arrayBuffer(); // 通常の最初のバッファをパース用に割り当て
+
+                        // Content-Range からファイルの総サイズを取得
+                        const contentRange = response.headers.get('Content-Range');
+                        if (contentRange) {
+                            const match = contentRange.match(/\/(\d+)/);
+                            if (match) {
+                                totalFileSize = parseInt(match[1], 10);
+                                debugLog(`[AI Meta Viewer] Content total size: ${totalFileSize} bytes`);
+                            }
+                        }
                     } else if (response.status === 200) {
                         // サーバーがRangeを無視した場合
                         const contentLength = parseInt(response.headers.get('Content-Length') || '0', 10);
@@ -936,6 +974,7 @@ async function handleFetchImageMetadata(imageUrl, base64Data = null) {
                             throw new Error(`Full content returned but exceeds limit: ${contentLength} bytes`);
                         }
                         buffer = await response.arrayBuffer();
+                        totalFileSize = buffer.byteLength;
                     } else {
                         throw new Error(`Range request failed with status ${response.status}`);
                     }
@@ -958,42 +997,95 @@ async function handleFetchImageMetadata(imageUrl, base64Data = null) {
         try {
             metadata = extractMetadata(buffer);
 
-            // メタデータ不足時の再試行ロジック (Safetensors 等)
+            // メタデータ不足時の再試行ロジック
             if (metadata.isIncomplete && isRangeRequest) {
-                const retrySize = metadata.suggestedSize || 131072;
-                debugLog(`[AI Meta Viewer] ⚠ Metadata is incomplete. Retrying with larger range: 0-${retrySize}`);
 
-                try {
-                    const controller = new AbortController();
-                    const timeoutId = setTimeout(() => controller.abort(), 10000);
-                    const retryResponse = await fetch(activeUrl, {
-                        headers: { 'Range': `bytes=0-${retrySize}` },
-                        signal: controller.signal
-                    });
-                    clearTimeout(timeoutId);
+                // ComfyUI (PNGの末尾にメタデータがあるパターン)
+                if (metadata.requiresTailFetch && totalFileSize > 65535) {
+                    const tailSize = 131072; // 末尾 128KB 取得
+                    let tailStart = totalFileSize - tailSize;
+                    if (tailStart < 65536) tailStart = 65536; // 既取得分と被らないように
 
-                    if (retryResponse.status === 206) {
-                        const newBuffer = await retryResponse.arrayBuffer();
-                        const nextMetadata = extractMetadata(newBuffer);
-                        if (nextMetadata.isIncomplete) {
-                            debugLog('[AI Meta Viewer] ⚠ Still incomplete. Falling back to safe full fetch.');
+                    debugLog(`[AI Meta Viewer] ⚠ ComfyUI signature detected. Fetching tail for metadata: bytes=${tailStart}-`);
+                    try {
+                        const controller = new AbortController();
+                        const timeoutId = setTimeout(() => controller.abort(), 10000);
+                        const tailResponse = await fetch(activeUrl, {
+                            headers: { 'Range': `bytes=${tailStart}-` },
+                            signal: controller.signal
+                        });
+                        clearTimeout(timeoutId);
+
+                        if (tailResponse.status === 206 || tailResponse.status === 200) {
+                            const tailBuffer = await tailResponse.arrayBuffer();
+
+                            // 画像形式に応じて適切な末尾解析器を呼び出す
+                            const format = detectImageFormat(buffer);
+                            let tailMetadata = {};
+
+                            if (format === 'png') {
+                                tailMetadata = extractPngTailMetadata(tailBuffer);
+                            } else if (format === 'webp') {
+                                tailMetadata = extractWebpTailMetadata(tailBuffer);
+                            }
+
+                            const foundKeys = Object.keys(tailMetadata);
+                            if (foundKeys.length > 0) {
+                                debugLog(`[AI Meta Viewer] ✅ Tail meta found: ${foundKeys.join(', ')}`);
+                                Object.assign(metadata, tailMetadata);
+                            } else {
+                                debugLog('[AI Meta Viewer] ⚠ Tail Range fetched but no metadata found in tail.');
+                            }
+
+                            // フラグクリア
+                            delete metadata.isIncomplete;
+                            delete metadata.requiresTailFetch;
+                        } else {
+                            debugLog(`[AI Meta Viewer] ⚠ Tail Range failed (Status: ${tailResponse.status}), giving up.`);
+                        }
+                        isRangeRequest = false; // これ以上のフェッチを防ぐ
+                    } catch (tailError) {
+                        debugLog('[AI Meta Viewer] ⚠ Tail Range threw error:', tailError.message);
+                        isRangeRequest = false;
+                    }
+                }
+                // 通常の再試行 (Safetensorsなど、前方をもっと読む)
+                else {
+                    const retrySize = metadata.suggestedSize || 131072;
+                    debugLog(`[AI Meta Viewer] ⚠ Metadata is incomplete. Retrying with larger range: 0-${retrySize}`);
+
+                    try {
+                        const controller = new AbortController();
+                        const timeoutId = setTimeout(() => controller.abort(), 10000);
+                        const retryResponse = await fetch(activeUrl, {
+                            headers: { 'Range': `bytes=0-${retrySize}` },
+                            signal: controller.signal
+                        });
+                        clearTimeout(timeoutId);
+
+                        if (retryResponse.status === 206) {
+                            const newBuffer = await retryResponse.arrayBuffer();
+                            const nextMetadata = extractMetadata(newBuffer);
+                            if (nextMetadata.isIncomplete) {
+                                debugLog('[AI Meta Viewer] ⚠ Still incomplete. Falling back to safe full fetch.');
+                                const fullBuffer = await safeFetchFull(activeUrl);
+                                metadata = extractMetadata(fullBuffer);
+                            } else {
+                                metadata = nextMetadata;
+                                buffer = newBuffer;
+                            }
+                        } else {
+                            debugLog('[AI Meta Viewer] ⚠ Retry Range failed, falling back to safe full fetch.');
                             const fullBuffer = await safeFetchFull(activeUrl);
                             metadata = extractMetadata(fullBuffer);
-                        } else {
-                            metadata = nextMetadata;
-                            buffer = newBuffer;
                         }
-                    } else {
-                        debugLog('[AI Meta Viewer] ⚠ Retry Range failed, falling back to safe full fetch.');
+                        isRangeRequest = false;
+                    } catch (retryError) {
+                        debugLog('[AI Meta Viewer] ⚠ Range retry failed, final attempt with safe full fetch:', retryError.message);
                         const fullBuffer = await safeFetchFull(activeUrl);
                         metadata = extractMetadata(fullBuffer);
+                        isRangeRequest = false;
                     }
-                    isRangeRequest = false;
-                } catch (retryError) {
-                    debugLog('[AI Meta Viewer] ⚠ Range retry failed, final attempt with safe full fetch:', retryError.message);
-                    const fullBuffer = await safeFetchFull(activeUrl);
-                    metadata = extractMetadata(fullBuffer);
-                    isRangeRequest = false;
                 }
             }
         } catch (e) {

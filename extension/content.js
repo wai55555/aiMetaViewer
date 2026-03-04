@@ -933,16 +933,26 @@ function observeImages() {
         });
     };
 
-    const observer = new MutationObserver(observerCallback);
-    observer.observe(document.body, {
-        childList: true,
-        subtree: true,
-        attributes: true,
-        attributeFilter: ['src', 'style', 'class', 'width', 'height', 'transform']
-    });
+    const setupObserver = () => {
+        if (!document.body) {
+            debugLog('[AI Meta Viewer] document.body not found, waiting for DOMContentLoaded');
+            window.addEventListener('DOMContentLoaded', setupObserver, { once: true });
+            return;
+        }
 
-    // 初期ロード時の処理
-    processPendingNodes();
+        const observer = new MutationObserver(observerCallback);
+        observer.observe(document.body, {
+            childList: true,
+            subtree: true,
+            attributes: true,
+            attributeFilter: ['src', 'style', 'class', 'width', 'height', 'transform']
+        });
+
+        // 初期ロード時の処理
+        processPendingNodes();
+    };
+
+    setupObserver();
 }
 
 /**

@@ -205,9 +205,37 @@ window.SiteAdapters = [
         match: () => window.location.hostname.includes('civitai.com') || document.title.includes('Civitai'),
         resolve: (img) => {
             const src = img.src || img.currentSrc;
+
+            // 1. image.civitai.com (プロキシ/サムネイル用ドメイン) の処理
             if (src.includes('image.civitai.com')) {
+                // パスから UUID を抽出する
+                // 例: https://image.civitai.com/xG1nkqKTMzGDvpLrqFT7WA/9daebb64-42ff-4292-9f25-6dfe8de3a665/width=450/image.jpeg
+                // パターンの構成: ドメイン / プロフィールID等 / UUID / オプション...
+                const uuidMatch = src.match(/image\.civitai\.com\/[^/]+\/([a-f0-9-]{36})\//i);
+                if (uuidMatch) {
+                    const uuid = uuidMatch[1];
+                    // メタデータが保持されているオリジナル保存先の候補を生成
+                    // 現在は b2 が主流だが、b1 なども存在する可能性があるため複数試行する
+                    return [
+                        `https://image-b2.civitai.com/file/civitai-media-cache/${uuid}/original`,
+                        `https://image-b1.civitai.com/file/civitai-media-cache/${uuid}/original`,
+                        src.replace(/\/width=\d+/, '') // フォールバック: パラメータ除去のみ
+                    ];
+                }
+
+                // UUIDが見つからない場合は単にパラメータ除去（旧ロジック互換）
                 return src.replace(/\/width=\d+/, '');
             }
+
+            // 2. 既に image-b2.civitai.com 等の直接 URL の場合
+            if (src.includes('image-b1.civitai.com') || src.includes('image-b2.civitai.com')) {
+                // 既に original 指定があるか、そうでない場合は末尾を /original にして試行
+                if (src.endsWith('/original')) return src;
+
+                const baseUrl = src.split('/').slice(0, -1).join('/');
+                return [`${baseUrl}/original`, src];
+            }
+
             return null;
         },
         deepScan: (document) => {

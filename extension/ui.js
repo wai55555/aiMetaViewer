@@ -153,9 +153,9 @@ function detectGenerator(metadata) {
         if (metadata.parameters.includes('Civitai metadata')) {
             return 'Civitai';
         }
-        // Version: v1.10.xxxxx などのパターンを検出 (Civitai生成画像の特徴)
+        // Version: v1.10.xxxxx などのパターンを検出 (A1111とCivitai生成画像の特徴)
         if (metadata.parameters.match(/Version:\s*v1\.10\./)) {
-            return 'Civitai';
+            return 'A1111';
         }
     }
 
