@@ -14,7 +14,14 @@ const DEFAULT_SETTINGS = {
     downloaderFolderMode: 'id_pageTitle',
     downloaderBaseFolder: 'AI_Meta_Viewer',
     downloaderUseRoot: false,
-    version: '1.5.1.1'
+    modalWidth: 600,
+    modalHeight: 500,
+    modalX: 'center',
+    modalY: 'center',
+    enableMetadataEditing: false,
+    enableExperimentalWriting: false,
+    advancedModeEnabled: false,
+    version: '1.5.3'
 };
 
 // DOM Elements
@@ -36,6 +43,16 @@ const downloaderFolderModeSelect = document.getElementById('downloaderFolderMode
 const downloaderBaseFolderInput = document.getElementById('downloaderBaseFolder');
 const downloaderUseRootCheckbox = document.getElementById('downloaderUseRoot');
 const baseFolderContainer = document.getElementById('baseFolderContainer');
+
+// Window & Interaction Elements
+const modalWidthInput = document.getElementById('modalWidth');
+const modalHeightInput = document.getElementById('modalHeight');
+const currentPosSpan = document.getElementById('currentPos');
+const resetWindowBtn = document.getElementById('resetWindowBtn');
+const enableMetadataEditingCheckbox = document.getElementById('enableMetadataEditing');
+const enableExperimentalWritingCheckbox = document.getElementById('enableExperimentalWriting');
+const advancedSection = document.getElementById('advancedSection');
+const versionDisplay = document.getElementById('versionDisplay');
 
 // Data Statistics Elements
 const cacheItemCountSpan = document.getElementById('cacheItemCount');
@@ -202,6 +219,25 @@ async function loadSettings() {
         updateBaseFolderVisibility();
     }
 
+    // Window & Interaction
+    if (modalWidthInput) modalWidthInput.value = settings.modalWidth;
+    if (modalHeightInput) modalHeightInput.value = settings.modalHeight;
+    if (currentPosSpan) {
+        if (settings.modalX === 'center') {
+            currentPosSpan.textContent = 'Centered';
+        } else {
+            currentPosSpan.textContent = `X:${Math.round(settings.modalX)}, Y:${Math.round(settings.modalY)}`;
+        }
+    }
+    if (enableMetadataEditingCheckbox) enableMetadataEditingCheckbox.checked = settings.enableMetadataEditing;
+    if (enableExperimentalWritingCheckbox) enableExperimentalWritingCheckbox.checked = settings.enableExperimentalWriting;
+
+    // Advanced Mode
+    if (advancedSection) {
+        advancedSection.style.display = settings.advancedModeEnabled ? 'block' : 'none';
+    }
+    if (versionDisplay) versionDisplay.textContent = 'v' + settings.version;
+
     // データ統計を表示
     await OptionsPageEnhancer.displayDataStatistics();
 }
@@ -235,7 +271,12 @@ async function saveSettings() {
         ignoredSoftware: ignoredSoftware,
         downloaderFolderMode: downloaderFolderModeSelect ? downloaderFolderModeSelect.value : 'pageTitle',
         downloaderBaseFolder: downloaderBaseFolderInput ? downloaderBaseFolderInput.value.trim() : 'AI_Meta_Viewer',
-        downloaderUseRoot: downloaderUseRootCheckbox ? downloaderUseRootCheckbox.checked : false
+        downloaderUseRoot: downloaderUseRootCheckbox ? downloaderUseRootCheckbox.checked : false,
+        modalWidth: parseInt(modalWidthInput ? modalWidthInput.value : '600', 10) || 600,
+        modalHeight: parseInt(modalHeightInput ? modalHeightInput.value : '500', 10) || 500,
+        enableMetadataEditing: enableMetadataEditingCheckbox ? enableMetadataEditingCheckbox.checked : false,
+        enableExperimentalWriting: enableExperimentalWritingCheckbox ? enableExperimentalWritingCheckbox.checked : false,
+        advancedModeEnabled: advancedSection ? (advancedSection.style.display !== 'none') : false
     };
 
     // Validation
@@ -353,5 +394,39 @@ document.addEventListener('DOMContentLoaded', () => {
 
     if (downloaderUseRootCheckbox) {
         downloaderUseRootCheckbox.addEventListener('change', updateBaseFolderVisibility);
+    }
+
+    // Reset Window Click
+    if (resetWindowBtn) {
+        resetWindowBtn.addEventListener('click', () => {
+            const updates = {
+                modalWidth: 600,
+                modalHeight: 500,
+                modalX: 'center',
+                modalY: 'center'
+            };
+            chrome.storage.sync.set(updates, () => {
+                if (modalWidthInput) modalWidthInput.value = 600;
+                if (modalHeightInput) modalHeightInput.value = 500;
+                if (currentPosSpan) currentPosSpan.textContent = 'Centered';
+                showStatus('Window reset to defaults', 'success');
+            });
+        });
+    }
+
+    // Secret version clicking logic
+    let versionClicks = 0;
+    if (versionDisplay) {
+        versionDisplay.addEventListener('click', () => {
+            versionClicks++;
+            if (versionClicks >= 5) {
+                if (advancedSection) {
+                    advancedSection.style.display = 'block';
+                    showStatus('🔥 Advanced Settings Unlocked!', 'success');
+                    // 保存もしておく
+                    chrome.storage.sync.set({ advancedModeEnabled: true });
+                }
+            }
+        });
     }
 });

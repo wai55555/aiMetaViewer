@@ -175,7 +175,7 @@ function addBadgeToImage(img, metadata, originalUrl) {
 
     // ui.jsのupdateBadgeでツールチップなどを設定
     updateBadge(badge, metadata);
-    badge.style.zIndex = '2147483647'; // 最前面に表示
+    badge.style.zIndex = '2147483640'; // モーダル(2147483647)より手前にならないよう、かつ十分に高く設定
 
     // バッジにメタデータとオリジナルURLを保存
     badge._metadata = metadata;
@@ -205,7 +205,7 @@ function addBadgeToImage(img, metadata, originalUrl) {
 
         const currentMetadata = badge._metadata;
         if (currentMetadata && document.body) {
-            const modal = createModal(currentMetadata); // ui.jsの関数
+            const modal = createModal(currentMetadata, badge._originalUrl); // ui.jsの関数
             document.body.appendChild(modal);
         }
     });
@@ -488,7 +488,7 @@ function addBadgeToElement(el, metadata, originalUrl) {
         e.stopPropagation();
         const currentMetadata = badge._metadata;
         if (currentMetadata && document.body) {
-            const modal = createModal(currentMetadata);
+            const modal = createModal(currentMetadata, badge._originalUrl);
             document.body.appendChild(modal);
         }
     });

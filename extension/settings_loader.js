@@ -10,7 +10,16 @@ window.DEFAULT_SETTINGS = {
     analyzeEverywhere: false,
     excludedSites: [],
     ignoredMetadataKeys: ['XML:com.adobe.xmp'],
-    ignoredSoftware: ['Adobe Photoshop', 'Adobe ImageReady', 'Celsys Studio Tool', 'GIMP', 'Paint.NET']
+    ignoredSoftware: ['Adobe Photoshop', 'Adobe ImageReady', 'Celsys Studio Tool', 'GIMP', 'Paint.NET'],
+    // ウィンドウ配置設定
+    modalWidth: 600,
+    modalHeight: 500,
+    modalX: 'center',
+    modalY: 'center',
+    // 編集・隠し機能設定
+    enableMetadataEditing: true,    // メタデータの編集を許可
+    advancedModeEnabled: false,
+    enableExperimentalWriting: false
 };
 
 // 現在の設定（グローバル変数として公開）
