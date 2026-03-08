@@ -220,28 +220,31 @@ function createPositionUpdater(el, badge, { isDiscord = false, isPixiv = false }
 
                     if (cx >= 0 && cy >= 0 && cx <= window.innerWidth && cy <= window.innerHeight) {
                         const originalVisibility = badge.style.visibility;
-                        badge.style.visibility = 'hidden';
-                        const topElement = document.elementFromPoint(cx, cy);
-                        badge.style.visibility = originalVisibility;
+                        try {
+                            badge.style.visibility = 'hidden';
+                            const topElement = document.elementFromPoint(cx, cy);
 
-                        if (topElement) {
-                            const isSelf = topElement === el || el.contains(topElement);
-                            const isParent = topElement.contains(el);
+                            if (topElement) {
+                                const isSelf = topElement === el || el.contains(topElement);
+                                const isParent = topElement.contains(el);
 
-                            if (!isSelf && !isParent) {
-                                let parent = el.parentElement;
-                                let distance = 1;
-                                let isCloseRelative = false;
-                                while (parent && distance <= 3) {
-                                    if (parent.contains(topElement)) {
-                                        isCloseRelative = true;
-                                        break;
+                                if (!isSelf && !isParent) {
+                                    let parent = el.parentElement;
+                                    let distance = 1;
+                                    let isCloseRelative = false;
+                                    while (parent && distance <= 3) {
+                                        if (parent.contains(topElement)) {
+                                            isCloseRelative = true;
+                                            break;
+                                        }
+                                        parent = parent.parentElement;
+                                        distance++;
                                     }
-                                    parent = parent.parentElement;
-                                    distance++;
+                                    if (!isCloseRelative) currentlyOccluded = true;
                                 }
-                                if (!isCloseRelative) currentlyOccluded = true;
                             }
+                        } finally {
+                            badge.style.visibility = originalVisibility;
                         }
                     }
                     badge._isOccluded = currentlyOccluded;
