@@ -191,7 +191,7 @@ async function fetchMetadataBatch(urlsToFetch, urlToImagesMap, onProgress, isCan
             uniqueFetchCount++;
 
             try {
-                const response = await chrome.runtime.sendMessage({
+                const response = await sendMessageToBrave({
                     action: 'fetchImageMetadata',
                     imageUrl: url
                 });

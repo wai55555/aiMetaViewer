@@ -193,5 +193,20 @@
   },
   "descEnableMetadataEditing": {
     "message": "Allow editing metadata text directly in the viewer modal (Experimental)"
+  },
+  "sectionIgnoredMetadata": {
+    "message": "Ignored Metadata"
+  },
+  "labelIgnoredMetadataKeys": {
+    "message": "Ignored Metadata Keys (one per line)"
+  },
+  "descIgnoredMetadataKeys": {
+    "message": "If a metadata key matches any of these, the image will be ignored."
+  },
+  "labelIgnoredSoftware": {
+    "message": "Ignored Software (one per line)"
+  },
+  "descIgnoredSoftware": {
+    "message": "If the \"Software\" metadata contains any of these strings, the image will be ignored."
   }
 }

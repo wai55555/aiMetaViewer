@@ -171,8 +171,10 @@ function init() {
 // 処理済み画像とバッジデータの管理、ResizeObserverなどは badge_controller.js に移動しました
 
 
-// 画像URLごとのメタデータキャッシュ
-const metadataCache = new Map();
+// 画像URLごとのメタデータキャッシュ（content script内のメモリキャッシュ）
+// 注意: scanner/core.js に同名の localMetadataCache が存在するため、
+// content.js 側は contentMetadataCache として区別する
+const contentMetadataCache = new Map();
 
 // --- サイト別アダプター (互換性のためグローバルな SiteAdapters を使用) ---
 // adapters.js に分離されました。
@@ -308,8 +310,8 @@ async function checkImageMetadata(img) {
 
         for (const url of urlsToTry) {
             // キャッシュチェック
-            if (metadataCache.has(url)) {
-                metadata = metadataCache.get(url);
+            if (contentMetadataCache.has(url)) {
+                metadata = contentMetadataCache.get(url);
                 if (metadata && Object.keys(metadata).length > 0) {
                     successUrl = url;
                     break;
@@ -339,7 +341,7 @@ async function checkImageMetadata(img) {
 
                     // 空でない場合のみキャッシュして採用
                     if (Object.keys(metadata).length > 0) {
-                        metadataCache.set(url, metadata);
+                        contentMetadataCache.set(url, metadata);
                         successUrl = url;
                         break; // 成功したらループを抜ける
                     }
@@ -546,6 +548,56 @@ function observeSiteSpecificElements() {
 }
 
 /**
+ * SPA ナビゲーション検出 (ポーリング方式)
+ * Civitai 等の SPA では DOM 変更と URL 変更のタイミングが一致しないことがある。
+ * 200ms ごとの定期監視によって確実に URL 変化を捕捉し、一括処理を行う。
+ */
+function startSpaUrlPolling() {
+    let lastKnownUrl = window.location.href;
+    debugLog('[AI Meta Viewer] SPA URL Polling Monitor started. Current URL:', lastKnownUrl);
+
+    const checkUrlChange = () => {
+        const currentUrl = window.location.href;
+        if (currentUrl !== lastKnownUrl) {
+            debugLog('[AI Meta Viewer] SPA URL CHANGE DETECTED (Polling)');
+            debugLog('  Old URL:', lastKnownUrl);
+            debugLog('  New URL:', currentUrl);
+
+            lastKnownUrl = currentUrl;
+
+            debugLog('[AI Meta Viewer] Triggering batch cleanup for new version components...');
+
+            const beforeMapSize = typeof processedImages !== 'undefined' ? processedImages.size : 0;
+
+            // 1. 全てのバッジ（解析中含む）をDOMから削除
+            const existingBadges = document.querySelectorAll('.ai-meta-badge, .ai-meta-badge-analyzing');
+            existingBadges.forEach(b => {
+                try { b.remove(); } catch (e) { debugLog('Error removing badge:', e); }
+            });
+
+            // 2. 処理済み管理マップをクリア（これにより新しい要素として認識させる）
+            if (typeof processedImages !== 'undefined') {
+                processedImages.clear();
+                debugLog('[AI Meta Viewer] processedImages Map cleared.');
+            }
+
+            debugLog(`[AI Meta Viewer] Cleanup complete. Badges removed: ${existingBadges.length} (Current in DOM: ${document.querySelectorAll('.ai-meta-badge').length}), Map entries cleared: ${beforeMapSize}`);
+
+            // 3. Civitai の再スキャンプロセスを開始 (少し待ってDOMが新しいURLに対応するのを待つ)
+            setTimeout(() => {
+                debugLog('[AI Meta Viewer] Triggering runCivitaiRetryCheck for updated page content...');
+                civitaiRetryCount = 0;
+                civitaiMetadataFetchSucceeded = false;
+                runCivitaiRetryCheck();
+            }, 800);
+        }
+    };
+
+    if (window.aiMetaUrlInterval) clearInterval(window.aiMetaUrlInterval);
+    window.aiMetaUrlInterval = setInterval(checkUrlChange, 200);
+}
+
+/**
  * 汎用的なsafetensorsリンクを監視
  */
 let safetensorsObserver = null; // グローバル変数でObserverを管理
@@ -589,58 +641,11 @@ function observeGenericSafetensorsLinks() {
         }, 1000);
     }
 
-    // --- SPA ナビゲーション検出 (ポーリング方式) ---
-    // Civitai 等の SPA では DOM 変更と URL 変更のタイミングが一致しないことがある。
-    // 200ms ごとの定期監視によって確実に URL 変化を捕捉し、一括処理を行う。
-    let lastKnownUrl = window.location.href;
-    debugLog('[AI Meta Viewer] SPA URL Polling Monitor started. Current URL:', lastKnownUrl);
-
-    const checkUrlChange = () => {
-        const currentUrl = window.location.href;
-        if (currentUrl !== lastKnownUrl) {
-            debugLog('[AI Meta Viewer] SPA URL CHANGE DETECTED (Polling)');
-            debugLog('  Old URL:', lastKnownUrl);
-            debugLog('  New URL:', currentUrl);
-
-            lastKnownUrl = currentUrl;
-
-            // バージョン切り替え等の URL 変更が確認された場合、クリーンアップを開始
-            debugLog('[AI Meta Viewer] Triggering batch cleanup for new version components...');
-
-            const beforeBadgeCount = document.querySelectorAll('.ai-meta-badge').length;
-            const beforeMapSize = typeof processedImages !== 'undefined' ? processedImages.size : 0;
-
-            // 1. 全てのバッジ（解析中含む）をDOMから削除
-            const existingBadges = document.querySelectorAll('.ai-meta-badge, .ai-meta-badge-analyzing');
-            existingBadges.forEach(b => {
-                try { b.remove(); } catch (e) { debugLog('Error removing badge:', e); }
-            });
-
-            // 2. 処理済み管理マップをクリア（これにより新しい要素として認識させる）
-            if (typeof processedImages !== 'undefined') {
-                processedImages.clear();
-                debugLog('[AI Meta Viewer] processedImages Map cleared.');
-            }
-
-            debugLog(`[AI Meta Viewer] Cleanup complete. Badges removed: ${existingBadges.length} (Current in DOM: ${document.querySelectorAll('.ai-meta-badge').length}), Map entries cleared: ${beforeMapSize}`);
-
-            // 3. Civitai の再スキャンプロセスを開始 (少し待ってDOMが新しいURLに対応するのを待つ)
-            setTimeout(() => {
-                debugLog('[AI Meta Viewer] Triggering runCivitaiRetryCheck for updated page content...');
-                civitaiRetryCount = 0;
-                civitaiMetadataFetchSucceeded = false;
-                runCivitaiRetryCheck();
-            }, 800);
-        }
-    };
-
-    // 200ms ごとに URL 変化をチェック
-    if (window.aiMetaUrlInterval) clearInterval(window.aiMetaUrlInterval);
-    window.aiMetaUrlInterval = setInterval(checkUrlChange, 200);
+    // SPA ナビゲーション検出を開始
+    startSpaUrlPolling();
 
     // 新しく追加されるsafetensorsリンクを監視
     let debounceTimer = null;
-
     safetensorsObserver = new MutationObserver((mutations) => {
         // ノードの追加・削除の監視 (URLチェックは setInterval 側に任せる)
         mutations.forEach((mutation) => {
@@ -690,9 +695,6 @@ function observeGenericSafetensorsLinks() {
     debugLog('[AI Meta Viewer] Generic safetensors link observer started');
 }
 
-/**
- * 画像以外の要素のメタデータをチェックしてバッジを追加
- */
 /**
  * 拡張機能のコンテキストが有効かどうかをチェック
  * Brave ブラウザ対応版 - より寛容な判定
@@ -1046,9 +1048,9 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         // メモリキャッシュのクリア
         debugLog('[AI Meta Viewer] Clearing memory caches');
 
-        // metadataCache をクリア
-        const metadataCacheSize = metadataCache.size;
-        metadataCache.clear();
+        // contentMetadataCache をクリア
+        const metadataCacheSize = contentMetadataCache.size;
+        contentMetadataCache.clear();
 
         // processedImages をクリア (badge_controller.js で定義されている場合)
         let processedImagesSize = 0;
