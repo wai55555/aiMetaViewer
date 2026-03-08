@@ -17,7 +17,7 @@ window.DEFAULT_SETTINGS = {
     modalX: 'center',
     modalY: 'center',
     // 編集・隠し機能設定
-    enableMetadataEditing: true,    // メタデータの編集を許可
+    enableMetadataEditing: false,   // メタデータの編集を許可
     advancedModeEnabled: false,
     enableExperimentalWriting: false
 };

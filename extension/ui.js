@@ -308,10 +308,15 @@ function createModal(metadata, imageUrl = null) {
     const { positive, negative, other } = parseMetadataToTabs(metadata);
     const generatorName = detectGenerator(metadata);
 
-    // 既存のモーダルがあれば削除
+    // 既存のモーダルがあれば、クローズボタン経由で閉じる（Escapeリスナーの解除を含む）
     const existingOverlay = document.getElementById('ai-meta-modal-overlay');
     if (existingOverlay) {
-        existingOverlay.remove();
+        const existingCloseBtn = existingOverlay.querySelector('.ai-meta-close-btn');
+        if (existingCloseBtn) {
+            existingCloseBtn.click();
+        } else {
+            existingOverlay.remove();
+        }
     }
 
     // オーバーレイ

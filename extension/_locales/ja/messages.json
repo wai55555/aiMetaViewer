@@ -166,5 +166,26 @@
     },
     "msgAllDataClearFailed": {
         "message": "全データのクリアに失敗しました: "
+    },
+    "sectionWindowDisplay": {
+        "message": "ウィンドウ表示"
+    },
+    "labelModalWidth": {
+        "message": "幅 (px)"
+    },
+    "labelModalHeight": {
+        "message": "高さ (px)"
+    },
+    "btnResetWindow": {
+        "message": "サイズ・位置をリセット"
+    },
+    "sectionMetadataInteraction": {
+        "message": "メタデータ操作"
+    },
+    "labelEnableMetadataEditing": {
+        "message": "メタデータ編集を有効化"
+    },
+    "descEnableMetadataEditing": {
+        "message": "ビューアモーダルでメタデータテキストを直接編集できるようにします（実験的）"
     }
 }

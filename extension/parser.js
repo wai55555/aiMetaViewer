@@ -1009,8 +1009,9 @@ async function rewriteImageMetadata(buffer, text) {
     case 'webp':
       return writeWebPMetadata(buffer, text);
     case 'jpeg':
+      return writeJpegMetadata(buffer, text);
     case 'avif':
-      return writeJpegMetadata(buffer, text); // AVIFもJPEG同様APP1/Exifを使用
+      throw new Error('AVIF metadata rewriting is not supported. AVIF uses ISOBMFF container format which requires a different approach.');
     default:
       throw new Error(`Unsupported format for rewriting: ${format}`);
   }
@@ -1077,6 +1078,13 @@ function writeWebPMetadata(buffer, text) {
 function writeJpegMetadata(buffer, text) {
   const view = new Uint8Array(buffer);
   const textBytes = new TextEncoder().encode(text);
+
+  // COM segment length field is 2 bytes (max 65535, including the 2-byte length field itself)
+  // So max text payload is 65533 bytes
+  const MAX_COM_PAYLOAD = 65533;
+  if (textBytes.length > MAX_COM_PAYLOAD) {
+    throw new Error(`Metadata text too large for JPEG COM segment (${textBytes.length} bytes > ${MAX_COM_PAYLOAD} bytes max). Consider using a shorter prompt.`);
+  }
 
   // COM marker: FF FE, Length: 2 + textBytes.length
   const comSegment = new Uint8Array(2 + 2 + textBytes.length);

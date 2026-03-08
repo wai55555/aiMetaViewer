@@ -400,14 +400,14 @@ document.addEventListener('DOMContentLoaded', () => {
     if (resetWindowBtn) {
         resetWindowBtn.addEventListener('click', () => {
             const updates = {
-                modalWidth: 600,
-                modalHeight: 500,
-                modalX: 'center',
-                modalY: 'center'
+                modalWidth: DEFAULT_SETTINGS.modalWidth,
+                modalHeight: DEFAULT_SETTINGS.modalHeight,
+                modalX: DEFAULT_SETTINGS.modalX,
+                modalY: DEFAULT_SETTINGS.modalY
             };
             chrome.storage.sync.set(updates, () => {
-                if (modalWidthInput) modalWidthInput.value = 600;
-                if (modalHeightInput) modalHeightInput.value = 500;
+                if (modalWidthInput) modalWidthInput.value = DEFAULT_SETTINGS.modalWidth;
+                if (modalHeightInput) modalHeightInput.value = DEFAULT_SETTINGS.modalHeight;
                 if (currentPosSpan) currentPosSpan.textContent = 'Centered';
                 showStatus('Window reset to defaults', 'success');
             });

@@ -487,7 +487,7 @@ const DEFAULT_SETTINGS = {
     downloaderFolderMode: 'id_pageTitle', // 'id_pageTitle', 'pageTitle', 'domain', 'none'
     downloaderBaseFolder: 'AI_Meta_Viewer',
     downloaderUseRoot: false,
-    version: '1.5.2',
+    version: '1.5.3',
     // 共有設定の追加
     modalWidth: 800,
     modalHeight: 600,
@@ -675,7 +675,7 @@ async function handleWriteMetadataAndDownload(imageUrl, metadataObj) {
 
         const modifiedBytes = await rewriteImageMetadata(buffer, finalMetadataText);
         const format = detectImageFormat(buffer);
-        const mimeType = format === 'png' ? 'image/png' : (format === 'webp' ? 'image/webp' : 'image/jpeg');
+        const mimeType = format === 'png' ? 'image/png' : format === 'webp' ? 'image/webp' : format === 'avif' ? 'image/avif' : 'image/jpeg';
         const blob = new Blob([modifiedBytes], { type: mimeType });
 
         // Service Worker 環境での Data URL 化
@@ -699,9 +699,10 @@ async function handleWriteMetadataAndDownload(imageUrl, metadataObj) {
         }
 
         // 元のベース名と拡張子を分離
-        let baseName = filename.substring(0, filename.lastIndexOf('.')) || filename;
+        const dotIndex = filename.lastIndexOf('.');
+        let baseName = dotIndex !== -1 ? filename.substring(0, dotIndex) : filename;
         // 拡張子を小文字に正規化
-        const extension = (filename.substring(filename.lastIndexOf('.')) || `.${format || 'png'}`).toLowerCase();
+        const extension = (dotIndex !== -1 ? filename.substring(dotIndex) : `.${format || 'png'}`).toLowerCase();
 
         // ファイル名として不適切な文字を置換 (Windows/OSの制限)
         baseName = baseName.replace(/[\\/:*?"<>|]/g, '_');
