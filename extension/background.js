@@ -675,6 +675,8 @@ async function handleWriteMetadataAndDownload(imageUrl, metadataObj) {
 
         const modifiedBytes = await rewriteImageMetadata(buffer, finalMetadataText);
         const format = detectImageFormat(buffer);
+        // NOTE: rewriteImageMetadata throws for AVIF, so 'image/avif' branch is unreachable.
+        // Kept for completeness in case AVIF write support is added in the future.
         const mimeType = format === 'png' ? 'image/png' : format === 'webp' ? 'image/webp' : format === 'avif' ? 'image/avif' : 'image/jpeg';
         const blob = new Blob([modifiedBytes], { type: mimeType });
 
@@ -1292,27 +1294,6 @@ async function extractStealthPNGInfoAsync(imageUrl, buffer) {
 }
 
 // Service Worker起動時にライブラリを読み込む
-try {
-    importScripts('jszip.min.js');
-    debugLog('[AI Meta Viewer] JSZip loaded successfully');
-} catch (e) {
-    console.error('[AI Meta Viewer] Failed to load JSZip:', e);
-}
-
-try {
-    importScripts('pako.js');
-    debugLog('[AI Meta Viewer] Pako loaded successfully');
-} catch (e) {
-    console.error('[AI Meta Viewer] Failed to load Pako:', e);
-}
-
-try {
-    importScripts('parser.js');
-    debugLog('[AI Meta Viewer] Parser loaded successfully');
-} catch (e) {
-    console.error('[AI Meta Viewer] Failed to load Parser:', e);
-}
-
 debugLog('[AI Meta Viewer] Background service worker loaded with imports');
 
 // Brave ブラウザ対応: Service Worker の keep-alive メカニズム
@@ -1336,22 +1317,14 @@ function stopKeepAlive() {
 startKeepAlive();
 
 // Service Worker の動作確認用
-debugLog('[AI Meta Viewer] Chrome APIs available:', {
-    runtime: !!chrome.runtime,
-    storage: !!chrome.storage,
-    tabs: !!chrome.tabs,
-    downloads: !!chrome.downloads,
-    action: !!chrome.action
-});
-debugLog('[AI Meta Viewer] Background script initialization complete');
-
-// Brave ブラウザ診断機能
-debugLog('=== Brave Background Diagnostic ===');
-debugLog('Chrome APIs in background:', {
-    runtime: !!chrome.runtime,
-    storage: !!chrome.storage,
-    tabs: !!chrome.tabs,
-    downloads: !!chrome.downloads,
-    action: !!chrome.action
+loadSettings().then(() => {
+    debugLog('[AI Meta Viewer] Chrome APIs available:', {
+        runtime: !!chrome.runtime,
+        storage: !!chrome.storage,
+        tabs: !!chrome.tabs,
+        downloads: !!chrome.downloads,
+        action: !!chrome.action
+    });
+    debugLog('[AI Meta Viewer] Background script initialization complete');
 });
 

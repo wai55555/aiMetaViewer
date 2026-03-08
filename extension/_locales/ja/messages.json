@@ -187,5 +187,20 @@
     },
     "descEnableMetadataEditing": {
         "message": "ビューアモーダルでメタデータテキストを直接編集できるようにします（実験的）"
+    },
+    "sectionIgnoredMetadata": {
+        "message": "除外メタデータ"
+    },
+    "labelIgnoredMetadataKeys": {
+        "message": "除外するメタデータキー（1行に1つ）"
+    },
+    "descIgnoredMetadataKeys": {
+        "message": "メタデータキーがいずれかに一致した場合、その画像を無視します。"
+    },
+    "labelIgnoredSoftware": {
+        "message": "除外するソフトウェア（1行に1つ）"
+    },
+    "descIgnoredSoftware": {
+        "message": "\"Software\" メタデータにいずれかの文字列が含まれる場合、その画像を無視します。"
     }
 }
