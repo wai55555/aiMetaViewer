@@ -172,5 +172,26 @@
   },
   "msgAllDataClearFailed": {
     "message": "Failed to clear all data: "
+  },
+  "sectionWindowDisplay": {
+    "message": "Window Display"
+  },
+  "labelModalWidth": {
+    "message": "Width (px)"
+  },
+  "labelModalHeight": {
+    "message": "Height (px)"
+  },
+  "btnResetWindow": {
+    "message": "Reset Size & Position"
+  },
+  "sectionMetadataInteraction": {
+    "message": "Metadata Interaction"
+  },
+  "labelEnableMetadataEditing": {
+    "message": "Enable Metadata Editing"
+  },
+  "descEnableMetadataEditing": {
+    "message": "Allow editing metadata text directly in the viewer modal (Experimental)"
   }
 }

@@ -304,17 +304,45 @@ function setupCopyButton(button, text) {
  * @param {Object} metadata - メタデータ
  * @returns {HTMLElement} - モーダルオーバーレイ要素
  */
-function createModal(metadata) {
+function createModal(metadata, imageUrl = null) {
     const { positive, negative, other } = parseMetadataToTabs(metadata);
     const generatorName = detectGenerator(metadata);
 
+    // 既存のモーダルがあれば、クローズボタン経由で閉じる（Escapeリスナーの解除を含む）
+    const existingOverlay = document.getElementById('ai-meta-modal-overlay');
+    if (existingOverlay) {
+        const existingCloseBtn = existingOverlay.querySelector('.ai-meta-close-btn');
+        if (existingCloseBtn) {
+            existingCloseBtn.click();
+        } else {
+            existingOverlay.remove();
+        }
+    }
+
     // オーバーレイ
     const overlay = document.createElement('div');
+    overlay.id = 'ai-meta-modal-overlay';
     overlay.className = 'ai-meta-modal-overlay';
 
-    // モーダルコンテナ
+    // モーダル本体
     const modal = document.createElement('div');
     modal.className = 'ai-meta-modal';
+
+    // 設定からサイズ・位置を適用
+    const width = settings.modalWidth || 600;
+    const height = settings.modalHeight || 500;
+    modal.style.width = width + 'px';
+    modal.style.height = height + 'px';
+
+    if (settings.modalX === 'center' || settings.modalY === 'center') {
+        modal.style.left = '50%';
+        modal.style.top = '50%';
+        modal.style.transform = 'translate(-50%, -50%)';
+    } else {
+        modal.style.left = (typeof settings.modalX === 'number' ? settings.modalX : 100) + 'px';
+        modal.style.top = (typeof settings.modalY === 'number' ? settings.modalY : 100) + 'px';
+        modal.style.transform = 'none';
+    }
 
     // ヘッダー
     const header = document.createElement('div');
@@ -327,6 +355,24 @@ function createModal(metadata) {
     closeBtn.className = 'ai-meta-close-btn';
     closeBtn.innerHTML = '&times;';
     closeBtn.title = 'Close';
+
+    // 閉じる機能の復元
+    const closeModal = () => {
+        overlay.remove();
+        document.removeEventListener('keydown', handleEsc);
+    };
+    const handleEsc = (e) => {
+        if (e.key === 'Escape') closeModal();
+    };
+
+    closeBtn.onclick = (e) => {
+        e.stopPropagation();
+        closeModal();
+    };
+    overlay.onclick = (e) => {
+        if (e.target === overlay) closeModal();
+    };
+    document.addEventListener('keydown', handleEsc);
 
     header.appendChild(title);
     header.appendChild(closeBtn);
@@ -351,15 +397,27 @@ function createModal(metadata) {
         copyBtn.className = 'ai-meta-copy-btn';
         copyBtn.textContent = 'Copy';
         copyBtn.setAttribute('data-tooltip', 'Copy to clipboard');
-        setupCopyButton(copyBtn, textContent);
+
+        // 編集内容を考慮したコピー
+        copyBtn.onclick = (e) => {
+            e.stopPropagation();
+            const area = section.querySelector('.ai-meta-text-area');
+            const textToCopy = area ? area.innerText : textContent;
+            copyToClipboard(textToCopy, copyBtn);
+        };
 
         sectionHeader.appendChild(label);
         sectionHeader.appendChild(copyBtn);
 
         const textArea = document.createElement('div');
         textArea.className = 'ai-meta-text-area';
-        textArea.textContent = textContent || 'None';
+        textArea.innerText = textContent || 'None';
         if (!textContent) textArea.classList.add('empty');
+
+        // 編集許可設定 (標準で有効、設定による制限も可能)
+        if (typeof settings.enableMetadataEditing === 'undefined' || settings.enableMetadataEditing) {
+            textArea.contentEditable = "true";
+        }
 
         section.appendChild(sectionHeader);
         section.appendChild(textArea);
@@ -484,20 +542,70 @@ function createModal(metadata) {
     const footer = document.createElement('div');
     footer.className = 'ai-meta-modal-footer';
 
+    // 実験的書き換え機能ボタン (隠し設定有効時のみ)
+    if (settings.advancedModeEnabled && settings.enableExperimentalWriting && imageUrl) {
+        const writeBtn = document.createElement('button');
+        writeBtn.className = 'ai-meta-copy-all-btn';
+        writeBtn.textContent = 'Update & Download';
+        writeBtn.style.backgroundColor = '#d32f2f'; // 警告色
+        writeBtn.setAttribute('data-tooltip', '埋め込みメタデータを更新してダウンロード(PNGのみ)');
+
+        writeBtn.onclick = async (e) => {
+            e.stopPropagation();
+            // 全セクションからデータを収集
+            const sections = content.querySelectorAll('.ai-meta-section');
+            const metadataPayload = {};
+            sections.forEach(sec => {
+                const label = sec.querySelector('.ai-meta-section-label').textContent;
+                const area = sec.querySelector('.ai-meta-text-area');
+                if (label === 'Positive Prompt') metadataPayload.positive = area.innerText;
+                else if (label === 'Negative Prompt') metadataPayload.negative = area.innerText;
+                else if (label === 'Other Settings') metadataPayload.other = area.innerText;
+            });
+
+            if (window.confirm('編集したメタデータで画像を再保存（ダウンロード）しますか？\n※元のファイルは変更されません。')) {
+                writeBtn.disabled = true;
+                writeBtn.textContent = 'Processing...';
+                try {
+                    const response = await browserAPI.runtime.sendMessage({
+                        action: 'writeMetadataAndDownload',
+                        imageUrl: imageUrl,
+                        metadata: metadataPayload
+                    });
+                    if (response && response.success) {
+                        showNotification('Metadata updated and download started!');
+                    } else {
+                        throw new Error(response.error || 'Failed to process image');
+                    }
+                } catch (err) {
+                    showNotification('Error: ' + err.message, 'error');
+                } finally {
+                    writeBtn.disabled = false;
+                    writeBtn.textContent = 'Update & Download';
+                }
+            }
+        };
+        footer.appendChild(writeBtn);
+    }
+
     const copyAllBtn = document.createElement('button');
     copyAllBtn.className = 'ai-meta-copy-all-btn';
     copyAllBtn.textContent = 'Copy All Data';
     copyAllBtn.setAttribute('data-tooltip', 'Copy all metadata (raw format)');
 
-    // 全データをraw形式で結合（JSON化しない）
-    let allDataRaw = '';
-    for (const [key, value] of Object.entries(metadata)) {
-        const valueStr = typeof value === 'object' ? JSON.stringify(value, null, 2) : String(value);
-        allDataRaw += `${key}:\n${valueStr}\n\n`;
-    }
-    allDataRaw = allDataRaw.trim();
-
-    setupCopyButton(copyAllBtn, allDataRaw);
+    // 全データをraw形式で結合（編集内容を反映させるため、その場で取得）
+    copyAllBtn.onclick = (e) => {
+        e.stopPropagation();
+        let allDataRaw = '';
+        const sections = content.querySelectorAll('.ai-meta-section');
+        sections.forEach(sec => {
+            const label = sec.querySelector('.ai-meta-section-label').textContent;
+            const area = sec.querySelector('.ai-meta-text-area');
+            const text = area ? area.innerText : '';
+            allDataRaw += `${label}:\n${text}\n\n`;
+        });
+        copyToClipboard(allDataRaw.trim(), copyAllBtn);
+    };
 
     footer.appendChild(copyAllBtn);
 
@@ -507,41 +615,181 @@ function createModal(metadata) {
     modal.appendChild(footer);
     overlay.appendChild(modal);
 
-    // イベントハンドラ
-    const close = () => {
-        if (document.body) {
-            if (overlay.parentNode === document.body) {
-                document.body.removeChild(overlay);
-            }
-            document.body.style.overflow = ''; // スクロールロック解除
-        }
-    };
+    // スクロールロック (オプション)
+    // if (document.body) {
+    //     document.body.style.overflow = 'hidden';
+    // }
 
-    closeBtn.addEventListener('click', close);
-    overlay.addEventListener('click', (e) => {
-        if (e.target === overlay) close();
-    });
-    header.addEventListener('click', (e) => {
-        // ヘッダーをクリックしても閉じる（仕様書2.2.2項）
-        // ただし、閉じるボタン自体のクリックイベントと競合しないようにする
-        if (e.target !== closeBtn) close();
-    });
-
-    // Escキーで閉じる
-    const escHandler = (e) => {
-        if (e.key === 'Escape') {
-            close();
-            document.removeEventListener('keydown', escHandler);
-        }
-    };
-    document.addEventListener('keydown', escHandler);
-
-    // スクロールロック
-    if (document.body) {
-        document.body.style.overflow = 'hidden';
-    }
+    // ドラッグ & リサイズ初期化
+    initDragAndResize(modal, header);
 
     return overlay;
+}
+
+/**
+ * モーダルのドラッグとリサイズ機能を初期化
+ * @param {HTMLElement} modal - モーダル本体
+ * @param {HTMLElement} header - ドラッグハンドルとなるヘッダー
+ */
+function initDragAndResize(modal, header) {
+    let isDragging = false;
+    let isResizing = false;
+    let currentHandle = null;
+    let startX, startY, startWidth, startHeight, startLeft, startTop;
+
+    // リサイズハンドルの作成
+    const handles = ['n', 's', 'e', 'w', 'ne', 'nw', 'se', 'sw'];
+    handles.forEach(dir => {
+        const handle = document.createElement('div');
+        handle.className = `ai-meta-resize-handle ai-meta-resize-${dir}`;
+        handle.dataset.dir = dir;
+        modal.appendChild(handle);
+
+        handle.addEventListener('mousedown', (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            isResizing = true;
+            currentHandle = dir;
+            startX = e.clientX;
+            startY = e.clientY;
+            startWidth = modal.offsetWidth;
+            startHeight = modal.offsetHeight;
+            startLeft = modal.offsetLeft;
+            startTop = modal.offsetTop;
+
+            // 中央揃え解除
+            modal.style.transform = 'none';
+            modal.style.left = startLeft + 'px';
+            modal.style.top = startTop + 'px';
+
+            document.addEventListener('mousemove', handleMouseMove);
+            document.addEventListener('mouseup', handleMouseUp);
+        });
+    });
+
+    // ヘッダードラッグ
+    header.addEventListener('mousedown', (e) => {
+        if (e.target.tagName === 'BUTTON' || e.target.closest('button')) return;
+
+        isDragging = true;
+        startX = e.clientX;
+        startY = e.clientY;
+        startLeft = modal.offsetLeft;
+        startTop = modal.offsetTop;
+
+        // 中央揃え解除
+        modal.style.transform = 'none';
+        modal.style.left = startLeft + 'px';
+        modal.style.top = startTop + 'px';
+
+        document.addEventListener('mousemove', handleMouseMove);
+        document.addEventListener('mouseup', handleMouseUp);
+        e.preventDefault();
+    });
+
+    function handleMouseMove(e) {
+        if (isDragging) {
+            const dx = e.clientX - startX;
+            const dy = e.clientY - startY;
+            modal.style.left = (startLeft + dx) + 'px';
+            modal.style.top = (startTop + dy) + 'px';
+        } else if (isResizing) {
+            const dx = e.clientX - startX;
+            const dy = e.clientY - startY;
+            let newWidth = startWidth;
+            let newHeight = startHeight;
+            let newLeft = startLeft;
+            let newTop = startTop;
+
+            if (currentHandle.includes('e')) newWidth = startWidth + dx;
+            if (currentHandle.includes('w')) {
+                newWidth = startWidth - dx;
+                newLeft = startLeft + dx;
+            }
+            if (currentHandle.includes('s')) newHeight = startHeight + dy;
+            if (currentHandle.includes('n')) {
+                newHeight = startHeight - dy;
+                newTop = startTop + dy;
+            }
+
+            // 最小サイズ制約
+            if (newWidth > 300) {
+                modal.style.width = newWidth + 'px';
+                modal.style.left = newLeft + 'px';
+            }
+            if (newHeight > 200) {
+                modal.style.height = newHeight + 'px';
+                modal.style.top = newTop + 'px';
+            }
+        }
+    }
+
+    function handleMouseUp() {
+        if (isDragging || isResizing) {
+            // 設定を保存
+            saveWindowSettings(modal);
+        }
+        isDragging = false;
+        isResizing = false;
+        document.removeEventListener('mousemove', handleMouseMove);
+        document.removeEventListener('mouseup', handleMouseUp);
+    }
+}
+
+/**
+ * ウィンドウの位置とサイズを設定に保存
+ * @param {HTMLElement} modal 
+ */
+function saveWindowSettings(modal) {
+    const settingsUpdate = {
+        modalWidth: modal.offsetWidth,
+        modalHeight: modal.offsetHeight,
+        modalX: modal.offsetLeft,
+        modalY: modal.offsetTop
+    };
+
+    // グローバルなsettingsオブジェクトも更新
+    Object.assign(settings, settingsUpdate);
+
+    // Chrome Storageに保存
+    if (typeof chrome !== 'undefined' && chrome.storage) {
+        chrome.storage.sync.set(settingsUpdate);
+    }
+}
+
+/**
+ * ヘルパークリップボードコピー
+ */
+async function copyToClipboard(text, button) {
+    try {
+        await navigator.clipboard.writeText(text);
+        const originalText = button.textContent;
+        button.textContent = 'Copied!';
+        button.classList.add('copied');
+        setTimeout(() => {
+            button.textContent = originalText;
+            button.classList.remove('copied');
+        }, 2000);
+    } catch (err) {
+        console.error('Failed to copy:', err);
+    }
+}
+
+/**
+ * 通知表示 (UI内)
+ */
+function showNotification(message, type = 'success') {
+    const notification = document.createElement('div');
+    notification.className = 'ai-meta-error-notification'; // スタイル流用
+    if (type === 'success') {
+        notification.style.backgroundColor = '#2ea043';
+    }
+    notification.textContent = message;
+    document.body.appendChild(notification);
+    setTimeout(() => {
+        notification.style.opacity = '0';
+        setTimeout(() => notification.remove(), 500);
+    }, 3000);
 }
 
 /**
@@ -562,7 +810,7 @@ function createDownloadButton() {
     // ここでは最低限だけ設定し、詳細はstyles.cssで
     btn.style.position = 'fixed';
     btn.style.bottom = '20px';
-    btn.style.right = '20px'; // エラー通知と被らないように調整が必要かも
+    btn.style.right = '20px';
     btn.style.zIndex = '2147483646'; // モーダルより下、バッジより上
 
     return btn;

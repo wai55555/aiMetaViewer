@@ -134,9 +134,23 @@ function parsePngTextChunk(type, chunkData, metadata) {
     if (transEnd === -1) return;
     pos = transEnd + 1;
 
-    if (compressionFlag === 0) { // 非圧縮のみ対応
+    if (compressionFlag === 0) {
       const text = new TextDecoder('utf-8').decode(chunkData.slice(pos));
       metadata[keyword] = text;
+    } else if (compressionFlag === 1) {
+      // 圧縮された iTXt チャンクのデコード (HANDOVER 指示に基づく)
+      try {
+        if (typeof pako !== 'undefined') {
+          const compressedData = chunkData.slice(pos);
+          const inflated = pako.inflate(compressedData);
+          const text = new TextDecoder('utf-8').decode(inflated);
+          metadata[keyword] = text;
+        } else {
+          console.warn('[AI Meta Viewer] pako.js not loaded, cannot decompress iTXt chunk');
+        }
+      } catch (err) {
+        console.error('[AI Meta Viewer] Failed to decompress iTXt chunk:', err);
+      }
     }
   }
 }
@@ -858,4 +872,243 @@ function binaryToText(binaryStr) {
   } catch {
     return '';
   }
+}
+
+/**
+ * PNG画像のバイナリデータを取得し、メタデータを書き換えた新しいデータを返す
+ * (既存の tEXt/iTXt チャンクを上書き、または新規挿入)
+ * @param {ArrayBuffer} buffer - 元の画像データ
+ * @param {string} text - 書き込むプロンプトテキスト
+ * @returns {Uint8Array} - 書き換え後の画像データ
+ */
+function writePngMetadata(buffer, text) {
+  const bytes = new Uint8Array(buffer);
+  const chunks = [];
+  let offset = 8; // Skip PNG header
+
+  // ヘッダーをコピー
+  chunks.push(bytes.slice(0, 8));
+
+  let inserted = false;
+
+  while (offset < bytes.length) {
+    const length = new DataView(bytes.buffer, offset, 4).getUint32(0);
+    const type = new TextDecoder('ascii').decode(bytes.slice(offset + 4, offset + 8));
+
+    // 既存の parameters チャンクがあればスキップ（上書きの代わり）
+    if (type === 'tEXt' || type === 'iTXt') {
+      const chunkContent = bytes.slice(offset + 8, offset + 8 + length);
+      let keywordEnd = -1;
+      for (let i = 0; i < chunkContent.length; i++) {
+        if (chunkContent[i] === 0) {
+          keywordEnd = i;
+          break;
+        }
+      }
+
+      if (keywordEnd !== -1) {
+        const keyword = new TextDecoder('ascii').decode(chunkContent.slice(0, keywordEnd));
+        if (keyword === 'parameters') {
+          offset += length + 12;
+          continue;
+        }
+      }
+    }
+
+    const fullChunk = bytes.slice(offset, offset + length + 12);
+    chunks.push(fullChunk);
+
+    // IHDR チャンクの直後に新しい parameters チャンクを挿入する
+    if (type === 'IHDR' && !inserted) {
+      chunks.push(createPngTextChunk('parameters', text));
+      inserted = true;
+    }
+
+    offset += length + 12;
+    if (offset > bytes.length - 4) break; // 安全策
+  }
+
+  // Flatten chunks
+  const totalLength = chunks.reduce((sum, chunk) => sum + chunk.length, 0);
+  const result = new Uint8Array(totalLength);
+  let pos = 0;
+  for (const chunk of chunks) {
+    result.set(chunk, pos);
+    pos += chunk.length;
+  }
+  return result;
+}
+
+/**
+ * PNG tEXt チャンクを生成
+ */
+function createPngTextChunk(keyword, text) {
+  const encoder = new TextEncoder();
+  const kwBytes = encoder.encode(keyword);
+  const textBytes = encoder.encode(text);
+
+  const length = kwBytes.length + 1 + textBytes.length;
+  const buffer = new ArrayBuffer(length + 12);
+  const view = new DataView(buffer);
+
+  // Length
+  view.setUint32(0, length);
+
+  // Type: tEXt
+  view.setUint8(4, 0x74); // t
+  view.setUint8(5, 0x45); // E
+  view.setUint8(6, 0x58); // X
+  view.setUint8(7, 0x74); // t
+
+  const bytes = new Uint8Array(buffer);
+  // Keyword + Null separator + Text
+  bytes.set(kwBytes, 8);
+  bytes.set([0], 8 + kwBytes.length);
+  bytes.set(textBytes, 9 + kwBytes.length);
+
+  // CRC
+  const crcData = bytes.slice(4, 8 + length);
+  const crc = computeCrc32(crcData);
+  view.setUint32(8 + length, crc);
+
+  return bytes;
+}
+
+// CRC32 implementation
+function computeCrc32(data) {
+  let crc = 0xFFFFFFFF;
+  const globalObj = typeof self !== 'undefined' ? self : window;
+  const table = globalObj._crcTable || (globalObj._crcTable = (() => {
+    const t = new Uint32Array(256);
+    for (let i = 0; i < 256; i++) {
+      let c = i;
+      for (let j = 0; j < 8; j++) {
+        c = ((c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1));
+      }
+      t[i] = c;
+    }
+    return t;
+  })());
+
+  for (let i = 0; i < data.length; i++) {
+    crc = table[(crc ^ data[i]) & 0xFF] ^ (crc >>> 8);
+  }
+  return (crc ^ 0xFFFFFFFF) >>> 0;
+}
+
+/**
+ * 画像形式を判別してメタデータを書き換える (統合エントリポイント)
+ */
+async function rewriteImageMetadata(buffer, text) {
+  const format = detectImageFormat(buffer);
+  debugLog(`[AI Meta Viewer] Rewriting metadata for format: ${format}`);
+
+  switch (format) {
+    case 'png':
+      return writePngMetadata(buffer, text);
+    case 'webp':
+      return writeWebPMetadata(buffer, text);
+    case 'jpeg':
+      return writeJpegMetadata(buffer, text);
+    case 'avif':
+      throw new Error('AVIF metadata rewriting is not supported. AVIF uses ISOBMFF container format which requires a different approach.');
+    default:
+      throw new Error(`Unsupported format for rewriting: ${format}`);
+  }
+}
+
+/**
+ * WebPにメタデータ(XMP)を埋め込む
+ * シンプルにVP8Xヘッダを更新し、末尾にXMPチャンクを追加（または上書き）
+ */
+function writeWebPMetadata(buffer, text) {
+  const view = new Uint8Array(buffer);
+  const xmpHeader = '<?xpacket begin="" id="W5M0MpCehiHzreSzNTczkc9d"?><x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"><rdf:Description rdf:about="" xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:description><rdf:Alt><rdf:li xml:lang="x-default">';
+  const xmpFooter = '</rdf:li></rdf:Alt></dc:description></rdf:Description></rdf:RDF></x:xmpmeta><?xpacket end="w"?>';
+  const xmpContent = xmpHeader + text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;') + xmpFooter;
+  const xmpBytes = new TextEncoder().encode(xmpContent);
+
+  // RIFF(4) + Size(4) + WEBP(4)
+  // 既存の XMP チャンクを探して削除するための簡易実装
+  // 実際にはチャンクをパースして再構築するのが安全だが、
+  // ここでは新しい XMP チャンクを生成して IDAT (または VP8/VP8L) の後に追加
+
+  const chunks = [];
+  let offset = 12;
+  while (offset < view.length - 8) {
+    const type = String.fromCharCode(...view.slice(offset, offset + 4));
+    const size = view[offset + 4] | (view[offset + 5] << 8) | (view[offset + 6] << 16) | (view[offset + 7] << 24);
+    const fullSize = 8 + size + (size % 2);
+
+    if (type !== 'XMP ') { // 既存の XMP はスキップ
+      chunks.push(view.slice(offset, offset + fullSize));
+    }
+    offset += fullSize;
+  }
+
+  // VP8X チャンクが存在しない場合は追加し、フラグを立てる必要があるが、
+  // 多くのAI生成WebPは既にVP8Xを持っているか、末尾追加でも読み取れる場合が多い
+  // ここではシンプルに結合
+  const newSize = 4 + chunks.reduce((acc, c) => acc + c.length, 0) + 8 + xmpBytes.length + (xmpBytes.length % 2);
+  const out = new Uint8Array(8 + newSize);
+
+  out.set([0x52, 0x49, 0x46, 0x46]); // RIFF
+  const outView = new DataView(out.buffer);
+  outView.setUint32(4, newSize, true);
+  out.set([0x57, 0x45, 0x42, 0x50], 8); // WEBP
+
+  let currentPos = 12;
+  for (const c of chunks) {
+    out.set(c, currentPos);
+    currentPos += c.length;
+  }
+
+  // XMP チャンク追加
+  out.set(new TextEncoder().encode('XMP '), currentPos);
+  outView.setUint32(currentPos + 4, xmpBytes.length, true);
+  out.set(xmpBytes, currentPos + 8);
+
+  return out;
+}
+
+/**
+ * JPEG/AVIFにメタデータ(COMセグメント)を埋め込む
+ * シンプルに APP0/APP1 の直後に COM (Comment) セグメントを挿入
+ */
+function writeJpegMetadata(buffer, text) {
+  const view = new Uint8Array(buffer);
+  const textBytes = new TextEncoder().encode(text);
+
+  // COM segment length field is 2 bytes (max 65535, including the 2-byte length field itself)
+  // So max text payload is 65533 bytes
+  const MAX_COM_PAYLOAD = 65533;
+  if (textBytes.length > MAX_COM_PAYLOAD) {
+    throw new Error(`Metadata text too large for JPEG COM segment (${textBytes.length} bytes > ${MAX_COM_PAYLOAD} bytes max). Consider using a shorter prompt.`);
+  }
+
+  // COM marker: FF FE, Length: 2 + textBytes.length
+  const comSegment = new Uint8Array(2 + 2 + textBytes.length);
+  comSegment[0] = 0xFF;
+  comSegment[1] = 0xFE;
+  comSegment[2] = ((textBytes.length + 2) >> 8) & 0xFF;
+  comSegment[3] = (textBytes.length + 2) & 0xFF;
+  comSegment.set(textBytes, 4);
+
+  // JPEG/AVIF (Exif) の場合、SOI (FF D8) または ftyp の直後に挿入
+  let insertPos = 2;
+  if (view[0] !== 0xFF || view[1] !== 0xD8) {
+    // AVIF の場合は ftyp チャンクの次
+    const ftypIndex = findSequence(view, [0x66, 0x74, 0x79, 0x70]);
+    if (ftypIndex !== -1) {
+      const size = (view[ftypIndex - 4] << 24) | (view[ftypIndex - 3] << 16) | (view[ftypIndex - 2] << 8) | view[ftypIndex - 1];
+      insertPos = ftypIndex - 4 + size;
+    }
+  }
+
+  const out = new Uint8Array(view.length + comSegment.length);
+  out.set(view.slice(0, insertPos), 0);
+  out.set(comSegment, insertPos);
+  out.set(view.slice(insertPos), insertPos + comSegment.length);
+
+  return out;
 }

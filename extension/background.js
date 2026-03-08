@@ -1,4 +1,9 @@
 // background.js - Universal Background Script (Chrome & Firefox)
+try {
+    importScripts('pako.js', 'jszip.min.js', 'parser.js');
+} catch (e) {
+    console.error('[AI Meta Viewer] Failed to import scripts in Service Worker:', e);
+}
 
 // ブラウザAPI統一（Chrome/Firefox両対応）
 const browserAPI = (() => {
@@ -482,7 +487,15 @@ const DEFAULT_SETTINGS = {
     downloaderFolderMode: 'id_pageTitle', // 'id_pageTitle', 'pageTitle', 'domain', 'none'
     downloaderBaseFolder: 'AI_Meta_Viewer',
     downloaderUseRoot: false,
-    version: '1.4.0'
+    version: '1.5.3',
+    // 共有設定の追加
+    modalWidth: 800,
+    modalHeight: 600,
+    modalX: 'center',
+    modalY: 'center',
+    enableMetadataEditing: false,
+    advancedModeEnabled: false,
+    enableExperimentalWriting: false
 };
 
 // 現在の設定（起動時に読み込み）
@@ -621,7 +634,102 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
             });
         return true;
     }
+
+    if (request.action === 'writeMetadataAndDownload') {
+        handleWriteMetadataAndDownload(request.imageUrl, request.metadata)
+            .then(sendResponse)
+            .catch(error => {
+                console.error('Write metadata error:', error);
+                sendResponse({ success: false, error: error.message });
+            });
+        return true;
+    }
 });
+
+/**
+ * メタデータを書き換えてダウンロードを実行
+ * (隠し機能)
+ */
+async function handleWriteMetadataAndDownload(imageUrl, metadataObj) {
+    debugLog('[AI Meta Viewer] Starting metadata rewrite/download for:', imageUrl);
+    try {
+        const response = await fetch(imageUrl);
+        if (!response.ok) throw new Error(`Failed to fetch image: ${response.status}`);
+
+        const buffer = await response.arrayBuffer();
+
+        // メタデータの統合 (Positive, Negative, Other を A1111 形式に再構成)
+        let finalMetadataText = '';
+        if (typeof metadataObj === 'string') {
+            finalMetadataText = metadataObj;
+        } else {
+            const { positive, negative, other } = metadataObj;
+            finalMetadataText = (positive || '').trim();
+            if (negative && negative.trim()) {
+                finalMetadataText += `\nNegative prompt: ${(negative || '').trim()}`;
+            }
+            if (other && other.trim()) {
+                finalMetadataText += `\n${(other || '').trim()}`;
+            }
+        }
+
+        const modifiedBytes = await rewriteImageMetadata(buffer, finalMetadataText);
+        const format = detectImageFormat(buffer);
+        const mimeType = format === 'png' ? 'image/png' : format === 'webp' ? 'image/webp' : format === 'avif' ? 'image/avif' : 'image/jpeg';
+        const blob = new Blob([modifiedBytes], { type: mimeType });
+
+        // Service Worker 環境での Data URL 化
+        const dataUrl = await new Promise((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onloadend = () => resolve(reader.result);
+            reader.onerror = reject;
+            reader.readAsDataURL(blob);
+        });
+
+        // 元のファイル名を維持
+        const urlObj = new URL(imageUrl);
+        const pathSegments = urlObj.pathname.split('/');
+        let filename = pathSegments.pop() || 'image';
+
+        // デコードとクエリパラメータ除去
+        try {
+            filename = decodeURIComponent(filename.split('?')[0]);
+        } catch (e) {
+            filename = filename.split('?')[0];
+        }
+
+        // 元のベース名と拡張子を分離
+        const dotIndex = filename.lastIndexOf('.');
+        let baseName = dotIndex !== -1 ? filename.substring(0, dotIndex) : filename;
+        // 拡張子を小文字に正規化
+        const extension = (dotIndex !== -1 ? filename.substring(dotIndex) : `.${format || 'png'}`).toLowerCase();
+
+        // ファイル名として不適切な文字を置換 (Windows/OSの制限)
+        baseName = baseName.replace(/[\\/:*?"<>|]/g, '_');
+
+        // ファイル名長制限
+        const MAX_BASENAME_LENGTH = 80;
+        if (baseName.length > MAX_BASENAME_LENGTH) {
+            baseName = baseName.substring(0, MAX_BASENAME_LENGTH);
+        }
+
+        // フォルダ名をプレフィックスとして付与し、ブラウザに「意図的な保存」であることを伝える
+        // これにより Data URL 使用時でも指定名が優先されやすくなる
+        const finalPath = `AI_Meta_Viewer/${baseName}_edited${extension}`;
+        debugLog('[AI Meta Viewer] Final download path:', finalPath);
+        debugLog('[AI Meta Viewer] Data URL length:', dataUrl.length);
+
+        await chrome.downloads.download({
+            url: dataUrl,
+            filename: finalPath,
+            saveAs: true
+        });
+
+        return { success: true };
+    } catch (e) {
+        throw e;
+    }
+}
 
 /**
  * メディアのファイルサイズを取得(HEADリクエスト)

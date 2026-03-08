@@ -464,6 +464,65 @@
                 </div>
             </div>
 
+            <!-- ウィンドウ表示設定 -->
+            <div class="section">
+                <h2 class="section-title" data-i18n="sectionWindowDisplay">Window Display</h2>
+                <div class="setting-item">
+                    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px;">
+                        <div class="input-group">
+                            <label for="modalWidth" data-i18n="labelModalWidth">Width (px)</label>
+                            <input type="number" id="modalWidth" min="300" max="2000">
+                        </div>
+                        <div class="input-group">
+                            <label for="modalHeight" data-i18n="labelModalHeight">Height (px)</label>
+                            <input type="number" id="modalHeight" min="200" max="2000">
+                        </div>
+                    </div>
+                </div>
+                <div class="setting-item">
+                    <p class="input-helper">Position (Current: <span id="currentPos">Auto</span>)</p>
+                    <button class="btn btn-secondary" id="resetWindowBtn"
+                        style="margin-top: 8px; width: auto; font-size: 12px; padding: 6px 12px;"
+                        data-i18n="btnResetWindow">Reset Size &
+                        Position</button>
+                </div>
+            </div>
+
+            <!-- 編集設定 -->
+            <div class="section">
+                <h2 class="section-title" data-i18n="sectionMetadataInteraction">Metadata Interaction</h2>
+                <div class="setting-item">
+                    <label class="setting-label">
+                        <input type="checkbox" id="enableMetadataEditing">
+                        <div class="setting-label-text">
+                            <div class="setting-label-title" data-i18n="labelEnableMetadataEditing">Enable Metadata
+                                Editing</div>
+                            <div class="setting-label-desc" data-i18n="descEnableMetadataEditing">Allow editing metadata
+                                text directly in the viewer modal
+                                (Experimental)</div>
+                        </div>
+                    </label>
+                </div>
+            </div>
+
+            <!-- 高度な設定 (Hidden) -->
+            <div id="advancedSection" class="section"
+                style="display: none; border: 2px dashed #f44336; padding: 20px; border-radius: 12px; background: #fff5f5; margin-bottom: 20px;">
+                <h2 class="section-title" style="color: #d32f2f; margin-bottom: 12px;">🔥 Advanced Experimental Features
+                </h2>
+                <div class="setting-item">
+                    <label class="setting-label" style="background: transparent;">
+                        <input type="checkbox" id="enableExperimentalWriting">
+                        <div class="setting-label-text">
+                            <div class="setting-label-title" style="color: #333;">Enable metadata rewrite and download
+                            </div>
+                            <div class="setting-label-desc" style="color: #666;">Adds a button to download a new image
+                                with modified metadata embedded (PNG only)</div>
+                        </div>
+                    </label>
+                </div>
+            </div>
+
             <!-- 保存・リセットボタン -->
             <div class="button-group">
                 <button class="btn btn-primary" id="saveBtn" data-i18n="btnSave">💾 Save</button>
@@ -471,6 +530,10 @@
             </div>
 
             <div class="status-message" id="statusMessage"></div>
+
+            <div style="text-align: center; margin-top: 20px; color: #999; font-size: 12px;">
+                AI Meta Viewer <span id="versionDisplay" style="user-select: none;">v1.x.x</span>
+            </div>
         </div>
     </div>
 
