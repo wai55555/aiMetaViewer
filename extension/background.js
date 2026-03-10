@@ -1329,13 +1329,13 @@ function stopKeepAlive() {
 startKeepAlive();
 
 // Service Worker 停止時にキャッシュインデックスを即時保存
-chrome.runtime.onSuspend.addListener(() => {
+chrome.runtime.onSuspend.addListener(async () => {
     if (metadataCache.saveTimer) {
         clearTimeout(metadataCache.saveTimer);
         metadataCache.saveTimer = null;
     }
-    // デバウンス待ちの保存を即時実行
-    metadataCache.storage.set({
+    // デバウンス待ちの保存を即時実行（awaitでService Worker停止前に完了を保証）
+    await metadataCache.storage.set({
         [metadataCache.metaKey]: Array.from(metadataCache.index.entries())
     });
 });
