@@ -690,6 +690,7 @@ function observeGenericSafetensorsLinks() {
     if (!document.body) {
         debugLog('[AI Meta Viewer] document.body not found, waiting for DOMContentLoaded to start safetensors observer');
         document.addEventListener('DOMContentLoaded', () => {
+            if (!document.body) return; // R5: DOMContentLoaded後もbodyがない場合（リダイレクトページ等）は中断
             safetensorsObserver.observe(document.body, { childList: true, subtree: true });
             debugLog('[AI Meta Viewer] Generic safetensors link observer started (deferred)');
         }, { once: true });
