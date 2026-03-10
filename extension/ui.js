@@ -548,7 +548,7 @@ function createModal(metadata, imageUrl = null) {
         writeBtn.className = 'ai-meta-copy-all-btn';
         writeBtn.textContent = 'Update & Download';
         writeBtn.style.backgroundColor = '#d32f2f'; // 警告色
-        writeBtn.setAttribute('data-tooltip', '埋め込みメタデータを更新してダウンロード(PNGのみ)');
+        writeBtn.setAttribute('data-tooltip', '埋め込みメタデータを更新してダウンロード (PNG/WebP/JPEG対応、AVIFは非対応)');
 
         writeBtn.onclick = async (e) => {
             e.stopPropagation();
@@ -563,7 +563,15 @@ function createModal(metadata, imageUrl = null) {
                 else if (label === 'Other Settings') metadataPayload.other = area.innerText;
             });
 
-            if (window.confirm('編集したメタデータで画像を再保存（ダウンロード）しますか？\n※元のファイルは変更されません。')) {
+            // ステルスメタデータの警告
+            const hasStealthData = metadata && Object.keys(metadata).some(k =>
+                k.startsWith('Stealth PNG Info')
+            );
+            const stealthWarning = hasStealthData
+                ? '\n\n⚠ この画像にはアルファチャンネルに隠されたステルスメタデータが含まれています。\n保存後もステルスデータは残ります。'
+                : '';
+
+            if (window.confirm(`編集したメタデータで画像を再保存（ダウンロード）しますか？\n※元のファイルは変更されません。${stealthWarning}`)) {
                 writeBtn.disabled = true;
                 writeBtn.textContent = 'Processing...';
                 try {
