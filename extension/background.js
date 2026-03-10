@@ -487,7 +487,7 @@ const DEFAULT_SETTINGS = {
     downloaderFolderMode: 'id_pageTitle', // 'id_pageTitle', 'pageTitle', 'domain', 'none'
     downloaderBaseFolder: 'AI_Meta_Viewer',
     downloaderUseRoot: false,
-    version: '1.5.4',
+    version: '1.5.4.1',
     // 共有設定の追加
     modalWidth: 800,
     modalHeight: 600,
@@ -969,6 +969,12 @@ async function handleCivitaiZipDownload(images, context) {
  */
 async function handleFetchImageMetadata(imageUrl, base64Data = null) {
     debugLog('[AI Meta Viewer] Fetching metadata for:', imageUrl);
+
+    // blob: URL は Service Worker からアクセス不可のためスキップ
+    if (imageUrl.startsWith('blob:')) {
+        debugLog('[AI Meta Viewer] Skipping blob: URL (not accessible from Service Worker):', imageUrl);
+        return { success: true, metadata: {} };
+    }
 
     // 1. キャッシュチェック (Async)
     const cachedMetadata = await metadataCache.get(imageUrl);
