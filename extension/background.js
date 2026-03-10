@@ -487,7 +487,7 @@ const DEFAULT_SETTINGS = {
     downloaderFolderMode: 'id_pageTitle', // 'id_pageTitle', 'pageTitle', 'domain', 'none'
     downloaderBaseFolder: 'AI_Meta_Viewer',
     downloaderUseRoot: false,
-    version: '1.5.3',
+    version: '1.5.4',
     // 共有設定の追加
     modalWidth: 800,
     modalHeight: 600,
@@ -1057,11 +1057,15 @@ async function handleFetchImageMetadata(imageUrl, base64Data = null) {
                     const controller = new AbortController();
                     const timeoutId = setTimeout(() => controller.abort(), 10000);
 
-                    const response = await fetch(activeUrl, {
-                        headers: { 'Range': `bytes=0-${rangeSize}` },
-                        signal: controller.signal
-                    });
-                    clearTimeout(timeoutId);
+                    let response;
+                    try {
+                        response = await fetch(activeUrl, {
+                            headers: { 'Range': `bytes=0-${rangeSize}` },
+                            signal: controller.signal
+                        });
+                    } finally {
+                        clearTimeout(timeoutId);
+                    }
 
                     if (response.status === 206) {
                         isRangeRequest = true;
@@ -1120,11 +1124,15 @@ async function handleFetchImageMetadata(imageUrl, base64Data = null) {
                     try {
                         const controller = new AbortController();
                         const timeoutId = setTimeout(() => controller.abort(), 10000);
-                        const tailResponse = await fetch(activeUrl, {
-                            headers: { 'Range': `bytes=${tailStart}-` },
-                            signal: controller.signal
-                        });
-                        clearTimeout(timeoutId);
+                        let tailResponse;
+                        try {
+                            tailResponse = await fetch(activeUrl, {
+                                headers: { 'Range': `bytes=${tailStart}-` },
+                                signal: controller.signal
+                            });
+                        } finally {
+                            clearTimeout(timeoutId);
+                        }
 
                         if (tailResponse.status === 206 || tailResponse.status === 200) {
                             const tailBuffer = await tailResponse.arrayBuffer();
@@ -1167,11 +1175,15 @@ async function handleFetchImageMetadata(imageUrl, base64Data = null) {
                     try {
                         const controller = new AbortController();
                         const timeoutId = setTimeout(() => controller.abort(), 10000);
-                        const retryResponse = await fetch(activeUrl, {
-                            headers: { 'Range': `bytes=0-${retrySize}` },
-                            signal: controller.signal
-                        });
-                        clearTimeout(timeoutId);
+                        let retryResponse;
+                        try {
+                            retryResponse = await fetch(activeUrl, {
+                                headers: { 'Range': `bytes=0-${retrySize}` },
+                                signal: controller.signal
+                            });
+                        } finally {
+                            clearTimeout(timeoutId);
+                        }
 
                         if (retryResponse.status === 206) {
                             const newBuffer = await retryResponse.arrayBuffer();
@@ -1315,6 +1327,18 @@ function stopKeepAlive() {
 
 // Service Worker の起動時にkeep-aliveを開始
 startKeepAlive();
+
+// Service Worker 停止時にキャッシュインデックスを即時保存
+chrome.runtime.onSuspend.addListener(() => {
+    if (metadataCache.saveTimer) {
+        clearTimeout(metadataCache.saveTimer);
+        metadataCache.saveTimer = null;
+    }
+    // デバウンス待ちの保存を即時実行
+    metadataCache.storage.set({
+        [metadataCache.metaKey]: Array.from(metadataCache.index.entries())
+    });
+});
 
 // Service Worker の動作確認用
 loadSettings().then(() => {

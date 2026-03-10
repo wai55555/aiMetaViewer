@@ -687,6 +687,15 @@ function observeGenericSafetensorsLinks() {
         }, 500);
     });
 
+    if (!document.body) {
+        debugLog('[AI Meta Viewer] document.body not found, waiting for DOMContentLoaded to start safetensors observer');
+        document.addEventListener('DOMContentLoaded', () => {
+            safetensorsObserver.observe(document.body, { childList: true, subtree: true });
+            debugLog('[AI Meta Viewer] Generic safetensors link observer started (deferred)');
+        }, { once: true });
+        return;
+    }
+
     safetensorsObserver.observe(document.body, {
         childList: true,
         subtree: true
@@ -876,37 +885,14 @@ function observeImages() {
     let globalUpdateTimeoutId = null;
 
     const observerCallback = (mutations) => {
-        if (timeoutId) {
-            clearTimeout(timeoutId);
-        }
-
-        // 頻繁な実行を防ぐため、デバウンスを入れる
-        // Pixivなどの高速スクロールに対応するため、100msから30msに短縮
-        timeoutId = setTimeout(() => {
-            processPendingNodes();
-        }, 30);
-
-        // フルスクリーンモーダルなどが開いた際にバッジの遮蔽状態を再計算する
-        // DOMの追加・削除があった場合に実行
-        // ここもデバウンスする
-        if (globalUpdateTimeoutId) {
-            clearTimeout(globalUpdateTimeoutId);
-        }
-        globalUpdateTimeoutId = setTimeout(() => {
-            if (typeof window.forceUpdateAllBadges === 'function') {
-                window.forceUpdateAllBadges();
-            }
-        }, 150); // processPendingNodesより少し後に実行
-
+        // まず pendingNodes にノードを追加してからデバウンスタイマーを設定する
+        // (setTimeout コールバックは非同期だが、意図を明確にするため先に追加)
         mutations.forEach((mutation) => {
             mutation.addedNodes.forEach((node) => {
                 if (node.nodeType === 1) { // ELEMENT_NODE
                     pendingNodes.add(node);
                 }
             });
-
-            // サイト個別の要素チェックは初期化時のみ実行（無限ループ防止）
-            // observeSiteSpecificElements(); // この行を削除
 
             mutation.removedNodes.forEach((node) => {
                 if (node.nodeType === 1) {
@@ -933,6 +919,28 @@ function observeImages() {
                 }
             }
         });
+
+        if (timeoutId) {
+            clearTimeout(timeoutId);
+        }
+
+        // 頻繁な実行を防ぐため、デバウンスを入れる
+        // Pixivなどの高速スクロールに対応するため、100msから30msに短縮
+        timeoutId = setTimeout(() => {
+            processPendingNodes();
+        }, 30);
+
+        // フルスクリーンモーダルなどが開いた際にバッジの遮蔽状態を再計算する
+        // DOMの追加・削除があった場合に実行
+        // ここもデバウンスする
+        if (globalUpdateTimeoutId) {
+            clearTimeout(globalUpdateTimeoutId);
+        }
+        globalUpdateTimeoutId = setTimeout(() => {
+            if (typeof window.forceUpdateAllBadges === 'function') {
+                window.forceUpdateAllBadges();
+            }
+        }, 150); // processPendingNodesより少し後に実行
     };
 
     const setupObserver = () => {
