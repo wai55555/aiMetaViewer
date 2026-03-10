@@ -101,7 +101,7 @@ class PersistentLRUCache {
             } catch (e) {
                 console.error('Cache index save error:', e);
             }
-        }, 2000);
+        }, 500); // R1-c: デバウンス短縮（2000ms→500ms）でonSuspend前に保存される確率を向上
     }
 
     async get(url) {
@@ -1334,10 +1334,14 @@ chrome.runtime.onSuspend.addListener(async () => {
         clearTimeout(metadataCache.saveTimer);
         metadataCache.saveTimer = null;
     }
-    // デバウンス待ちの保存を即時実行（awaitでService Worker停止前に完了を保証）
-    await metadataCache.storage.set({
-        [metadataCache.metaKey]: Array.from(metadataCache.index.entries())
-    });
+    // デバウンス待ちの保存を即時実行（ベストエフォート: onSuspend内の非同期完了は仕様上保証されない）
+    try {
+        await metadataCache.storage.set({
+            [metadataCache.metaKey]: Array.from(metadataCache.index.entries())
+        });
+    } catch (e) {
+        console.error('[AI Meta Viewer] Failed to save cache index on suspend:', e);
+    }
 });
 
 // Service Worker の動作確認用
