@@ -1127,6 +1127,8 @@ async function handleFetchImageMetadata(imageUrl, base64Data = null) {
                     try {
                         const fullBuffer = await safeFetchFull(activeUrl);
                         buffer = fullBuffer;
+                        totalFileSize = buffer.byteLength; // totalFileSize を更新
+                        isRangeRequest = true; // 以降の tail fetch ロジックを有効化
                         metadata = extractMetadata(buffer);
                     } catch (fullFetchError) {
                         debugLog('[AI Meta Viewer] ⚠ Full fetch fallback failed:', fullFetchError.message);
@@ -1135,7 +1137,7 @@ async function handleFetchImageMetadata(imageUrl, base64Data = null) {
 
                 // ComfyUI (PNGの末尾にメタデータがあるパターン)
                 // W2: totalFileSize が異常に小さい場合（W1の問題発生時）は tail fetch をスキップ
-                else if (metadata.requiresTailFetch && totalFileSize > 65535) {
+                if (metadata.requiresTailFetch && totalFileSize > 65535 && isRangeRequest) {
                     const tailSize = 131072; // 末尾 128KB 取得
                     let tailStart = totalFileSize - tailSize;
                     if (tailStart < 65536) tailStart = 65536; // 既取得分と被らないように
