@@ -1220,6 +1220,7 @@ async function handleFetchImageMetadata(imageUrl, base64Data = null) {
                                 if (nextMetadata.isIncomplete) {
                                     debugLog('[AI Meta Viewer] ⚠ Still incomplete. Falling back to safe full fetch.');
                                     const fullBuffer = await safeFetchFull(activeUrl);
+                                    buffer = fullBuffer; // buffer を更新
                                     metadata = extractMetadata(fullBuffer);
                                 } else {
                                     metadata = nextMetadata;
@@ -1228,12 +1229,14 @@ async function handleFetchImageMetadata(imageUrl, base64Data = null) {
                             } else {
                                 debugLog('[AI Meta Viewer] ⚠ Retry Range failed, falling back to safe full fetch.');
                                 const fullBuffer = await safeFetchFull(activeUrl);
+                                buffer = fullBuffer; // buffer を更新
                                 metadata = extractMetadata(fullBuffer);
                             }
                             isRangeRequest = false;
                         } catch (retryError) {
                             debugLog('[AI Meta Viewer] ⚠ Range retry failed, final attempt with safe full fetch:', retryError.message);
                             const fullBuffer = await safeFetchFull(activeUrl);
+                            buffer = fullBuffer; // buffer を更新
                             metadata = extractMetadata(fullBuffer);
                             isRangeRequest = false;
                         }
