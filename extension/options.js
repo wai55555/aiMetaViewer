@@ -21,7 +21,7 @@ const DEFAULT_SETTINGS = {
     enableMetadataEditing: false,
     enableExperimentalWriting: false,
     advancedModeEnabled: false,
-    version: '1.5.4.1'
+    version: '1.5.4.2'
 };
 
 // DOM Elements

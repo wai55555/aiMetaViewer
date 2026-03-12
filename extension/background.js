@@ -487,7 +487,7 @@ const DEFAULT_SETTINGS = {
     downloaderFolderMode: 'id_pageTitle', // 'id_pageTitle', 'pageTitle', 'domain', 'none'
     downloaderBaseFolder: 'AI_Meta_Viewer',
     downloaderUseRoot: false,
-    version: '1.5.4.1',
+    version: '1.5.4.2',
     // 共有設定の追加
     modalWidth: 800,
     modalHeight: 600,
@@ -1118,10 +1118,24 @@ async function handleFetchImageMetadata(imageUrl, base64Data = null) {
             metadata = extractMetadata(buffer);
 
             // メタデータ不足時の再試行ロジック
-            if (metadata.isIncomplete && isRangeRequest) {
+            if (metadata.isIncomplete) {
+
+                if (!isRangeRequest) {
+                    // file:// URL 等で Range が暗黙的に効いてバッファが切り詰められたケース
+                    // safeFetchFull で全ファイルを取得して再解析
+                    debugLog('[AI Meta Viewer] ⚠ Metadata incomplete but not a Range request. Attempting full fetch fallback.');
+                    try {
+                        const fullBuffer = await safeFetchFull(activeUrl);
+                        buffer = fullBuffer;
+                        metadata = extractMetadata(buffer);
+                    } catch (fullFetchError) {
+                        debugLog('[AI Meta Viewer] ⚠ Full fetch fallback failed:', fullFetchError.message);
+                    }
+                }
 
                 // ComfyUI (PNGの末尾にメタデータがあるパターン)
-                if (metadata.requiresTailFetch && totalFileSize > 65535) {
+                // W2: totalFileSize が異常に小さい場合（W1の問題発生時）は tail fetch をスキップ
+                else if (metadata.requiresTailFetch && totalFileSize > 65535) {
                     const tailSize = 131072; // 末尾 128KB 取得
                     let tailStart = totalFileSize - tailSize;
                     if (tailStart < 65536) tailStart = 65536; // 既取得分と被らないように
