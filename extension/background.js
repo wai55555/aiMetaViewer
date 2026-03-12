@@ -1128,19 +1128,23 @@ async function handleFetchImageMetadata(imageUrl, base64Data = null) {
                         const fullBuffer = await safeFetchFull(activeUrl);
                         buffer = fullBuffer;
                         totalFileSize = buffer.byteLength; // totalFileSize を更新
-                        isRangeRequest = true; // 以降の tail fetch ロジックを有効化
                         metadata = extractMetadata(buffer);
 
                         // full fetch 成功後、完全なメタデータが取得できた場合は以降の再試行をスキップ
                         if (!metadata.isIncomplete) {
                             debugLog('[AI Meta Viewer] ✅ Full fetch successful, metadata complete.');
+                            // isRangeRequest は false のまま（Stealth PNG チェックでの重複ダウンロードを防ぐ）
+                        } else {
+                            // まだ incomplete の場合のみ、tail fetch を有効化
+                            isRangeRequest = true;
                         }
                     } catch (fullFetchError) {
                         debugLog('[AI Meta Viewer] ⚠ Full fetch fallback failed:', fullFetchError.message);
                     }
                 }
 
-                // full fetch 後に完全なメタデータが取得できた場合は以降をスキップ
+                // full fetch 後も metadata.isIncomplete を再チェック
+                // 完全なメタデータが取得できた場合は以降の再試行をスキップ
                 if (metadata.isIncomplete) {
                     // ComfyUI (PNGの末尾にメタデータがあるパターン)
                     // W2: totalFileSize が異常に小さい場合（W1の問題発生時）は tail fetch をスキップ
@@ -1220,7 +1224,8 @@ async function handleFetchImageMetadata(imageUrl, base64Data = null) {
                                 if (nextMetadata.isIncomplete) {
                                     debugLog('[AI Meta Viewer] ⚠ Still incomplete. Falling back to safe full fetch.');
                                     const fullBuffer = await safeFetchFull(activeUrl);
-                                    buffer = fullBuffer; // buffer を更新
+                                    buffer = fullBuffer;
+                                    totalFileSize = buffer.byteLength; // totalFileSize を更新
                                     metadata = extractMetadata(fullBuffer);
                                 } else {
                                     metadata = nextMetadata;
@@ -1229,14 +1234,16 @@ async function handleFetchImageMetadata(imageUrl, base64Data = null) {
                             } else {
                                 debugLog('[AI Meta Viewer] ⚠ Retry Range failed, falling back to safe full fetch.');
                                 const fullBuffer = await safeFetchFull(activeUrl);
-                                buffer = fullBuffer; // buffer を更新
+                                buffer = fullBuffer;
+                                totalFileSize = buffer.byteLength; // totalFileSize を更新
                                 metadata = extractMetadata(fullBuffer);
                             }
                             isRangeRequest = false;
                         } catch (retryError) {
                             debugLog('[AI Meta Viewer] ⚠ Range retry failed, final attempt with safe full fetch:', retryError.message);
                             const fullBuffer = await safeFetchFull(activeUrl);
-                            buffer = fullBuffer; // buffer を更新
+                            buffer = fullBuffer;
+                            totalFileSize = buffer.byteLength; // totalFileSize を更新
                             metadata = extractMetadata(fullBuffer);
                             isRangeRequest = false;
                         }
