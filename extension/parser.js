@@ -332,7 +332,11 @@ function extractWebpMetadata(buffer) {
 
   // RIFFサイズ (Little Endian)
   const riffSize = view[4] | (view[5] << 8) | (view[6] << 16) | (view[7] << 24);
-  const totalSize = riffSize + 8;
+  const declaredSize = riffSize + 8;
+  // W1: 壊れたRIFFサイズフィールドへの対処
+  // declaredSize が実バッファより小さい場合、RIFFサイズが壊れている可能性がある
+  // Math.max で実バッファサイズを使用し、チャンク走査を末尾まで続行させる
+  const totalSize = Math.max(declaredSize, view.length);
 
   // RIFFヘッダーをスキップ (12バイト: "RIFF" + size + "WEBP")
   let offset = 12;
