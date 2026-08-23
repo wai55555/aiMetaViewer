@@ -19,7 +19,9 @@ window.DEFAULT_SETTINGS = {
     // 編集・隠し機能設定
     enableMetadataEditing: false,   // メタデータの編集を許可
     advancedModeEnabled: false,
-    enableExperimentalWriting: false
+    enableExperimentalWriting: false,
+    // スキャン機能設定
+    disableScanner: false           // ページスキャン機能（AIメタデータ検出画像の一覧表示・ダウンロード）の無効化
 };
 
 // 現在の設定（グローバル変数として公開）

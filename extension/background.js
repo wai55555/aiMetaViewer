@@ -495,7 +495,9 @@ const DEFAULT_SETTINGS = {
     modalY: 'center',
     enableMetadataEditing: false,
     advancedModeEnabled: false,
-    enableExperimentalWriting: false
+    enableExperimentalWriting: false,
+    // スキャン機能設定
+    disableScanner: false // ページスキャン機能の無効化
 };
 
 // 現在の設定（起動時に読み込み）
@@ -758,8 +760,21 @@ async function handleGetMediaSize(url) {
 /**
  * 拡張機能アイコンがクリックされた時の処理
  */
-chrome.action.onClicked.addListener((tab) => {
+chrome.action.onClicked.addListener(async (tab) => {
     debugLog('[AI Meta Viewer] Extension icon clicked on tab:', tab.id);
+
+    // スキャン機能が無効化されている場合は何もしない
+    // (Service Worker 再起動直後でも確実に判定できるよう、ストレージから直接読み込む)
+    try {
+        const { disableScanner } = await chrome.storage.sync.get({ disableScanner: false });
+        if (disableScanner) {
+            debugLog('[AI Meta Viewer] Scanner is disabled by settings, ignoring icon click');
+            return;
+        }
+    } catch (e) {
+        debugLog('[AI Meta Viewer] Failed to check scanner setting:', e);
+    }
+
     chrome.tabs.sendMessage(tab.id, { action: 'scanPage' }).catch(err => {
         console.error('[AI Meta Viewer] Failed to send scanPage message:', err);
     });

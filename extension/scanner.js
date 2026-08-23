@@ -31,6 +31,14 @@ async function handleScanRequest(request, sendResponse) {
         const settings = typeof loadSettings !== 'undefined' ? await loadSettings() : window.settings;
         debugLog('[AI Meta Viewer] Scan request received, settings:', settings);
 
+        // スキャン機能が無効化されている場合はスキップ
+        if (settings.disableScanner) {
+            debugLog('[AI Meta Viewer] Scanner is disabled by settings');
+            showNotification('Scanner is disabled in extension settings');
+            sendResponse({ success: false, error: 'Scanner is disabled' });
+            return;
+        }
+
         // Show scanning overlay
         const overlayData = showScanningOverlay(0);
         const { overlay, updateProgress, cancelButton } = overlayData;
@@ -78,6 +86,13 @@ async function scanAllImages() {
         return;
     }
     const settings = typeof loadSettings !== 'undefined' ? await loadSettings() : window.settings;
+
+    // スキャン機能が無効化されている場合はスキップ
+    if (settings.disableScanner) {
+        debugLog('[AI Meta Viewer] Scanner is disabled by settings');
+        return;
+    }
+
     debugLog('[AI Meta Viewer] Starting full page scan...');
 
     const result = await executeScan(settings);

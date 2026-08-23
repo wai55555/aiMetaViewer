@@ -32,6 +32,15 @@
     "descShowAnalyzingBadge": {
         "message": "メタデータチェック中に\"Analyzing...\"を表示します（Pixivのみ）"
     },
+    "sectionScanner": {
+        "message": "拡張機能ボタン"
+    },
+    "labelDisableScanner": {
+        "message": "拡張機能ボタンの一括ダウンロードを無効化"
+    },
+    "descDisableScanner": {
+        "message": "拡張機能ボタンから起動する画像の一覧表示と一括ダウンロードを無効化します。"
+    },
     "sectionExcludedSites": {
         "message": "除外サイト"
     },
