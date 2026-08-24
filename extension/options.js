@@ -21,6 +21,7 @@ const DEFAULT_SETTINGS = {
     enableMetadataEditing: false,
     enableExperimentalWriting: false,
     advancedModeEnabled: false,
+    disableScanner: false,
     version: '1.5.4.2'
 };
 
@@ -31,6 +32,7 @@ const minPixelCountInput = document.getElementById('minPixelCount');
 const minImageSizeInput = document.getElementById('minImageSize');
 const showAnalyzingBadgeCheckbox = document.getElementById('showAnalyzingBadge');
 const analyzeEverywhereCheckbox = document.getElementById('analyzeEverywhere');
+const disableScannerCheckbox = document.getElementById('disableScanner');
 const excludedSitesTextarea = document.getElementById('excludedSites');
 const ignoredMetadataKeysTextarea = document.getElementById('ignoredMetadataKeys');
 const ignoredSoftwareTextarea = document.getElementById('ignoredSoftware');
@@ -209,6 +211,7 @@ async function loadSettings() {
     if (minImageSizeInput) minImageSizeInput.value = settings.minImageSize;
     if (showAnalyzingBadgeCheckbox) showAnalyzingBadgeCheckbox.checked = settings.showAnalyzingBadge;
     if (analyzeEverywhereCheckbox) analyzeEverywhereCheckbox.checked = settings.analyzeEverywhere;
+    if (disableScannerCheckbox) disableScannerCheckbox.checked = settings.disableScanner;
     if (excludedSitesTextarea) excludedSitesTextarea.value = settings.excludedSites.join('\n');
     if (ignoredMetadataKeysTextarea) ignoredMetadataKeysTextarea.value = settings.ignoredMetadataKeys.join('\n');
     if (ignoredSoftwareTextarea) ignoredSoftwareTextarea.value = settings.ignoredSoftware.join('\n');
@@ -266,6 +269,7 @@ async function saveSettings() {
         minImageSize: parseInt(minImageSizeInput ? minImageSizeInput.value : '200', 10) || 200,
         showAnalyzingBadge: showAnalyzingBadgeCheckbox ? showAnalyzingBadgeCheckbox.checked : true,
         analyzeEverywhere: analyzeEverywhereCheckbox ? analyzeEverywhereCheckbox.checked : false,
+        disableScanner: disableScannerCheckbox ? disableScannerCheckbox.checked : false,
         excludedSites: excludedSites,
         ignoredMetadataKeys: ignoredMetadataKeys,
         ignoredSoftware: ignoredSoftware,

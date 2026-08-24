@@ -38,6 +38,15 @@
   "descAnalyzeEverywhere": {
     "message": "Display \"Analyzing...\" badge on all sites (Default: Pixiv & Local only)"
   },
+  "sectionScanner": {
+    "message": "Extension Button"
+  },
+  "labelDisableScanner": {
+    "message": "Disable Bulk Downloads from Extension Button"
+  },
+  "descDisableScanner": {
+    "message": "Disable the image list and bulk download launched from the extension button."
+  },
   "sectionExcludedSites": {
     "message": "Excluded Sites"
   },
