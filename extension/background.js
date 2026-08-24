@@ -244,15 +244,15 @@ class DataManager {
             debugLog(`[AI Meta Viewer] Cleared ${cacheItemCount} items from PersistentLRUCache`);
 
             // 2. rangeRequestBlockList のクリア
-            const blockedDomains = Array.from(rangeRequestBlockList);
-            const blockListCount = blockedDomains.length;
+            const blockListCount = rangeRequestBlockList.size;
             debugLog('[AI Meta Viewer] Clearing rangeRequestBlockList:', {
-                count: blockListCount,
-                domains: blockedDomains
+                count: blockListCount
             });
             rangeRequestBlockList.clear();
             result.clearedItems.rangeBlockList = blockListCount;
-            debugLog('[AI Meta Viewer] Cleared rangeRequestBlockList domains:', blockedDomains);
+            debugLog('[AI Meta Viewer] Cleared rangeRequestBlockList:', {
+                count: blockListCount
+            });
 
             // 3. Content Scripts への通知
             const notifiedTabs = await this.notifyContentScripts('clearMemoryCaches');
@@ -486,6 +486,7 @@ chrome.downloads.onChanged.addListener((delta) => {
 // クラッシュ（メモリ不足）を防ぐ。
 // .safetensors のヘッダー取得には先頭 64KB で十分なため、2MB もあれば非常に余裕がある。
 const FULL_FETCH_SIZE_LIMIT = 2 * 1024 * 1024; // 2MB
+const RANGE_REQUEST_TIMEOUT_MS = 10000; // Range取得の本文読み込みを含むタイムアウト
 
 // デフォルト設定
 const DEFAULT_SETTINGS = {
@@ -1106,49 +1107,52 @@ async function handleFetchImageMetadata(imageUrl, base64Data = null) {
                     });
 
                     const controller = new AbortController();
-                    const timeoutId = setTimeout(() => controller.abort(), 10000);
+                    const timeoutId = setTimeout(
+                        () => controller.abort(),
+                        RANGE_REQUEST_TIMEOUT_MS
+                    );
 
                     try {
                         response = await fetch(activeUrl, {
                             headers: { 'Range': rangeHeader },
                             signal: controller.signal
                         });
+
+                        debugLog('[AI Meta Viewer] Range Request response:', {
+                            domain: domain || '(unknown)',
+                            url: activeUrl,
+                            status: response.status,
+                            ok: response.ok,
+                            range: rangeHeader
+                        });
+
+                        if (response.status === 206) {
+                            isRangeRequest = true;
+                            buffer = await response.arrayBuffer(); // 通常の最初のバッファをパース用に割り当て
+
+                            // Content-Range からファイルの総サイズを取得
+                            const contentRange = response.headers.get('Content-Range');
+                            if (contentRange) {
+                                const match = contentRange.match(/\/(\d+)/);
+                                if (match) {
+                                    totalFileSize = parseInt(match[1], 10);
+                                    debugLog(`[AI Meta Viewer] Content total size: ${totalFileSize} bytes`);
+                                }
+                            }
+                        } else if (response.status === 200) {
+                            // サーバーがRangeを無視した場合
+                            const contentLength = parseInt(response.headers.get('Content-Length') || '0', 10);
+                            if (contentLength > FULL_FETCH_SIZE_LIMIT) {
+                                if (response.body) response.body.cancel();
+                                throw new Error(`Full content returned but exceeds limit: ${contentLength} bytes`);
+                            }
+                            buffer = await response.arrayBuffer();
+                            totalFileSize = buffer.byteLength;
+                        } else {
+                            throw new Error(`Range request failed with status ${response.status}`);
+                        }
                     } finally {
                         clearTimeout(timeoutId);
-                    }
-
-                    debugLog('[AI Meta Viewer] Range Request response:', {
-                        domain: domain || '(unknown)',
-                        url: activeUrl,
-                        status: response.status,
-                        ok: response.ok,
-                        range: rangeHeader
-                    });
-
-                    if (response.status === 206) {
-                        isRangeRequest = true;
-                        buffer = await response.arrayBuffer(); // 通常の最初のバッファをパース用に割り当て
-
-                        // Content-Range からファイルの総サイズを取得
-                        const contentRange = response.headers.get('Content-Range');
-                        if (contentRange) {
-                            const match = contentRange.match(/\/(\d+)/);
-                            if (match) {
-                                totalFileSize = parseInt(match[1], 10);
-                                debugLog(`[AI Meta Viewer] Content total size: ${totalFileSize} bytes`);
-                            }
-                        }
-                    } else if (response.status === 200) {
-                        // サーバーがRangeを無視した場合
-                        const contentLength = parseInt(response.headers.get('Content-Length') || '0', 10);
-                        if (contentLength > FULL_FETCH_SIZE_LIMIT) {
-                            if (response.body) response.body.cancel();
-                            throw new Error(`Full content returned but exceeds limit: ${contentLength} bytes`);
-                        }
-                        buffer = await response.arrayBuffer();
-                        totalFileSize = buffer.byteLength;
-                    } else {
-                        throw new Error(`Range request failed with status ${response.status}`);
                     }
 
                 } catch (e) {
@@ -1245,51 +1249,54 @@ async function handleFetchImageMetadata(imageUrl, base64Data = null) {
                         debugLog(`[AI Meta Viewer] ⚠ ComfyUI signature detected. Fetching tail for metadata: bytes=${tailStart}-`);
                         try {
                             const controller = new AbortController();
-                            const timeoutId = setTimeout(() => controller.abort(), 10000);
+                            const timeoutId = setTimeout(
+                                () => controller.abort(),
+                                RANGE_REQUEST_TIMEOUT_MS
+                            );
                             let tailResponse;
                             try {
                                 tailResponse = await fetch(activeUrl, {
                                     headers: { 'Range': `bytes=${tailStart}-` },
                                     signal: controller.signal
                                 });
+
+                                if (tailResponse.status === 206 || tailResponse.status === 200) {
+                                    const tailBuffer = await tailResponse.arrayBuffer();
+
+                                    // 画像形式に応じて適切な末尾解析器を呼び出す
+                                    const format = detectImageFormat(buffer);
+                                    let tailMetadata = {};
+
+                                    if (format === 'png') {
+                                        tailMetadata = extractPngTailMetadata(tailBuffer);
+                                    } else if (format === 'webp') {
+                                        tailMetadata = extractWebpTailMetadata(tailBuffer);
+                                    }
+
+                                    const foundKeys = Object.keys(tailMetadata);
+                                    if (foundKeys.length > 0) {
+                                        debugLog(`[AI Meta Viewer] ✅ Tail meta found: ${foundKeys.join(', ')}`);
+                                        Object.assign(metadata, tailMetadata);
+                                    } else {
+                                        debugLog('[AI Meta Viewer] ⚠ Tail Range fetched but no metadata found in tail.');
+                                    }
+
+                                    // フラグクリア
+                                    delete metadata.isIncomplete;
+                                    delete metadata.requiresTailFetch;
+                                } else {
+                                    const tailFailure = new Error(`HTTP ${tailResponse.status}`);
+                                    logRangeRequestFailure({
+                                        phase: 'tail',
+                                        domain,
+                                        url: activeUrl,
+                                        status: tailResponse.status,
+                                        error: tailFailure
+                                    });
+                                    debugLog(`[AI Meta Viewer] ⚠ Tail Range failed (Status: ${tailResponse.status}), giving up.`);
+                                }
                             } finally {
                                 clearTimeout(timeoutId);
-                            }
-
-                            if (tailResponse.status === 206 || tailResponse.status === 200) {
-                                const tailBuffer = await tailResponse.arrayBuffer();
-
-                                // 画像形式に応じて適切な末尾解析器を呼び出す
-                                const format = detectImageFormat(buffer);
-                                let tailMetadata = {};
-
-                                if (format === 'png') {
-                                    tailMetadata = extractPngTailMetadata(tailBuffer);
-                                } else if (format === 'webp') {
-                                    tailMetadata = extractWebpTailMetadata(tailBuffer);
-                                }
-
-                                const foundKeys = Object.keys(tailMetadata);
-                                if (foundKeys.length > 0) {
-                                    debugLog(`[AI Meta Viewer] ✅ Tail meta found: ${foundKeys.join(', ')}`);
-                                    Object.assign(metadata, tailMetadata);
-                                } else {
-                                    debugLog('[AI Meta Viewer] ⚠ Tail Range fetched but no metadata found in tail.');
-                                }
-
-                                // フラグクリア
-                                delete metadata.isIncomplete;
-                                delete metadata.requiresTailFetch;
-                            } else {
-                                const tailFailure = new Error(`HTTP ${tailResponse.status}`);
-                                logRangeRequestFailure({
-                                    phase: 'tail',
-                                    domain,
-                                    url: activeUrl,
-                                    status: tailResponse.status,
-                                    error: tailFailure
-                                });
-                                debugLog(`[AI Meta Viewer] ⚠ Tail Range failed (Status: ${tailResponse.status}), giving up.`);
                             }
                             isRangeRequest = false; // これ以上のフェッチを防ぐ
                         } catch (tailError) {
@@ -1318,54 +1325,57 @@ async function handleFetchImageMetadata(imageUrl, base64Data = null) {
                             });
 
                             const controller = new AbortController();
-                            const timeoutId = setTimeout(() => controller.abort(), 10000);
+                            const timeoutId = setTimeout(
+                                () => controller.abort(),
+                                RANGE_REQUEST_TIMEOUT_MS
+                            );
                             try {
                                 retryResponse = await fetch(activeUrl, {
                                     headers: { 'Range': retryRangeHeader },
                                     signal: controller.signal
                                 });
-                            } finally {
-                                clearTimeout(timeoutId);
-                            }
 
-                            debugLog('[AI Meta Viewer] Range Request retry response:', {
-                                domain: domain || '(unknown)',
-                                url: activeUrl,
-                                status: retryResponse.status,
-                                ok: retryResponse.ok,
-                                range: retryRangeHeader
-                            });
+                                debugLog('[AI Meta Viewer] Range Request retry response:', {
+                                    domain: domain || '(unknown)',
+                                    url: activeUrl,
+                                    status: retryResponse.status,
+                                    ok: retryResponse.ok,
+                                    range: retryRangeHeader
+                                });
 
-                            if (retryResponse.status === 206) {
-                                const newBuffer = await retryResponse.arrayBuffer();
-                                const nextMetadata = extractMetadata(newBuffer);
-                                if (nextMetadata.isIncomplete) {
-                                    debugLog('[AI Meta Viewer] ⚠ Still incomplete. Falling back to safe full fetch.');
+                                if (retryResponse.status === 206) {
+                                    const newBuffer = await retryResponse.arrayBuffer();
+                                    const nextMetadata = extractMetadata(newBuffer);
+                                    if (nextMetadata.isIncomplete) {
+                                        debugLog('[AI Meta Viewer] ⚠ Still incomplete. Falling back to safe full fetch.');
+                                        const fullBuffer = await safeFetchFull(activeUrl);
+                                        buffer = fullBuffer;
+                                        totalFileSize = buffer.byteLength; // totalFileSize を更新
+                                        metadata = extractMetadata(fullBuffer);
+                                    } else {
+                                        metadata = nextMetadata;
+                                        buffer = newBuffer;
+                                    }
+                                } else {
+                                    const retryFailure = new Error(`HTTP ${retryResponse.status}`);
+                                    logRangeRequestFailure({
+                                        phase: 'retry',
+                                        domain,
+                                        url: activeUrl,
+                                        status: retryResponse.status,
+                                        error: retryFailure
+                                    });
+                                    debugLog('[AI Meta Viewer] ⚠ Retry Range failed, falling back to safe full fetch.', {
+                                        domain: domain || '(unknown)',
+                                        status: retryResponse.status
+                                    });
                                     const fullBuffer = await safeFetchFull(activeUrl);
                                     buffer = fullBuffer;
                                     totalFileSize = buffer.byteLength; // totalFileSize を更新
                                     metadata = extractMetadata(fullBuffer);
-                                } else {
-                                    metadata = nextMetadata;
-                                    buffer = newBuffer;
                                 }
-                            } else {
-                                const retryFailure = new Error(`HTTP ${retryResponse.status}`);
-                                logRangeRequestFailure({
-                                    phase: 'retry',
-                                    domain,
-                                    url: activeUrl,
-                                    status: retryResponse.status,
-                                    error: retryFailure
-                                });
-                                debugLog('[AI Meta Viewer] ⚠ Retry Range failed, falling back to safe full fetch.', {
-                                    domain: domain || '(unknown)',
-                                    status: retryResponse.status
-                                });
-                                const fullBuffer = await safeFetchFull(activeUrl);
-                                buffer = fullBuffer;
-                                totalFileSize = buffer.byteLength; // totalFileSize を更新
-                                metadata = extractMetadata(fullBuffer);
+                            } finally {
+                                clearTimeout(timeoutId);
                             }
                             isRangeRequest = false;
                         } catch (retryError) {
