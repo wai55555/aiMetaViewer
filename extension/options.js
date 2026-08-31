@@ -22,7 +22,7 @@ const DEFAULT_SETTINGS = {
     enableExperimentalWriting: false,
     advancedModeEnabled: false,
     disableScanner: false,
-    version: '1.5.4.2'
+    version: '1.5.5'
 };
 
 // DOM Elements

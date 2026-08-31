@@ -180,10 +180,48 @@ const contentMetadataCache = new Map();
 // adapters.js に分離されました。
 
 /**
- * 画像のメタデータをチェックしてバッジを追加
- * @param {HTMLImageElement} img - 対象画像要素
+ * 解析中URLの登録簿。取り消し時に background へ通知するために使う。
+ * @type {WeakMap<HTMLImageElement, string>}
  */
-async function checkImageMetadata(img) {
+const activeAnalysisUrls = new WeakMap();
+
+/**
+ * 取り消し済み画像。URL候補の順次試行を打ち切るために使う。
+ * @type {WeakSet<HTMLImageElement>}
+ */
+const cancelledAnalyses = new WeakSet();
+
+/**
+ * 実行中の解析を background へ取り消し通知する
+ * @param {HTMLImageElement} img - 対象画像
+ */
+function cancelActiveAnalysis(img) {
+    cancelledAnalyses.add(img);
+    const url = activeAnalysisUrls.get(img);
+    if (!url) return;
+    debugLog('[AI Meta Viewer] Cancelling in-flight analysis:', url.substring(0, 80));
+    sendMessageToBrave({ action: 'cancelImageMetadata', imageUrl: url }).catch(() => {
+        // 取り消し通知の失敗は解析結果に影響しない
+    });
+}
+
+/**
+ * 解析の取り消し状態を解除する
+ * @param {HTMLImageElement} img - 対象画像
+ */
+function clearActiveAnalysis(img) {
+    activeAnalysisUrls.delete(img);
+    cancelledAnalyses.delete(img);
+}
+
+/**
+ * 画像のメタデータを確認する
+ * @param {HTMLImageElement} img - 対象画像要素
+ * @param {Object} [requestOptions] - 解析要求のオプション
+ * @param {string} [requestOptions.action] - background へ送る action。優先度を表す
+ */
+async function checkImageMetadata(img, requestOptions = {}) {
+    const fetchAction = requestOptions.action || 'fetchImageMetadata';
     debugLog('[AI Meta Viewer] checkImageMetadata() called for:', img.src);
 
     // 拡張機能のコンテキストが無効化されている場合は処理を停止
@@ -309,6 +347,12 @@ async function checkImageMetadata(img) {
         const urlsToTry = Array.isArray(targetUrl) ? targetUrl : [targetUrl];
 
         for (const url of urlsToTry) {
+            // 画面外へ出て取り消された場合は残りの候補を試行しない
+            if (cancelledAnalyses.has(img)) {
+                debugLog('[AI Meta Viewer] Analysis cancelled, stopping candidate loop:', url.substring(0, 80));
+                break;
+            }
+
             // キャッシュチェック
             if (contentMetadataCache.has(url)) {
                 metadata = contentMetadataCache.get(url);
@@ -320,8 +364,9 @@ async function checkImageMetadata(img) {
             }
 
             // メッセージペイロードの準備
+            // 優先度は action で表現し、fetchImageMetadata の契約へ項目を追加しない
             const message = {
-                action: 'fetchImageMetadata',
+                action: fetchAction,
                 imageUrl: url
             };
 
@@ -334,6 +379,8 @@ async function checkImageMetadata(img) {
 
             // Background Service Workerにメタデータ取得をリクエスト
             try {
+                // 取り消し通知で対象URLを特定できるよう登録しておく
+                activeAnalysisUrls.set(img, url);
                 const response = await sendMessageToBrave(message);
 
                 if (response && response.success && response.metadata) {
@@ -841,22 +888,218 @@ async function checkMetadataForElement(el) {
 
 // バッジ生成機能(addAnalyzingBadge, addBadgeToImage)などは badge_controller.js に移動しました
 
+// --- viewport 解析キュー ---
+// IntersectionObserver から即座に解析を開始すると、pixiv のような大量サムネイル
+// ページでスクロール中に数十本の全body取得が同時発火する。
+// 停留した画像だけを LIFO で順に解析し、画面外へ出たものは取り消す。
+// 同時実行の最終的な上限は background 側の集約ゲートが保証する。
+// ここでの上限は pending message を無制限に積まないためのものである。
+
+/** viewport 停留と判定するまでの待ち時間 */
+const ANALYSIS_SETTLE_DELAY_MS = 200;
+
+/** 待機列の最大長。これを超えたら viewport から最も遠いものを捨てる */
+const MAX_PENDING_ANALYSIS_QUEUE = 32;
+
+/** content script から同時に送る解析要求の上限 */
+const MAX_INFLIGHT_VIEWPORT_ANALYSES = 4;
+
+const viewportAnalysisQueue = {
+    /** @type {Map<HTMLImageElement, {sequence: number}>} */
+    pending: new Map(),
+    /** @type {Set<HTMLImageElement>} */
+    running: new Set(),
+    sequence: 0,
+    settleTimer: null,
+    observer: null,
+
+    /**
+     * viewport へ入った画像を待機列へ入れる。ここでは解析を開始しない。
+     * @param {HTMLImageElement} img - 対象画像
+     */
+    enqueue(img) {
+        if (this.running.has(img)) return;
+        if (this.pending.has(img)) return;
+        this.sequence += 1;
+        this.pending.set(img, { sequence: this.sequence, hover: false });
+        this.enforceQueueLimit();
+        this.scheduleSettle();
+    },
+
+    /**
+     * hover された画像を待機列の先頭へ昇格させ、停留待ちを飛ばして即座に開始する。
+     * 待機列が長くても、ユーザーが見ている画像を待たせない。
+     * @param {HTMLImageElement} img - 対象画像
+     */
+    promote(img) {
+        const entry = this.pending.get(img);
+        if (!entry) return;
+        this.sequence += 1;
+        this.pending.set(img, { sequence: this.sequence, hover: true });
+        if (this.settleTimer !== null) {
+            clearTimeout(this.settleTimer);
+            this.settleTimer = null;
+        }
+        this.drain();
+    },
+
+    /**
+     * 待機列が上限を超えたら viewport から最も遠いものを捨てる
+     */
+    enforceQueueLimit() {
+        while (this.pending.size > MAX_PENDING_ANALYSIS_QUEUE) {
+            let farthest = null;
+            let farthestDistance = -1;
+            for (const img of this.pending.keys()) {
+                const distance = distanceFromViewportCenter(img);
+                if (distance > farthestDistance) {
+                    farthestDistance = distance;
+                    farthest = img;
+                }
+            }
+            if (!farthest) return;
+            this.pending.delete(farthest);
+            debugLog('[AI Meta Viewer] Analysis queue overflow, dropped farthest image:', {
+                src: (farthest.src || '').substring(0, 80),
+                distance: farthestDistance
+            });
+        }
+    },
+
+    /** 停留判定タイマーを張り直す */
+    scheduleSettle() {
+        if (this.settleTimer !== null) clearTimeout(this.settleTimer);
+        this.settleTimer = setTimeout(() => {
+            this.settleTimer = null;
+            this.drain();
+        }, ANALYSIS_SETTLE_DELAY_MS);
+    },
+
+    /**
+     * 画面外へ出た画像の解析を取り消す。
+     * 待機中なら開始せず、実行中なら background へ取り消しを通知する。
+     * @param {HTMLImageElement} img - 対象画像
+     */
+    cancel(img) {
+        if (this.pending.delete(img)) {
+            debugLog('[AI Meta Viewer] Analysis cancelled before start:', (img.src || '').substring(0, 80));
+            return;
+        }
+        if (!this.running.has(img)) return;
+        cancelActiveAnalysis(img);
+    },
+
+    /** 実行枠が空いている間、待機列から新しいものを取り出して開始する */
+    drain() {
+        while (this.running.size < MAX_INFLIGHT_VIEWPORT_ANALYSES && this.pending.size > 0) {
+            const taken = this.takeNext();
+            if (!taken) return;
+            this.start(taken.img, taken.entry);
+        }
+    },
+
+    /**
+     * 次に開始する待機エントリを取り出す。
+     * hover 昇格を最優先し、同条件では LIFO で新しいものを選ぶ。
+     * @returns {{img: HTMLImageElement, entry: Object}|null}
+     */
+    takeNext() {
+        let bestImg = null;
+        let bestEntry = null;
+        for (const [img, entry] of this.pending.entries()) {
+            if (bestEntry === null) {
+                bestImg = img;
+                bestEntry = entry;
+                continue;
+            }
+            if (entry.hover !== bestEntry.hover) {
+                if (entry.hover) {
+                    bestImg = img;
+                    bestEntry = entry;
+                }
+                continue;
+            }
+            if (entry.sequence > bestEntry.sequence) {
+                bestImg = img;
+                bestEntry = entry;
+            }
+        }
+        if (!bestImg) return null;
+        this.pending.delete(bestImg);
+        return { img: bestImg, entry: bestEntry };
+    },
+
+    /**
+     * 解析を開始する。完了して確定したときだけ監視を解除する。
+     * @param {HTMLImageElement} img - 対象画像
+     * @param {Object} entry - 待機エントリ
+     */
+    start(img, entry) {
+        this.running.add(img);
+        const action = entry && entry.hover
+            ? 'fetchImageMetadataForHover'
+            : 'fetchImageMetadataForViewport';
+        checkImageMetadata(img, { action })
+            .catch((error) => {
+                debugLog('[AI Meta Viewer] Viewport analysis failed:', error?.message);
+            })
+            .finally(() => {
+                this.running.delete(img);
+                clearActiveAnalysis(img);
+                // 解析が確定した画像だけ監視を解除する。
+                // 未確定(サイズ未定などで processedImages から外れた)ものは
+                // 再度 viewport 判定を受けられるように監視を維持する。
+                if (this.observer && processedImages.has(img)) {
+                    this.observer.unobserve(img);
+                }
+                this.drain();
+            });
+    },
+};
+
+/**
+ * viewport 中心からの距離を返す。待機列の間引き判断に使う。
+ * @param {HTMLElement} element - 対象要素
+ * @returns {number} - 距離 (取得できない場合は Infinity)
+ */
+function distanceFromViewportCenter(element) {
+    try {
+        const rect = element.getBoundingClientRect();
+        const centerY = window.innerHeight / 2;
+        const elementCenterY = rect.top + rect.height / 2;
+        return Math.abs(elementCenterY - centerY);
+    } catch (e) {
+        return Number.POSITIVE_INFINITY;
+    }
+}
+
 /**
  * 画像監視を開始
  */
 function observeImages() {
     // IntersectionObserverで可視範囲の画像のみ処理
+    // 一度で unobserve せず、画面外へ出たイベントも受けて取り消しに使う
     const intersectionObserver = new IntersectionObserver((entries) => {
         entries.forEach((entry) => {
-            if (entry.isIntersecting && entry.target.tagName === 'IMG') {
-                checkImageMetadata(entry.target);
-                // 一度処理したら監視解除
-                intersectionObserver.unobserve(entry.target);
+            if (entry.target.tagName !== 'IMG') return;
+            if (entry.isIntersecting) {
+                viewportAnalysisQueue.enqueue(entry.target);
+            } else {
+                viewportAnalysisQueue.cancel(entry.target);
             }
         });
     }, {
         rootMargin: '50px' // 画面外50pxまで先読み
     });
+    viewportAnalysisQueue.observer = intersectionObserver;
+
+    // hover された画像は待機列の先頭へ昇格させる
+    document.addEventListener('mouseover', (event) => {
+        const target = event.target;
+        if (target && target.tagName === 'IMG') {
+            viewportAnalysisQueue.promote(target);
+        }
+    }, { passive: true, capture: true });
 
     // 既存の画像を監視対象に追加
     document.querySelectorAll('img').forEach((img) => {

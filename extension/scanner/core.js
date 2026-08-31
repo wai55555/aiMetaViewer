@@ -196,16 +196,24 @@ async function fetchMetadataBatch(urlsToFetch, urlToImagesMap, onProgress, isCan
                     imageUrl: url
                 });
 
-                if (response && response.success && response.metadata && Object.keys(response.metadata).length > 0) {
+                const hasMetadata = response && response.success === true &&
+                    response.metadata && Object.keys(response.metadata).length > 0;
+                const verifiedNotFound = response && response.success === true &&
+                    response.metadata && Object.keys(response.metadata).length === 0;
+
+                if (hasMetadata) {
                     localMetadataCache.set(url, response.metadata);
                     fetchResults.set(url, response.metadata);
-                } else {
+                } else if (verifiedNotFound) {
                     noMetadataCache.add(url);
+                    fetchResults.set(url, null);
+                } else {
+                    // 取得・解析失敗はsession negative cacheへ保存しない。
                     fetchResults.set(url, null);
                 }
             } catch (e) {
                 console.error('[AI Meta Viewer] Error fetching URL:', url, e);
-                noMetadataCache.add(url);
+                // 取得・解析例外は再試行可能性を残すためnegative cacheへ入れない。
                 fetchResults.set(url, null);
             }
 
