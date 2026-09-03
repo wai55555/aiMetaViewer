@@ -98,6 +98,11 @@ window.SiteAdapters = [
     // Pixiv
     {
         match: () => window.location.hostname.includes('pixiv.net'),
+        isAnalysisExcluded: (img) => {
+            const parentLink = img.closest('a');
+            return isPixivGifUrl(img.src || img.currentSrc) ||
+                isPixivGifUrl(parentLink?.href);
+        },
         resolve: (img) => {
             // 1. 既存の img-original リンクチェック
             const parentLink = img.closest('a');

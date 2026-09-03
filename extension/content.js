@@ -34,46 +34,162 @@ debugLog(`[AI Meta Viewer] Content script loaded (${isFirefox ? 'Firefox' : 'Chr
 // file:// URL では console.log が表示されないことがあるため、DOM に表示するデバッグ機能を追加
 let debugLogContainer = null;
 const MAX_DEBUG_LOGS = 20; // 最大保持ログ数
+let contentSettingsReady = false;
+
+const CONTENT_SAFE_ENUMS = Object.freeze({
+    category: Object.freeze(['acquisition', 'parser', 'scanner', 'message', 'cache', 'storage', 'settings', 'fatal-initialization']),
+    phase: Object.freeze(['background', 'content', 'settings', 'initialization', 'download']),
+    errorType: Object.freeze(['timeout', 'abort', 'network', 'invalid-response', 'storage', 'import', 'unknown']),
+    scannerStatus: Object.freeze(['detected', 'empty', 'failed', 'skipped', 'unknown']),
+    scheme: Object.freeze(['file', 'http', 'https'])
+});
+
+function readSafeContentProperty(value, key) {
+    try {
+        return value !== null && value !== undefined && Object.prototype.hasOwnProperty.call(value, key)
+            ? value[key]
+            : undefined;
+    } catch (_) {
+        return undefined;
+    }
+}
+
+function setSafeContentField(diagnostic, key, value) {
+    if (Object.prototype.hasOwnProperty.call(CONTENT_SAFE_ENUMS, key) && CONTENT_SAFE_ENUMS[key].includes(value)) {
+        diagnostic[key] = value;
+    } else if (key === 'status' && Number.isInteger(value) && value >= 100 && value <= 599) {
+        diagnostic.status = value;
+    } else if ((key === 'bodyPresent' || key === 'retryable') && typeof value === 'boolean') {
+        diagnostic[key] = value;
+    }
+}
+
+function classifySafeContentString(value, diagnostic) {
+    const normalized = value.toLowerCase();
+    const categoryKeywords = [
+        ['fatal-initialization', ['fatal-initialization', 'importscripts']],
+        ['acquisition', ['acquisition', 'fetch', 'download', 'image']],
+        ['parser', ['parser', 'metadata', 'format']],
+        ['scanner', ['scanner', 'scan', 'candidate']],
+        ['message', ['message', 'response', 'send']],
+        ['cache', ['cache']],
+        ['storage', ['storage']],
+        ['settings', ['setting', 'wildcard', 'excluded']]
+    ];
+    for (const [category, keywords] of categoryKeywords) {
+        if (keywords.some(keyword => normalized.includes(keyword))) {
+            diagnostic.category = category;
+            break;
+        }
+    }
+    if (normalized.includes('background')) diagnostic.phase = 'background';
+    else if (normalized.includes('content')) diagnostic.phase = 'content';
+    else if (normalized.includes('initial')) diagnostic.phase = 'initialization';
+    else if (normalized.includes('download')) diagnostic.phase = 'download';
+    else if (normalized.includes('setting')) diagnostic.phase = 'settings';
+    if (normalized.includes('timeout')) diagnostic.errorType = 'timeout';
+    else if (normalized.includes('abort')) diagnostic.errorType = 'abort';
+    else if (normalized.includes('network')) diagnostic.errorType = 'network';
+    else if (normalized.includes('invalid') && normalized.includes('response')) diagnostic.errorType = 'invalid-response';
+
+    if (/^file:\/\//i.test(value)) diagnostic.scheme = 'file';
+    else if (/^https?:\/\//i.test(value)) diagnostic.scheme = value.slice(0, 5).toLowerCase() === 'https' ? 'https' : 'http';
+    if (/^(?:data|blob):/i.test(value) || /^(?:https?|file):\/\//i.test(value) ||
+        /(?:password|passwd|secret|token|authorization|cookie|api[_-]?key)/i.test(value) ||
+        /(?:^[A-Z]:[\\/]|^\\\\|\/Users\/|\/home\/|\/var\/|\\AppData\\)/i.test(value)) {
+        diagnostic.redacted = true;
+    }
+}
+
+function toSafeContentDiagnostic(args) {
+    const diagnostic = { redacted: false };
+    for (const value of args) {
+        if (typeof value === 'string') {
+            classifySafeContentString(value, diagnostic);
+        } else if (typeof value === 'number') {
+            setSafeContentField(diagnostic, 'status', value);
+        } else if (value && (typeof value === 'object' || typeof value === 'function')) {
+            let errorLike = false;
+            try {
+                errorLike = value instanceof Error ||
+                    (typeof value.name === 'string' && (typeof value.message === 'string' || typeof value.stack === 'string'));
+            } catch (_) {
+                diagnostic.redacted = true;
+            }
+            if (errorLike) {
+                const errorName = readSafeContentProperty(value, 'name');
+                const normalizedName = typeof errorName === 'string' ? errorName.toLowerCase() : '';
+                diagnostic.errorType = normalizedName.includes('abort') ? 'abort' :
+                    normalizedName.includes('timeout') ? 'timeout' :
+                        normalizedName.includes('network') ? 'network' : 'unknown';
+            } else if (typeof URL !== 'undefined' && value instanceof URL) {
+                const protocol = value.protocol.toLowerCase();
+                if (protocol === 'file:') diagnostic.scheme = 'file';
+                else if (protocol === 'http:') diagnostic.scheme = 'http';
+                else if (protocol === 'https:') diagnostic.scheme = 'https';
+            } else {
+                for (const key of ['category', 'phase', 'errorType', 'status', 'bodyPresent', 'scannerStatus', 'retryable', 'scheme']) {
+                    setSafeContentField(diagnostic, key, readSafeContentProperty(value, key));
+                }
+            }
+            diagnostic.redacted = true;
+        } else if (value !== null && value !== undefined) {
+            diagnostic.redacted = true;
+        }
+    }
+    if (!diagnostic.errorType) diagnostic.errorType = 'unknown';
+    return diagnostic;
+}
+
+function formatSafeContentDiagnostic(diagnostic) {
+    const fields = [];
+    for (const key of ['category', 'phase', 'errorType', 'status', 'bodyPresent', 'scannerStatus', 'retryable', 'scheme']) {
+        if (diagnostic[key] !== undefined) fields.push(`${key}=${diagnostic[key]}`);
+    }
+    fields.push(`redacted=${diagnostic.redacted === true}`);
+    return `[SafeDiagnostic ${fields.join(' ')}]`.slice(0, 240);
+}
 
 // settings_loader.js で定義された window.debugLog を拡張
 const baseDebugLog = window.debugLog;
-window.debugLog = function (message, data = null) {
-    // 基本のコンソール出力
+window.debugLog = function (...args) {
+    const safeDiagnostic = toSafeContentDiagnostic(args);
+    const safeText = formatSafeContentDiagnostic(safeDiagnostic);
+
+    // 基本のコンソール出力には安全化済みの値だけを渡す
     if (typeof baseDebugLog === 'function') {
-        baseDebugLog(message, data);
-    } else {
-        // 万が一 baseDebugLog がない場合のフォールバック
-        if (window.settings && window.settings.debugMode) {
-            console.log(message, data);
-        }
+        baseDebugLog(safeDiagnostic);
+    } else if (contentSettingsReady && window.settings && window.settings.debugMode === true) {
+        console.log(safeText);
     }
 
-    // debugMode が有効で、かつ file:// URL の場合のみ DOM に表示
-    if (window.settings && window.settings.debugMode && window.location.protocol === 'file:') {
-        // コンテナがまだない場合は作成
-        if (!debugLogContainer && document.body) {
-            debugLogContainer = document.createElement('div');
-            debugLogContainer.id = 'ai-meta-viewer-debug-log';
-            debugLogContainer.style.cssText = 'position:fixed;bottom:0;left:0;right:0;max-height:200px;overflow-y:auto;background:rgba(0,0,0,0.9);color:#0f0;padding:5px;z-index:999999;font-size:11px;font-family:monospace;border-top:2px solid #0f0;';
-            document.body.appendChild(debugLogContainer);
+    // debugMode が厳密な true で、設定読込完了後かつ file:// URL の場合のみ DOM に表示
+    if (!contentSettingsReady || !window.settings || window.settings.debugMode !== true || window.location.protocol !== 'file:') {
+        return;
+    }
+
+    // コンテナがまだない場合は作成
+    if (!debugLogContainer && document.body) {
+        debugLogContainer = document.createElement('div');
+        debugLogContainer.id = 'ai-meta-viewer-debug-log';
+        debugLogContainer.style.cssText = 'position:fixed;bottom:0;left:0;right:0;max-height:200px;overflow-y:auto;background:rgba(0,0,0,0.9);color:#0f0;padding:5px;z-index:999999;font-size:11px;font-family:monospace;border-top:2px solid #0f0;';
+        document.body.appendChild(debugLogContainer);
+    }
+
+    if (debugLogContainer) {
+        const logEntry = document.createElement('div');
+        logEntry.style.cssText = 'padding:2px 0;border-bottom:1px solid rgba(0,255,0,0.2);';
+        const timestamp = new Date().toLocaleTimeString('ja-JP', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit', fractionalSecondDigits: 3 });
+        logEntry.textContent = `[${timestamp}] ${safeText}`;
+        debugLogContainer.appendChild(logEntry);
+
+        // 最大数を超えたら古いログを削除
+        while (debugLogContainer.children.length > MAX_DEBUG_LOGS) {
+            debugLogContainer.removeChild(debugLogContainer.firstChild);
         }
 
-        if (debugLogContainer) {
-            const logEntry = document.createElement('div');
-            logEntry.style.cssText = 'padding:2px 0;border-bottom:1px solid rgba(0,255,0,0.2);';
-            const timestamp = new Date().toLocaleTimeString('ja-JP', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit', fractionalSecondDigits: 3 });
-            logEntry.textContent = `[${timestamp}] ${message}${data ? ': ' + (typeof data === 'object' ? JSON.stringify(data).substring(0, 150) : data) : ''}`;
-
-            debugLogContainer.appendChild(logEntry);
-
-            // 最大数を超えたら古いログを削除
-            while (debugLogContainer.children.length > MAX_DEBUG_LOGS) {
-                debugLogContainer.removeChild(debugLogContainer.firstChild);
-            }
-
-            // 最新ログまでスクロール
-            debugLogContainer.scrollTop = debugLogContainer.scrollHeight;
-        }
+        // 最新ログまでスクロール
+        debugLogContainer.scrollTop = debugLogContainer.scrollHeight;
     }
 };
 
@@ -94,7 +210,7 @@ function startExtensionHealthCheck() {
 
             // 3回連続で失敗した場合のみ警告を出す
             if (healthCheckFailureCount >= 3) {
-                console.warn('[AI Meta Viewer] Extension context lost, attempting recovery...');
+                debugLog({ category: 'message', phase: 'content', errorType: 'unknown', retryable: true });
 
                 // 必要に応じて再初期化を試行
                 clearInterval(extensionHealthCheck);
@@ -120,6 +236,7 @@ function startExtensionHealthCheck() {
 
 // 初期化時に設定を読み込む (settings_loader.js で定義された loadSettings を使用)
 loadSettings().then(() => {
+    contentSettingsReady = true;
     debugLog('[AI Meta Viewer] Settings loaded:', settings);
 
     // 除外サイトチェック
@@ -197,6 +314,8 @@ const cancelledAnalyses = new WeakSet();
  */
 function cancelActiveAnalysis(img) {
     cancelledAnalyses.add(img);
+    // 取り消し直後から再度viewport判定を受けられるようmarkerを除去する。
+    processedImages.delete(img);
     const url = activeAnalysisUrls.get(img);
     if (!url) return;
     debugLog('[AI Meta Viewer] Cancelling in-flight analysis:', url.substring(0, 80));
@@ -226,9 +345,12 @@ async function checkImageMetadata(img, requestOptions = {}) {
 
     // 拡張機能のコンテキストが無効化されている場合は処理を停止
     if (!isExtensionContextValid()) {
-        console.warn('[AI Meta Viewer] Extension context invalidated, stopping image metadata check');
+        debugLog({ category: 'message', phase: 'content', errorType: 'unknown', retryable: false });
         return;
     }
+
+    // 新しい解析要求では、過去のcancel markerを再利用しない。
+    cancelledAnalyses.delete(img);
 
     // 重複チェック
     if (processedImages.has(img)) {
@@ -251,6 +373,10 @@ async function checkImageMetadata(img, requestOptions = {}) {
     // アダプターを使ってオリジナル画像を探索
     for (const adapter of SiteAdapters) {
         if (adapter.match()) {
+            if (adapter.isAnalysisExcluded?.(img)) {
+                debugLog('[AI Meta Viewer] Image is excluded by site adapter:', img.src.substring(0, 80));
+                return;
+            }
             const resolvedUrl = adapter.resolve(img);
             if (resolvedUrl) {
                 targetUrl = resolvedUrl;
@@ -339,10 +465,12 @@ async function checkImageMetadata(img, requestOptions = {}) {
         analyzingBadge = addAnalyzingBadge(img);
     }
 
-    try {
-        let metadata = null;
-        let successUrl = null;
+    let analysisOutcome = null;
+    let metadata = null;
+    let successUrl = null;
+    let failureResponse = null;
 
+    try {
         // targetUrl が配列の場合（Pixivのサムネイルなど）、順次試行
         const urlsToTry = Array.isArray(targetUrl) ? targetUrl : [targetUrl];
 
@@ -350,14 +478,17 @@ async function checkImageMetadata(img, requestOptions = {}) {
             // 画面外へ出て取り消された場合は残りの候補を試行しない
             if (cancelledAnalyses.has(img)) {
                 debugLog('[AI Meta Viewer] Analysis cancelled, stopping candidate loop:', url.substring(0, 80));
+                failureResponse = { success: false, diagnostics: { category: 'cancelled', phase: 'content' } };
                 break;
             }
 
             // キャッシュチェック
             if (contentMetadataCache.has(url)) {
-                metadata = contentMetadataCache.get(url);
-                if (metadata && Object.keys(metadata).length > 0) {
+                const cachedMetadata = contentMetadataCache.get(url);
+                if (cachedMetadata && Object.keys(cachedMetadata).length > 0) {
+                    metadata = cachedMetadata;
                     successUrl = url;
+                    analysisOutcome = 'metadata';
                     break;
                 }
                 continue;
@@ -383,42 +514,61 @@ async function checkImageMetadata(img, requestOptions = {}) {
                 activeAnalysisUrls.set(img, url);
                 const response = await sendMessageToBrave(message);
 
-                if (response && response.success && response.metadata) {
-                    metadata = response.metadata;
-
-                    // 空でない場合のみキャッシュして採用
-                    if (Object.keys(metadata).length > 0) {
+                if (response && response.success === true && response.metadata &&
+                    typeof response.metadata === 'object') {
+                    if (Object.keys(response.metadata).length > 0) {
+                        metadata = response.metadata;
                         contentMetadataCache.set(url, metadata);
                         successUrl = url;
+                        analysisOutcome = 'metadata';
                         break; // 成功したらループを抜ける
                     }
+                    // success:true + metadata:{} は確認済みemptyとして扱う。
+                    continue;
                 }
+
+                // failureはemptyへ降格させず、候補が残る場合だけ次を試行する。
+                failureResponse = response && response.success === false
+                    ? response
+                    : { success: false, diagnostics: { category: 'response-contract', phase: 'content' } };
             } catch (e) {
                 if (e.message && e.message.includes('Extension context invalidated')) {
                     if (settings.debugMode) {
-                        console.warn('[AI Meta Viewer] Extension context invalidated during message send');
+                        debugLog({ category: 'message', phase: 'content', errorType: 'unknown', retryable: true });
                     }
-                    // 解析中バッジを削除してから処理を停止
-                    if (analyzingBadge) {
-                        removeAnalyzingBadge(analyzingBadge);
-                    }
-                    processedImages.delete(img);
-                    return;
                 }
-                console.error('[AI Meta Viewer] Error sending message to background:', e);
-                // 他のエラーの場合は次のURLを試行
-                continue;
+                failureResponse = {
+                    success: false,
+                    diagnostics: {
+                        category: 'message',
+                        phase: 'content',
+                        errorType: 'unknown'
+                    }
+                };
             }
         }
 
-        // 解析中バッジを削除
-        if (analyzingBadge) {
-            removeAnalyzingBadge(analyzingBadge);
+        // failureが一つでも残っている場合、別候補のemptyで成功確定しない。
+        if (analysisOutcome !== 'metadata' && failureResponse) {
+            analysisOutcome = 'failure';
+            logContentAnalysisFailure(failureResponse);
+            return;
+        }
+
+        if (analysisOutcome !== 'metadata') {
+            analysisOutcome = 'empty';
+        }
+
+        // 取り消し後に到着した応答を結果として確定させない。
+        // cancelActiveAnalysis() がmarkerを削除しているため、再表示時に再解析できる。
+        if (cancelledAnalyses.has(img)) {
+            analysisOutcome = 'failure';
+            return;
         }
 
         // --- メタデータフィルタリング (除外判定) ---
 
-        if (metadata && Object.keys(metadata).length > 0) {
+        if (analysisOutcome === 'metadata') {
             // 1. キーによる除外 (Ignored Metadata Keys)
             if (settings.ignoredMetadataKeys && Array.isArray(settings.ignoredMetadataKeys) && settings.ignoredMetadataKeys.length > 0) {
                 const hasIgnoredKey = Object.keys(metadata).some(key =>
@@ -451,7 +601,7 @@ async function checkImageMetadata(img, requestOptions = {}) {
             // バッジを追加
             addBadgeToImage(img, metadata, successUrl || img.src);
         } else {
-            // メタデータが空の場合は既存バッジを削除（リフレッシュ対策）
+            // confirmed-emptyだけを通常のメタデータなし経路へ渡す。
             debugLog('[AI Meta Viewer] No metadata found, removing badge if exists:', {
                 src: img.src.substring(0, 80),
                 targetUrl: Array.isArray(targetUrl) ? targetUrl.map(u => u.substring(0, 80)) : targetUrl.substring(0, 80),
@@ -461,24 +611,52 @@ async function checkImageMetadata(img, requestOptions = {}) {
         }
 
     } catch (error) {
-        // エラー時も解析中バッジを削除
-        if (analyzingBadge) {
-            removeAnalyzingBadge(analyzingBadge);
-        }
-
-        if (settings.debugMode) {
-            debugLog('[AI Meta Viewer] Error checking metadata:', error);
-        }
+        analysisOutcome = 'failure';
+        logContentAnalysisFailure({
+            success: false,
+            diagnostics: {
+                category: 'content',
+                phase: 'content',
+                errorType: 'unknown'
+            }
+        });
 
         // エラー通知が有効な場合
         if (settings.errorNotification) {
             // 簡易的な通知（実際にはUIに表示する方が良いが、ここではコンソールのみ）
             // 必要に応じてトースト通知などを実装
         }
-
-        processedImages.delete(img);
+    } finally {
+        if (analyzingBadge) {
+            removeAnalyzingBadge(analyzingBadge);
+        }
+        if (analysisOutcome === 'failure' || cancelledAnalyses.has(img)) {
+            processedImages.delete(img);
+        }
+        clearActiveAnalysis(img);
     }
 }
+
+/**
+ * failure応答から許可された診断項目だけをdebugログへ出力する。
+ * 内部error、payload、bytes、署名、ローカルpathは記録しない。
+ */
+function logContentAnalysisFailure(response) {
+    const diagnostics = Array.isArray(response?.diagnostics)
+        ? response.diagnostics[0]
+        : response?.diagnostics;
+    const source = diagnostics && typeof diagnostics === 'object' ? diagnostics : response || {};
+    const safeDiagnostics = {};
+    const allowedKeys = ['category', 'phase', 'status', 'bodyPresent', 'errorType', 'scannerStatus', 'retryable'];
+    for (const key of allowedKeys) {
+        const value = source[key] ?? response?.[key];
+        if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
+            safeDiagnostics[key] = value;
+        }
+    }
+    debugLog('[AI Meta Viewer] Metadata analysis failed:', safeDiagnostics);
+}
+
 
 // --- Civitai などの動的サイト用リトライロジック ---
 let civitaiRetryCount = 0;
@@ -774,7 +952,7 @@ function isExtensionContextValid() {
         return true;
     } catch (e) {
         // エラーが発生した場合のみログ出力
-        console.error('[AI Meta Viewer] Extension context check failed:', e);
+        debugLog({ category: 'message', phase: 'content', errorType: 'unknown' });
         return false;
     }
 }
@@ -811,7 +989,7 @@ async function sendMessageToBrave(message) {
             if (!errorMsg.includes('Extension context invalidated') &&
                 !errorMsg.includes('receiving end does not exist') &&
                 !errorMsg.includes('Could not establish connection')) {
-                console.error('[AI Meta Viewer] Error in sendMessageToBrave:', e);
+                debugLog({ category: 'message', phase: 'content', errorType: 'unknown', retryable: true });
             }
             reject(e);
         }
@@ -823,7 +1001,7 @@ async function checkMetadataForElement(el) {
     if (!isExtensionContextValid()) {
         // すでに読み込まれている設定があればデバッグログを表示
         if (window.settings && window.settings.debugMode) {
-            console.warn('[AI Meta Viewer] Extension context invalidated, stopping metadata check');
+            debugLog({ category: 'message', phase: 'content', errorType: 'unknown', retryable: false });
         }
         return;
     }
@@ -859,30 +1037,31 @@ async function checkMetadataForElement(el) {
             imageUrl: url
         });
 
-        if (response && response.success && response.metadata && Object.keys(response.metadata).length > 0) {
+        if (response && response.success === true && response.metadata &&
+            typeof response.metadata === 'object' && Object.keys(response.metadata).length > 0) {
             addBadgeToElement(el, response.metadata, url);
+        } else if (response && response.success === true && response.metadata &&
+            typeof response.metadata === 'object') {
+            // confirmed-emptyは既存のリンク解析契約どおりバッジを除去する。
+            removeBadge(el);
         } else {
-            // メタデータなし
+            // failureは正常なempty処理と分離し、診断だけdebug modeへ出す。
+            logContentAnalysisFailure(response && response.success === false
+                ? response
+                : { success: false, diagnostics: { category: 'response-contract', phase: 'content' } });
             processedImages.delete(el);
         }
     } catch (e) {
-        // エラーの種類に応じて処理を分ける
-        if (e.message && e.message.includes('Extension context invalidated')) {
-            console.warn('[AI Meta Viewer] Extension context invalidated during message send');
-            // コンテキストが無効化された場合は、処理済みフラグを削除して再試行可能にする
-            processedImages.delete(el);
-            return;
-        } else if (e.message && (e.message.includes('receiving end does not exist') ||
-            e.message.includes('Could not establish connection'))) {
-            // 接続エラーの場合も再試行可能にする
-            console.warn('[AI Meta Viewer] Connection error, will retry later:', e.message);
-            processedImages.delete(el);
-            return;
-        } else {
-            // その他のエラーは通常のエラーとして処理
-            console.error('[AI Meta Viewer] Error checking element metadata:', e);
-            processedImages.delete(el);
-        }
+        // エラーの種類に応じた公開可能な診断だけをdebug modeへ出す。
+        logContentAnalysisFailure({
+            success: false,
+            diagnostics: {
+                category: 'message',
+                phase: 'content',
+                errorType: 'unknown'
+            }
+        });
+        processedImages.delete(el);
     }
 }
 
@@ -1074,6 +1253,18 @@ function distanceFromViewportCenter(element) {
 }
 
 /**
+ * DOMから削除された画像の解析状態と監視状態を解放する。
+ * @param {HTMLImageElement} img - 対象画像
+ */
+function cleanupRemovedImage(img) {
+    const wasRunning = viewportAnalysisQueue.running.has(img);
+    viewportAnalysisQueue.cancel(img);
+    if (!wasRunning) cancelActiveAnalysis(img);
+    removeBadge(img);
+    processedImages.delete(img);
+}
+
+/**
  * 画像監視を開始
  */
 function observeImages() {
@@ -1141,10 +1332,10 @@ function observeImages() {
             mutation.removedNodes.forEach((node) => {
                 if (node.nodeType === 1) {
                     if (node.tagName === 'IMG') {
-                        removeBadge(node);
+                        cleanupRemovedImage(node);
                     } else {
                         const imgs = node.querySelectorAll('img');
-                        imgs.forEach(img => removeBadge(img));
+                        imgs.forEach(img => cleanupRemovedImage(img));
                     }
                 }
             });
@@ -1269,7 +1460,7 @@ function handleDirectImageView() {
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     // 拡張機能のコンテキストが無効化されている場合は処理を停止
     if (!isExtensionContextValid()) {
-        console.warn('[AI Meta Viewer] Extension context invalidated, ignoring message');
+        debugLog({ category: 'message', phase: 'content', errorType: 'unknown', retryable: false });
         return false;
     }
 
@@ -1325,7 +1516,8 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     if (request.action === 'showNotification') {
         // 通知表示 (ダウンロード失敗時など)
         if (request.message) {
-            console.log(`[AI Meta Viewer] Notification: ${request.message}`);
+            // 通知内容を診断ログへ渡さず、固定カテゴリだけをdebugLogへ渡す。
+            debugLog({ category: 'message', phase: 'content', errorType: 'unknown' });
             // 実際の通知UIは必要に応じて実装
         }
         sendResponse({ success: true });

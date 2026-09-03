@@ -46,7 +46,8 @@ function updateBadge(badge, metadata, isError = false) {
         let previewText = generator;
 
         // プロンプトの冒頭を追加
-        const { positive } = parseMetadataToTabs(metadata);
+        const previewSection = buildSections(metadata).find(section => section.id === 'positive');
+        const positive = previewSection ? previewSection.text : '';
         if (positive) {
             // 最初の50文字程度を表示
             const truncatedPrompt = positive.length > 50 ? positive.substring(0, 50) + '...' : positive;
@@ -90,10 +91,12 @@ function showErrorNotification(message) {
  * @returns {string} - ツール名とバージョン（例: "NovelAI V4.5", "ComfyUI workflow", "Civitai", "Stable Diffusion WebUI"）
  */
 function detectGenerator(metadata) {
+    const source = metadata && typeof metadata === 'object' ? metadata : {};
+
     // Midjourney
     // Description に "Job ID:" または "--v" (バージョンフラグ) が含まれている場合
-    if (metadata.Description) {
-        const desc = metadata.Description;
+    if (typeof source.Description === 'string' && source.Description) {
+        const desc = source.Description;
 
         // Job ID の存在チェック（最も確実）
         if (desc.includes('Job ID:')) {
@@ -113,10 +116,10 @@ function detectGenerator(metadata) {
 
     // NovelAI
     // Comment キーが存在する、または Description に NovelAI 特有のパターンがある場合
-    if (metadata.Comment) {
+    if (source.Comment) {
         let version = '';
         try {
-            const json = JSON.parse(metadata.Comment);
+            const json = JSON.parse(source.Comment);
             // inputフィールドなどからバージョンを探すヒューリスティック
             // 例: "NovelAI Diffusion V4.5 1229B44F"
             const jsonStr = JSON.stringify(json);
@@ -130,31 +133,33 @@ function detectGenerator(metadata) {
 
     // Description のみでは NovelAI と判定しない（Midjourneyと区別するため）
     // ただし、Description に "NovelAI" という文字列が含まれている場合は例外
-    if (metadata.Description && metadata.Description.includes('NovelAI')) {
+    if (typeof source.Description === 'string' && source.Description.includes('NovelAI')) {
         return 'NovelAI';
     }
 
     // Tensor.art
     // generation_dataキーがあり、かつprompt内にECHOCheckpointLoaderSimpleがある場合
-    if (metadata.generation_data && metadata.prompt && metadata.prompt.includes('ECHOCheckpointLoaderSimple')) {
+    if (source.generation_data && typeof source.prompt === 'string' &&
+        source.prompt.includes('ECHOCheckpointLoaderSimple')) {
         return 'Tensor.art';
     }
 
     // ComfyUI
     // workflowまたはgeneration_dataキーが存在する場合（Tensor.artでない場合）
     // または parameters 内に ComfyUI という文字列が含まれている場合
-    if (metadata.workflow || metadata.generation_data || (metadata.parameters && metadata.parameters.includes('ComfyUI'))) {
+    if (source.workflow || source.generation_data ||
+        (typeof source.parameters === 'string' && source.parameters.includes('ComfyUI'))) {
         return 'ComfyUI';
     }
 
     // Civitai
     // parameters内に「Civitai metadata」がある、または Version: v... がある場合
-    if (metadata.parameters) {
-        if (metadata.parameters.includes('Civitai metadata')) {
+    if (typeof source.parameters === 'string') {
+        if (source.parameters.includes('Civitai metadata')) {
             return 'Civitai';
         }
         // Version: v1.10.xxxxx などのパターンを検出 (A1111とCivitai生成画像の特徴)
-        if (metadata.parameters.match(/Version:\s*v1\.10\./)) {
+        if (source.parameters.match(/Version:\s*v1\.10\./)) {
             return 'A1111';
         }
     }
@@ -164,113 +169,944 @@ function detectGenerator(metadata) {
 }
 
 /**
- * メタデータをタブ用に解析・分類
- * @param {Object} metadata - 生のメタデータ
- * @returns {Object} - 分類されたデータ { positive, negative, other }
+ * ドット区切りのパスから値を安全に取得する。
+ * @param {Object|null} object - 検索対象
+ * @param {string} path - ドット区切りのパス
+ * @returns {*} - 取得値、存在しない場合は undefined
  */
-function parseMetadataToTabs(metadata) {
-    let positive = '';
-    let negative = '';
-    let otherObj = { ...metadata }; // コピーを作成
+function safeGet(object, path) {
+    try {
+        return path.split('.').reduce((value, key) => (
+            value == null ? undefined : value[key]
+        ), object);
+    } catch (error) {
+        return undefined;
+    }
+}
 
-    // parameters (Stable Diffusion A1111)
-    if (metadata.parameters) {
-        const params = metadata.parameters;
-        const negIndex = params.indexOf('Negative prompt:');
-        const stepsIndex = params.indexOf('Steps:');
+/**
+ * 値を表示用の文字列へ変換する。
+ * @param {*} value - 変換対象
+ * @returns {string} - 表示文字列
+ */
+function toDisplayText(value) {
+    if (value == null) return '';
+    if (typeof value === 'string') return value;
+    if (typeof value === 'number' || typeof value === 'boolean') return String(value);
+    try {
+        const serialized = JSON.stringify(value, null, 2);
+        return serialized == null ? '' : serialized;
+    } catch (error) {
+        return '';
+    }
+}
 
-        if (negIndex !== -1) {
-            positive = params.substring(0, negIndex).trim();
+/**
+ * caption/prompt/uc 系の値を深さと件数を制限して再帰回収する。
+ * @param {*} value - 検索対象
+ * @returns {Array<{key:string,text:string,path:string}>} - 回収結果
+ */
+function collectCaptionsLike(value) {
+    const MAX_DEPTH = 6;
+    const MAX_RESULTS = 400;
+    const results = [];
+    const visited = new Set();
+    const keyPattern = /(?:caption|prompt|uc|u[_-]?c|text|char|negative|undesired)/i;
 
-            if (stepsIndex !== -1) {
-                negative = params.substring(negIndex + 'Negative prompt:'.length, stepsIndex).trim();
-            } else {
-                negative = params.substring(negIndex + 'Negative prompt:'.length).trim();
-            }
-        } else {
-            if (stepsIndex !== -1) {
-                positive = params.substring(0, stepsIndex).trim();
-            } else {
-                positive = params.trim();
+    const visit = (current, depth, path) => {
+        if (results.length >= MAX_RESULTS || depth > MAX_DEPTH || current == null) return;
+        if (typeof current !== 'object' || visited.has(current)) return;
+        visited.add(current);
+
+        for (const [key, child] of Object.entries(current)) {
+            if (results.length >= MAX_RESULTS) break;
+            const childPath = path ? `${path}.${key}` : key;
+            if (typeof child === 'string' && child.trim() && keyPattern.test(key)) {
+                results.push({ key, text: child, path: childPath });
+            } else if (child && typeof child === 'object') {
+                visit(child, depth + 1, childPath);
             }
         }
+    };
 
-        // Steps以降を取得してOther Settingsに追加
-        if (stepsIndex !== -1) {
-            otherObj['parameters_settings'] = params.substring(stepsIndex).trim();
-        }
-        delete otherObj['parameters']; // 元のparametersは削除
+    visit(value, 0, '');
+    return results;
+}
+
+/**
+ * Comment 内のパスが負値系かを判定する。
+ * @param {string} path - Comment 相対パス
+ * @returns {boolean} - 負値系なら true
+ */
+function isNegativeCaptionPath(path) {
+    return /negative|undesired|(?:^|\.)(?:uc|u[_-]?c)(?:\.|$)/i.test(path);
+}
+
+/**
+ * Comment 内のパスがキャラクター系かを判定する。
+ * @param {string} path - Comment 相対パス
+ * @returns {boolean} - キャラクター系なら true
+ */
+function isCharacterCaptionPath(path) {
+    return /char/i.test(path);
+}
+
+/**
+ * NovelAI の Comment JSON を一度だけ安全に解析する。
+ * @param {*} comment - Comment 値
+ * @returns {Object|null} - 解析結果
+ */
+function parseCommentObject(comment) {
+    if (!comment) return null;
+    if (typeof comment === 'object') return comment;
+    if (typeof comment !== 'string') return null;
+    try {
+        const parsed = JSON.parse(comment);
+        return parsed && typeof parsed === 'object' ? parsed : null;
+    } catch (error) {
+        return null;
+    }
+}
+
+/**
+ * NovelAI のベース負値を既存優先順で抽出する。
+ * @param {Object|null} comment - 解析済みComment JSON
+ * @returns {{text:string,dataFields:string[]}} - 負値本文と書き戻し先
+ */
+function extractNovelAiNegative(comment) {
+    const uc = toDisplayText(safeGet(comment, 'uc')).trim();
+    const v4BasePath = 'v4_negative_prompt.caption.base_caption';
+    const v4Base = toDisplayText(safeGet(comment, v4BasePath)).trim();
+    const dataFields = [];
+    if (uc) dataFields.push('comment.uc');
+    if (v4Base) dataFields.push(`comment.${v4BasePath}`);
+
+    if (uc) return { text: uc, dataFields };
+    if (v4Base) return {
+        text: v4Base,
+        dataFields
+    };
+
+    const fallback = collectCaptionsLike(comment).find(entry =>
+        isNegativeCaptionPath(entry.path) && !isCharacterCaptionPath(entry.path)
+    );
+    if (fallback) return {
+        text: fallback.text.trim(),
+        dataFields: [`comment.${fallback.path}`]
+    };
+
+    return { text: '', dataFields: [] };
+}
+
+/**
+ * キャラクター負値の重複本文を除外する。
+ * @param {Array<Object>} children - キャラクター負値
+ * @param {string} baseText - ベース負値
+ * @returns {Array<Object>} - 重複除外後のキャラクター負値
+ */
+function dedupeNegativeCharacterChildren(children, baseText) {
+    const seen = new Set();
+    const base = toDisplayText(baseText).trim();
+    if (base) seen.add(base);
+    return children.filter(child => {
+        const text = toDisplayText(child && child.text).trim();
+        if (!text || seen.has(text)) return false;
+        seen.add(text);
+        return true;
+    });
+}
+
+/**
+ * セクションモデルの要素を作成する。
+ * @param {string} id - 識別子
+ * @param {string} name - 表示名
+ * @param {string} kind - セクション種別
+ * @param {boolean} defaultOpen - 初期展開状態
+ * @param {*} text - 初期テキスト
+ * @param {Object} extras - 追加属性
+ * @returns {Object} - セクションモデル
+ */
+function createSectionModel(id, name, kind, defaultOpen, text, extras = {}) {
+    const section = {
+        id,
+        name,
+        kind,
+        defaultOpen,
+        text: toDisplayText(text)
+    };
+    if (extras.highlight) section.highlight = true;
+    if (Array.isArray(extras.dataFields) && extras.dataFields.length > 0) {
+        section.dataFields = extras.dataFields;
+    }
+    if (Array.isArray(extras.children) && extras.children.length > 0) {
+        section.children = extras.children;
+    }
+    return section;
+}
+
+/**
+ * NovelAI のキャプション配列をセクション子要素へ変換する。
+ * @param {*} captions - キャプション配列
+ * @param {string} pathPrefix - data-field の接頭辞
+ * @returns {Array<Object>} - 子要素
+ */
+function buildCharacterChildren(captions, pathPrefix) {
+    if (!Array.isArray(captions)) return [];
+    return captions.map((caption, index) => {
+        if (!caption || typeof caption !== 'object') return null;
+        const text = caption.char_caption || caption.caption || caption.prompt || '';
+        if (!toDisplayText(text)) return null;
+        let fieldName = 'char_caption';
+        if (caption.char_caption == null && caption.caption != null) fieldName = 'caption';
+        if (caption.char_caption == null && caption.caption == null && caption.prompt != null) fieldName = 'prompt';
+        return {
+            label: `Character ${index + 1}`,
+            text: toDisplayText(text),
+            dataFields: [`${pathPrefix}.${index}.${fieldName}`]
+        };
+    }).filter(Boolean);
+}
+
+/**
+ * 固定パスで取得できないキャラクターキャプションを回収する。
+ * @param {*} comment - NovelAI Comment JSON
+ * @param {boolean} negative - ネガティブ側だけを対象にするか
+ * @returns {Array<Object>} - セクション子要素
+ */
+function collectCharacterChildrenFallback(comment, negative = false) {
+    return collectCaptionsLike(comment)
+        .filter(entry => {
+            const isNegativePath = isNegativeCaptionPath(entry.path);
+            return isCharacterCaptionPath(entry.path) && (negative === isNegativePath);
+        })
+        .map((entry, index) => ({
+            label: `Character ${index + 1}`,
+            text: entry.text,
+            dataFields: [`comment.${entry.path}`]
+        }));
+}
+
+/**
+ * A1111系メタデータをセクションモデルへ変換する。
+ * @param {Object} source - 生のメタデータ
+ * @returns {Array<Object>} - A1111系セクション
+ */
+function buildA1111Sections(source) {
+    const parameters = typeof source.parameters === 'string' ? source.parameters : '';
+    const negativeMarker = 'Negative prompt:';
+    const negativeIndex = parameters.indexOf(negativeMarker);
+    const stepsIndex = parameters.indexOf('Steps:');
+    const parameterSettings = toDisplayText(source.parameters_settings).trim();
+    const positive = negativeIndex >= 0
+        ? parameters.substring(0, negativeIndex).trim()
+        : parameters.substring(0, stepsIndex >= 0 ? stepsIndex : parameters.length).trim();
+    const negative = negativeIndex >= 0
+        ? parameters.substring(negativeIndex + negativeMarker.length,
+            stepsIndex >= 0 ? stepsIndex : parameters.length).trim()
+        : '';
+    const settingsText = parameterSettings || (stepsIndex >= 0
+        ? parameters.substring(stepsIndex).trim()
+        : '');
+    const sections = [];
+
+    if (positive) {
+        sections.push(createSectionModel(
+            'positive', 'Positive Prompt', 'positive', true, positive,
+            { dataFields: ['description'] }
+        ));
+    }
+    if (negative) {
+        sections.push(createSectionModel(
+            'negative', 'Negative Prompt', 'negative', false, negative,
+            { dataFields: ['negative_prompt'] }
+        ));
+    }
+    if (settingsText) {
+        sections.push(createSectionModel(
+            'genSettings', 'Other Settings', 'settings', false, settingsText,
+            { highlight: true, dataFields: ['parameters_settings'] }
+        ));
+    }
+    return sections;
+}
+
+/**
+ * NovelAI V3(legacy)のメタデータをセクションモデルへ変換する。
+ * @param {Object} source - 生のメタデータ
+ * @param {Object|null} comment - 解析済みComment JSON
+ * @returns {Array<Object>} - V3用セクション
+ */
+function buildNovelAiLegacySections(source, comment) {
+    const sections = [];
+    const commentPrompt = toDisplayText(safeGet(comment, 'prompt'));
+    const description = toDisplayText(source.Description);
+    const promptText = commentPrompt || description;
+    const promptFields = [];
+
+    if (description) promptFields.push('description');
+    if (commentPrompt) promptFields.push('comment.prompt');
+    if (promptText) {
+        sections.push(createSectionModel(
+            'positive', 'Prompt', 'positive', true, promptText,
+            { dataFields: promptFields }
+        ));
     }
 
-    // prompt / workflow / generation_data (ComfyUI)
-    else if (metadata.prompt || metadata.workflow || metadata.generation_data) {
-        if (metadata.prompt) {
-            try {
-                const json = JSON.parse(metadata.prompt);
-                positive = JSON.stringify(json, null, 2);
-                delete otherObj['prompt'];
-            } catch (e) {
-                positive = metadata.prompt;
-                delete otherObj['prompt'];
-            }
-        }
-        // workflow, generation_dataはそのままOtherに残る
+    const negative = extractNovelAiNegative(comment);
+    if (negative.text) {
+        sections.push(createSectionModel(
+            'negative', 'Undesired Content', 'negative', false, negative.text,
+            { dataFields: negative.dataFields }
+        ));
     }
 
-    // Description / Comment (NovelAI)
-    else if (metadata.Description || metadata.Comment) {
-        if (metadata.Description) {
-            positive = metadata.Description;
-            delete otherObj['Description'];
+    const parameterKeys = ['seed', 'steps', 'sampler', 'scale', 'strength', 'noise', 'smea'];
+    const parameterFields = [];
+    const parameterLines = [];
+    parameterKeys.forEach(key => {
+        let value = comment && comment[key];
+        let fieldKey = key;
+        if ((value == null || value === '') && key === 'smea' && comment && comment.use_smea != null) {
+            value = comment.use_smea;
+            fieldKey = 'use_smea';
         }
+        if (value != null && value !== '') {
+            parameterLines.push(`${key}: ${toDisplayText(value)}`);
+            parameterFields.push(`comment.${fieldKey}`);
+        }
+    });
+    if (parameterLines.length > 0) {
+        sections.push(createSectionModel(
+            'novelaiParams', 'NovelAI Parameters', 'settings', false,
+            parameterLines.join('\n'),
+            { dataFields: parameterFields }
+        ));
+    }
 
-        // Comment内のnegative promptを抽出 (NovelAI v3/v4/v4.5対応)
-        if (metadata.Comment) {
-            try {
-                const commentJson = JSON.parse(metadata.Comment);
+    if (comment) {
+        const rawComment = toDisplayText(comment);
+        if (rawComment) {
+            sections.push(createSectionModel(
+                'rawComment', 'Raw Comment', 'raw', false, rawComment,
+                { dataFields: ['raw_comment'] }
+            ));
+        }
+    }
+    return sections;
+}
 
-                // 優先度1: "uc" キー (Undesired Content)
-                if (commentJson.uc) {
-                    negative = commentJson.uc;
-                } else {
-                    // 優先度2: "negative" を含むキーを検索
-                    for (const key in commentJson) {
-                        if (key.includes('negative')) {
-                            const val = commentJson[key];
-                            if (typeof val === 'string') {
-                                negative = val;
-                            } else if (typeof val === 'object' && val !== null) {
-                                // v4_negative_prompt: { caption: { base_caption: "..." } }
-                                if (val.caption && val.caption.base_caption) {
-                                    negative = val.caption.base_caption;
-                                } else {
-                                    // 構造が不明な場合はJSON文字列化
-                                    negative = JSON.stringify(val, null, 2);
-                                }
-                            }
-                            break;
-                        }
-                    }
+/**
+ * Description または prompt を持つ未分類ジェネレータのセクションを構築する。
+ * @param {Object} source - 生のメタデータ
+ * @param {string} generatorName - 判定済みジェネレータ名
+ * @returns {Array<Object>} - フォールバック用セクション
+ */
+function buildDescriptionSections(source, generatorName) {
+    const description = toDisplayText(source.Description).trim();
+    const prompt = description ? '' : toDisplayText(source.prompt).trim();
+    const promptText = description || prompt;
+    const promptField = description ? 'description' : (prompt ? 'prompt' : 'description');
+    const promptLabel = description ? 'Description' : 'Prompt';
+    const sections = [];
+
+    if (promptText) {
+        sections.push(createSectionModel(
+            'positive', promptLabel, 'positive', true, promptText,
+            { dataFields: [promptField] }
+        ));
+    }
+
+    const otherEntries = Object.entries(source).filter(([key, value]) => {
+        if (key === 'Description' || (key === 'prompt' && prompt)) return false;
+        return value != null && value !== '';
+    });
+    if (otherEntries.length > 0) {
+        const otherText = otherEntries.map(([key, value]) => {
+            let valueText = toDisplayText(value);
+            if (typeof value !== 'string') {
+                try {
+                    valueText = JSON.stringify(value, null, 2);
+                } catch (error) {
+                    valueText = toDisplayText(value);
                 }
-            } catch (e) {
-                // JSON parseに失敗した場合は何もしない
+            }
+            return `${key}:\n${valueText}`;
+        }).join('\n\n').trim();
+        if (otherText) {
+            sections.push(createSectionModel(
+                'other', 'Other Settings', 'settings', false, otherText,
+                { dataFields: ['other'] }
+            ));
+        }
+    }
+    return sections;
+}
+
+/**
+ * parseMetadataToTabs() を置き換える純粋なセクションモデル構築関数。
+ * @param {Object|null} metadata - 生のメタデータ
+ * @returns {Array<Object>} - 表示セクション
+ */
+function buildSectionsInternal(metadata) {
+    const source = metadata && typeof metadata === 'object' ? metadata : {};
+    const hasNovelAIComment = Boolean(source.Comment);
+    const generatorName = hasNovelAIComment ? 'NovelAI' : detectGenerator(source);
+    const sections = [];
+
+    const isA1111Family = ['A1111', 'Civitai', 'Forge', 'Stable Diffusion WebUI']
+        .includes(generatorName);
+    if (isA1111Family && (typeof source.parameters === 'string' || source.parameters_settings)) {
+        return buildA1111Sections(source);
+    }
+
+    const isComfyMetadata = generatorName === 'ComfyUI' ||
+        Boolean(source.workflow || source.generation_data);
+    const isDescriptionFallback = generatorName.startsWith('Midjourney') ||
+        generatorName === 'Tensor.art' ||
+        (!source.Comment && !isComfyMetadata &&
+            (source.Description || source.prompt) && !generatorName.startsWith('NovelAI'));
+    if (isDescriptionFallback) {
+        return buildDescriptionSections(source, generatorName);
+    }
+
+    if (isComfyMetadata) {
+        const formatComfyJson = value => {
+            if (value == null || value === '') return '';
+            if (typeof value === 'string') {
+                try {
+                    return JSON.stringify(JSON.parse(value), null, 2);
+                } catch (error) {
+                    return value;
+                }
+            }
+            try {
+                return JSON.stringify(value, null, 2);
+            } catch (error) {
+                return toDisplayText(value);
+            }
+        };
+
+        const promptText = formatComfyJson(source.prompt);
+        if (promptText) {
+            sections.push(createSectionModel(
+                'positive', 'Prompt', 'positive', true, promptText,
+                { dataFields: ['comfy_prompt_json'] }
+            ));
+        }
+
+        const workflowText = formatComfyJson(source.workflow);
+        if (workflowText) {
+            sections.push(createSectionModel(
+                'workflow', 'workflow', 'settings', false, workflowText,
+                { dataFields: ['comfy_workflow_json'] }
+            ));
+        }
+
+        const other = { ...source };
+        delete other.prompt;
+        delete other.workflow;
+        const otherText = formatComfyJson(other);
+        if (otherText && otherText !== '{}') {
+            sections.push(createSectionModel(
+                'other', 'Other Settings', 'settings', false, otherText,
+                { dataFields: ['other'] }
+            ));
+        }
+        return sections;
+    }
+
+    if (generatorName.startsWith('NovelAI') || source.Description || source.Comment) {
+        const comment = parseCommentObject(source.Comment);
+        const hasNovelAiV4Prompt = Boolean(
+            safeGet(comment, 'v4_prompt') || safeGet(comment, 'v4_negative_prompt')
+        );
+        const fallbackEntries = collectCaptionsLike(comment);
+        const hasV4LikeCaptions = fallbackEntries.some(entry =>
+            /(?:v4|caption|char|negative|undesired)/i.test(entry.path) &&
+            entry.path !== 'prompt' && entry.path !== 'uc'
+        );
+        if (source.Comment && !hasNovelAiV4Prompt && !hasV4LikeCaptions) {
+            return buildNovelAiLegacySections(source, comment);
+        }
+        const v4Base = safeGet(comment, 'v4_prompt.caption.base_caption');
+        const legacyBase = safeGet(comment, 'prompt');
+        let baseText = source.Description || v4Base || legacyBase || '';
+        let baseFields = source.Description && v4Base
+            ? ['description', 'comment.v4_prompt.caption.base_caption']
+            : source.Description
+                ? ['description']
+                : v4Base
+                    ? ['comment.v4_prompt.caption.base_caption']
+                    : ['comment.prompt'];
+        if (!baseText) {
+            const fallbackBase = fallbackEntries.find(entry =>
+                !isNegativeCaptionPath(entry.path) && !isCharacterCaptionPath(entry.path)
+            );
+            if (fallbackBase) {
+                baseText = fallbackBase.text;
+                baseFields = [`comment.${fallbackBase.path}`];
             }
         }
-        // CommentはそのままOtherに残る
+        if (baseText) {
+            sections.push(createSectionModel(
+                'positive', 'Base Prompt', 'positive', true, baseText,
+                { dataFields: baseFields }
+            ));
+        }
+
+        let positiveCharacters = buildCharacterChildren(
+            safeGet(comment, 'v4_prompt.caption.char_captions'),
+            'comment.v4_prompt.caption.char_captions'
+        );
+        if (positiveCharacters.length === 0) {
+            positiveCharacters = collectCharacterChildrenFallback(comment, false);
+        }
+        if (positiveCharacters.length > 0) {
+            sections.push(createSectionModel(
+                'charPrompts', 'Character Prompts', 'positive', false, '',
+                { children: positiveCharacters }
+            ));
+        }
+
+        const negative = extractNovelAiNegative(comment);
+        let negativeCharacters = buildCharacterChildren(
+            safeGet(comment, 'v4_negative_prompt.caption.char_captions'),
+            'comment.v4_negative_prompt.caption.char_captions'
+        );
+        if (negativeCharacters.length === 0) {
+            negativeCharacters = collectCharacterChildrenFallback(comment, true);
+        }
+        negativeCharacters = dedupeNegativeCharacterChildren(negativeCharacters, negative.text);
+        if (negativeCharacters.length > 0) {
+            sections.push(createSectionModel(
+                'charUndesired', 'Character Undesired Content', 'negative', false, '',
+                { children: negativeCharacters }
+            ));
+        }
+
+        if (negative.text) {
+            sections.push(createSectionModel(
+                'negative', 'Undesired Content', 'negative', false, negative.text,
+                { dataFields: negative.dataFields }
+            ));
+        }
+
+        const parameterKeys = ['seed', 'steps', 'sampler', 'scale', 'strength', 'noise', 'smea'];
+        const parameterFields = [];
+        const parameterLines = [];
+        parameterKeys.forEach(key => {
+            let value = comment && comment[key];
+            let fieldKey = key;
+            if ((value == null || value === '') && key === 'smea' && comment && comment.use_smea != null) {
+                value = comment.use_smea;
+                fieldKey = 'use_smea';
+            }
+            if (value != null && value !== '') {
+                parameterLines.push(`${key}: ${toDisplayText(value)}`);
+                parameterFields.push(`comment.${fieldKey}`);
+            }
+        });
+        if (parameterLines.length > 0) {
+            sections.push(createSectionModel(
+                'novelaiParams', 'NovelAI Parameters', 'settings', false,
+                parameterLines.join('\n'),
+                { dataFields: parameterFields }
+            ));
+        }
+        if (comment) {
+            const rawComment = toDisplayText(comment);
+            if (rawComment) {
+                sections.push(createSectionModel(
+                    'rawComment', 'Raw Comment', 'raw', false, rawComment,
+                    { dataFields: ['raw_comment'] }
+                ));
+            }
+        }
+
+        if (sections.length === 0) {
+            const fallback = fallbackEntries.find(entry => !isNegativeCaptionPath(entry.path));
+            if (fallback) {
+                sections.push(createSectionModel(
+                    'positive', 'Base Prompt', 'positive', true, fallback.text,
+                    { dataFields: [`comment.${fallback.path}`] }
+                ));
+            }
+        }
+        return sections;
     }
 
-    // Other Settings用のオブジェクト
-    // parameters_settingsがあれば優先的に表示
-    const other = {};
-    if (otherObj['parameters_settings']) {
-        other['parameters_settings'] = otherObj['parameters_settings'];
-        delete otherObj['parameters_settings'];
+    return buildDescriptionSections(source, generatorName);
+}
+
+/**
+ * セクション構築を例外なしで公開する。
+ * @param {Object|null} metadata - 生のメタデータ
+ * @returns {Array<Object>} - 表示セクション
+ */
+function buildSections(metadata) {
+    try {
+        return buildSectionsInternal(metadata);
+    } catch (error) {
+        const source = metadata && typeof metadata === 'object' ? metadata : {};
+        try {
+            return buildDescriptionSections(source, 'Unknown');
+        } catch (fallbackError) {
+            return [];
+        }
     }
+}
 
-    // 残りのメタデータをすべてotherに追加
-    Object.assign(other, otherObj);
+/**
+ * A1111 の parameters 文字列を Grid 行へ変換する。
+ * @param {*} parameters - parameters 文字列
+ * @returns {Array<{key:string,value:string}>} - Grid 行
+ */
+function parseA1111Grid(parameters) {
+    if (typeof parameters !== 'string') return [];
+    const stepsIndex = parameters.indexOf('Steps:');
+    if (stepsIndex < 0) return [];
+    const parameterText = parameters.substring(stepsIndex).replace(/,\s*$/, '');
+    return parameterText.split(/,\s*(?=[A-Za-z][^:]*:)/)
+        .map(part => {
+            const separator = part.indexOf(':');
+            if (separator < 0) return null;
+            const key = part.substring(0, separator).trim();
+            let value = part.substring(separator + 1).trim();
+            if (!key || !value) return null;
+            if (key.toLowerCase() === 'size') value = value.replace(/\s*x\s*/i, ' × ');
+            return { key, value };
+        })
+        .filter(Boolean);
+}
 
-    return { positive, negative, other };
+/**
+ * NovelAI Comment と画像サイズから Grid 行を作成する。
+ * @param {Object} source - 生のメタデータ
+ * @param {Object|null} comment - 解析済み Comment
+ * @returns {Array<{key:string,value:string}>} - Grid 行
+ */
+function buildNovelAiGrid(source, comment) {
+    const parsedComment = parseCommentObject(comment);
+    if (!parsedComment) return [];
+    const metadata = source && typeof source === 'object' ? source : {};
+    const rows = [];
+    const add = (key, value) => {
+        const text = toDisplayText(value).trim();
+        if (text) rows.push({ key, value: text });
+    };
+    const firstNonEmpty = (...values) => values.find(value => (
+        value != null && (typeof value !== 'string' || value.trim() !== '')
+    ));
+    add('Model', firstNonEmpty(metadata.Source, parsedComment.source, parsedComment.model));
+    add('Sampler', parsedComment.sampler);
+    add('Steps', parsedComment.steps);
+    add('Guidance', parsedComment.scale);
+    add('Seed', parsedComment.seed);
+    add('Strength', parsedComment.strength);
+    add('Noise', parsedComment.noise);
+    const smea = parsedComment.smea != null ? parsedComment.smea : parsedComment.use_smea;
+    if (smea === true) add('SMEA', smea);
+    const width = firstNonEmpty(metadata.width, metadata.Width, safeGet(metadata, 'IHDR.width'));
+    const height = firstNonEmpty(metadata.height, metadata.Height, safeGet(metadata, 'IHDR.height'));
+    if (width != null && height != null) add('Size', `${width} × ${height}`);
+    return rows;
+}
+
+/**
+ * ComfyUI の prompt JSON から主要なサンプラー情報を回収する。
+ * @param {*} prompt - prompt JSON または JSON 文字列
+ * @returns {Array<{key:string,value:string}>} - Grid 行
+ */
+function buildComfyGrid(prompt) {
+    let parsed = prompt;
+    if (typeof prompt === 'string') {
+        try { parsed = JSON.parse(prompt); } catch (error) { return []; }
+    }
+    if (!parsed || typeof parsed !== 'object') return [];
+
+    const rows = [];
+    const seen = new Set();
+    const supportedKeys = ['sampler_name', 'scheduler', 'steps', 'cfg', 'seed', 'noise_seed', 'ckpt_name'];
+    const samplerNodeTypes = new Set(['KSampler', 'KSamplerAdvanced']);
+    const visited = new Set();
+    const maxDepth = 8;
+
+    const addInputRows = inputs => {
+        if (!inputs || typeof inputs !== 'object' || Array.isArray(inputs)) return;
+        for (const key of supportedKeys) {
+            const input = inputs[key];
+            // 0 / false は有効値として残し、null と空文字だけを欠損扱いにする。
+            if (seen.has(key) || input == null || input === '') continue;
+            seen.add(key);
+            rows.push({ key, value: toDisplayText(input) });
+        }
+    };
+
+    const visit = (value, depth) => {
+        if (depth > maxDepth || value == null || typeof value !== 'object' || visited.has(value)) return;
+        visited.add(value);
+        if (Array.isArray(value)) {
+            value.forEach(item => visit(item, depth + 1));
+            return;
+        }
+
+        if (samplerNodeTypes.has(value.class_type)) {
+            addInputRows(value.inputs || value);
+        }
+        Object.values(value).forEach(child => {
+            if (child && typeof child === 'object') visit(child, depth + 1);
+        });
+    };
+
+    visit(parsed, 0);
+    if (seen.has('seed') && seen.has('noise_seed')) {
+        const noiseSeedIndex = rows.findIndex(row => row.key === 'noise_seed');
+        if (noiseSeedIndex >= 0) rows.splice(noiseSeedIndex, 1);
+    }
+    return rows;
+}
+
+/**
+ * メタデータから Generation Grid の行を作成する。
+ * @param {Object|null} metadata - 生のメタデータ
+ * @returns {Array<{key:string,value:string}>} - 空値を除いた Grid 行
+ */
+function buildGridInternal(metadata) {
+    const source = metadata && typeof metadata === 'object' ? metadata : {};
+    const generatorName = source.Comment ? 'NovelAI' : detectGenerator(source);
+    if (['A1111', 'Civitai', 'Forge', 'Stable Diffusion WebUI'].includes(generatorName)) {
+        const parameters = typeof source.parameters === 'string' && source.parameters.includes('Steps:')
+            ? source.parameters
+            : source.parameters_settings;
+        return parseA1111Grid(parameters);
+    }
+    if (generatorName.startsWith('NovelAI')) {
+        return buildNovelAiGrid(source, parseCommentObject(source.Comment));
+    }
+    if (generatorName === 'Tensor.art') {
+        const parameters = typeof source.parameters === 'string' && source.parameters.includes('Steps:')
+            ? source.parameters
+            : source.parameters_settings;
+        return parseA1111Grid(parameters);
+    }
+    if (generatorName === 'ComfyUI' || source.prompt || source.workflow || source.generation_data) {
+        return buildComfyGrid(source.prompt);
+    }
+    if (generatorName.startsWith('Midjourney') && typeof source.Description === 'string') {
+        const description = source.Description;
+        const flagExpression = /--([A-Za-z][\w-]*)(?=[ \t]|$)/g;
+        const flags = [];
+        let match;
+
+        while ((match = flagExpression.exec(description)) !== null) {
+            flags.push({
+                key: `--${match[1]}`,
+                valueStart: flagExpression.lastIndex,
+                index: match.index
+            });
+        }
+
+        return flags.map((flag, index) => {
+            const nextFlag = flags[index + 1];
+            const valueEnd = nextFlag ? nextFlag.index : description.length;
+            const value = description.substring(flag.valueStart, valueEnd).trim();
+            return value ? { key: flag.key, value } : null;
+        }).filter(Boolean);
+    }
+    return [];
+}
+
+/**
+ * Generation Grid 構築を例外なしで公開する。
+ * @param {Object|null} metadata - 生のメタデータ
+ * @returns {Array<{key:string,value:string}>} - 空値を除いた Grid 行
+ */
+function buildGrid(metadata) {
+    try {
+        return buildGridInternal(metadata);
+    } catch (error) {
+        return [];
+    }
+}
+
+/**
+ * Modal Sectionの共有状態を管理するStoreを作成する。
+ * @returns {{STORAGE_KEY:string,load:Function,normalize:Function,mergeAndSave:Function,getInitialState:Function}}
+ */
+const sectionStateStore = (() => {
+    const STORAGE_KEY = 'modalSectionOpenStates';
+    let lastValidMap = {};
+
+    const cloneMap = source => {
+        const clone = {};
+        Object.keys(source).forEach(identifier => {
+            Object.defineProperty(clone, identifier, {
+                configurable: true,
+                enumerable: true,
+                value: source[identifier],
+                writable: true
+            });
+        });
+        return clone;
+    };
+
+    const isPlainObject = value => {
+        if (value === null || typeof value !== 'object' || Array.isArray(value)) return false;
+        try {
+            const prototype = Object.getPrototypeOf(value);
+            if (prototype === null) return true;
+            if (Object.prototype.toString.call(value) !== '[object Object]') return false;
+            return typeof prototype.constructor === 'function' &&
+                prototype.constructor.name === 'Object';
+        } catch (error) {
+            return false;
+        }
+    };
+
+    const normalize = value => {
+        if (!isPlainObject(value)) return {};
+
+        const normalized = {};
+        try {
+            Object.keys(value).forEach(identifier => {
+                if (typeof identifier !== 'string' || identifier.length === 0 ||
+                    typeof value[identifier] !== 'boolean') return;
+                Object.defineProperty(normalized, identifier, {
+                    configurable: true,
+                    enumerable: true,
+                    value: value[identifier],
+                    writable: true
+                });
+            });
+        } catch (error) {
+            return {};
+        }
+        return normalized;
+    };
+
+    const getStorage = () => {
+        try {
+            if (typeof chrome === 'undefined' || !chrome.storage || !chrome.storage.sync ||
+                typeof chrome.storage.sync.get !== 'function') return null;
+            return chrome.storage.sync;
+        } catch (error) {
+            return null;
+        }
+    };
+
+    const callStorageMethod = (method, args) => new Promise((resolve, reject) => {
+        let settled = false;
+        const finish = (callback, value) => {
+            if (settled) return;
+            settled = true;
+            callback(value);
+        };
+        const callback = value => {
+            try {
+                if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.lastError) {
+                    finish(reject, new Error('Chrome storage operation failed'));
+                    return;
+                }
+            } catch (error) {
+                finish(reject, error);
+                return;
+            }
+            finish(resolve, value);
+        };
+
+        try {
+            const result = method(...args, callback);
+            if (result && typeof result.then === 'function') {
+                result.then(value => finish(resolve, value), error => finish(reject, error));
+            } else if (result !== undefined || method.length <= args.length) {
+                finish(resolve, result);
+            }
+        } catch (error) {
+            finish(reject, error);
+        }
+    });
+
+    const load = async () => {
+        const storage = getStorage();
+        if (!storage) return cloneMap(lastValidMap);
+
+        try {
+            const record = await callStorageMethod(storage.get.bind(storage), [STORAGE_KEY]);
+            if (!isPlainObject(record) || !Object.prototype.hasOwnProperty.call(record, STORAGE_KEY)) {
+                return cloneMap(lastValidMap);
+            }
+            const normalized = normalize(record[STORAGE_KEY]);
+            if (!isPlainObject(record[STORAGE_KEY])) return cloneMap(lastValidMap);
+            lastValidMap = normalized;
+            return cloneMap(lastValidMap);
+        } catch (error) {
+            return cloneMap(lastValidMap);
+        }
+    };
+
+    const mergeAndSave = async currentStates => {
+        const normalizedSnapshot = normalize(currentStates);
+        if (!isPlainObject(currentStates)) return false;
+
+        const mergedMap = cloneMap(lastValidMap);
+        Object.keys(normalizedSnapshot).forEach(identifier => {
+            Object.defineProperty(mergedMap, identifier, {
+                configurable: true,
+                enumerable: true,
+                value: normalizedSnapshot[identifier],
+                writable: true
+            });
+        });
+
+        const storage = getStorage();
+        if (!storage || typeof storage.set !== 'function') return false;
+        try {
+            await callStorageMethod(storage.set.bind(storage), [{
+                [STORAGE_KEY]: mergedMap
+            }]);
+            lastValidMap = mergedMap;
+            return true;
+        } catch (error) {
+            return false;
+        }
+    };
+
+    const getInitialState = (sectionId, existingDefault, loadedMap) => {
+        if (typeof sectionId === 'string' && sectionId.length > 0 &&
+            isPlainObject(loadedMap) &&
+            Object.prototype.hasOwnProperty.call(loadedMap, sectionId) &&
+            typeof loadedMap[sectionId] === 'boolean') {
+            return loadedMap[sectionId];
+        }
+        return existingDefault;
+    };
+
+    return { STORAGE_KEY, load, normalize, mergeAndSave, getInitialState };
+})();
+
+if (typeof window !== 'undefined') window.sectionStateStore = sectionStateStore;
+
+/**
+ * セクションモデルを既存モーダル用の値へ変換する。
+ * @param {Object} metadata - 生のメタデータ
+ * @param {Array<Object>} sections - セクションモデル
+ * @returns {{positive:string, negative:string, other:Object}} - 既存形式
+ */
+function sectionsToLegacyTabs(metadata, sections) {
+    const source = metadata && typeof metadata === 'object' ? metadata : {};
+    const positiveSection = sections.find(section => section.id === 'positive');
+    const negativeSection = sections.find(section => section.id === 'negative');
+    const other = { ...source };
+    delete other.parameters;
+    delete other.Description;
+    if (positiveSection && positiveSection.name === 'Prompt' && source.prompt) delete other.prompt;
+    const settingsSection = sections.find(section => section.id === 'genSettings');
+    if (settingsSection) other.parameters_settings = settingsSection.text;
+    return {
+        positive: positiveSection ? positiveSection.text : '',
+        negative: negativeSection ? negativeSection.text : '',
+        other
+    };
 }
 
 /**
@@ -302,295 +1138,349 @@ function setupCopyButton(button, text) {
 /**
  * モーダル要素を作成
  * @param {Object} metadata - メタデータ
- * @returns {HTMLElement} - モーダルオーバーレイ要素
+ * @returns {Promise<HTMLElement>} - モーダルオーバーレイ要素
  */
-function createModal(metadata, imageUrl = null) {
-    const { positive, negative, other } = parseMetadataToTabs(metadata);
-    const generatorName = detectGenerator(metadata);
-
-    // 既存のモーダルがあれば、クローズボタン経由で閉じる（Escapeリスナーの解除を含む）
-    const existingOverlay = document.getElementById('ai-meta-modal-overlay');
-    if (existingOverlay) {
-        const existingCloseBtn = existingOverlay.querySelector('.ai-meta-close-btn');
-        if (existingCloseBtn) {
-            existingCloseBtn.click();
-        } else {
-            existingOverlay.remove();
-        }
+async function createModal(metadata, imageUrl = null) {
+    let loadedSectionStates = {};
+    try {
+        loadedSectionStates = await sectionStateStore.load();
+    } catch (error) {
+        loadedSectionStates = {};
     }
 
-    // オーバーレイ
+    const sectionModel = buildSections(metadata);
+    const gridRows = buildGrid(metadata);
+    const generatorName = detectGenerator(metadata || {});
+    const modalSettings = window.settings && typeof window.settings === 'object'
+        ? window.settings
+        : {};
+
+    const existingOverlay = document.getElementById('ai-meta-modal-overlay');
+    if (existingOverlay) {
+        const existingClose = existingOverlay.closeModal;
+        if (typeof existingClose === 'function') await existingClose();
+        else existingOverlay.remove();
+    }
+
     const overlay = document.createElement('div');
     overlay.id = 'ai-meta-modal-overlay';
     overlay.className = 'ai-meta-modal-overlay';
 
-    // モーダル本体
     const modal = document.createElement('div');
     modal.className = 'ai-meta-modal';
-
-    // 設定からサイズ・位置を適用
-    const width = settings.modalWidth || 600;
-    const height = settings.modalHeight || 500;
-    modal.style.width = width + 'px';
-    modal.style.height = height + 'px';
-
-    if (settings.modalX === 'center' || settings.modalY === 'center') {
+    modal.style.width = (modalSettings.modalWidth || 600) + 'px';
+    modal.style.height = (modalSettings.modalHeight || 500) + 'px';
+    if (modalSettings.modalX === 'center' || modalSettings.modalY === 'center') {
         modal.style.left = '50%';
         modal.style.top = '50%';
         modal.style.transform = 'translate(-50%, -50%)';
     } else {
-        modal.style.left = (typeof settings.modalX === 'number' ? settings.modalX : 100) + 'px';
-        modal.style.top = (typeof settings.modalY === 'number' ? settings.modalY : 100) + 'px';
+        modal.style.left = (typeof modalSettings.modalX === 'number' ? modalSettings.modalX : 100) + 'px';
+        modal.style.top = (typeof modalSettings.modalY === 'number' ? modalSettings.modalY : 100) + 'px';
         modal.style.transform = 'none';
     }
 
-    // ヘッダー
     const header = document.createElement('div');
     header.className = 'ai-meta-modal-header';
-
     const title = document.createElement('h2');
     title.textContent = `Image Metadata - ${generatorName}`;
-
     const closeBtn = document.createElement('button');
     closeBtn.className = 'ai-meta-close-btn';
-    closeBtn.innerHTML = '&times;';
+    closeBtn.textContent = '×';
     closeBtn.title = 'Close';
-
-    // 閉じる機能の復元
-    const closeModal = () => {
-        overlay.remove();
-        document.removeEventListener('keydown', handleEsc);
-    };
-    const handleEsc = (e) => {
-        if (e.key === 'Escape') closeModal();
-    };
-
-    closeBtn.onclick = (e) => {
-        e.stopPropagation();
-        closeModal();
-    };
-    overlay.onclick = (e) => {
-        if (e.target === overlay) closeModal();
-    };
-    document.addEventListener('keydown', handleEsc);
-
     header.appendChild(title);
     header.appendChild(closeBtn);
 
-    // コンテンツエリア
     const content = document.createElement('div');
     content.className = 'ai-meta-modal-content';
+    const collectSectionStates = () => {
+        const states = {};
+        content.querySelectorAll('.ai-meta-section[data-section-id]').forEach(section => {
+            const sectionId = section.dataset.sectionId;
+            if (typeof sectionId !== 'string' || sectionId.length === 0) return;
+            Object.defineProperty(states, sectionId, {
+                configurable: true,
+                enumerable: true,
+                value: !section.classList.contains('collapsed'),
+                writable: true
+            });
+        });
+        return states;
+    };
+    let closePromise = null;
+    const closeModal = () => {
+        if (closePromise) return closePromise;
+        closePromise = (async () => {
+            try {
+                await sectionStateStore.mergeAndSave(collectSectionStates());
+            } catch (error) {
+                // 保存失敗時もModalの終了処理は継続する。
+            } finally {
+                overlay.remove();
+                document.removeEventListener('keydown', handleEsc);
+            }
+        })();
+        return closePromise;
+    };
+    const handleEsc = event => {
+        if (event.key === 'Escape') closeModal();
+    };
+    closeBtn.onclick = event => {
+        event.stopPropagation();
+        closeModal();
+    };
+    overlay.onclick = event => {
+        if (event.target === overlay) closeModal();
+    };
+    overlay.closeModal = closeModal;
+    document.addEventListener('keydown', handleEsc);
 
-    // セクション作成ヘルパー
-    const createSection = (titleText, textContent, className) => {
+    const editingEnabled = typeof modalSettings.enableMetadataEditing === 'undefined' || modalSettings.enableMetadataEditing;
+    const sectionOpenSettings = {
+        negative: modalSettings.sectionDefaultOpenNegative,
+        genSettings: modalSettings.sectionDefaultOpenGenSettings,
+        charPrompts: modalSettings.sectionDefaultOpenCharPrompts,
+        charUndesired: modalSettings.sectionDefaultOpenCharUndesired,
+        novelaiParams: modalSettings.sectionDefaultOpenNovelaiParams,
+        rawComment: modalSettings.sectionDefaultOpenRawComment,
+        workflow: modalSettings.sectionDefaultOpenWorkflow,
+        other: modalSettings.sectionDefaultOpenOther
+    };
+    const getInitialSectionState = (sectionId, modelDefaultOpen) => {
+        const configuredDefaultOpen = sectionOpenSettings[sectionId];
+        const existingDefaultOpen = typeof configuredDefaultOpen === 'boolean'
+            ? configuredDefaultOpen
+            : modelDefaultOpen;
+        return sectionStateStore.getInitialState(
+            sectionId,
+            existingDefaultOpen,
+            loadedSectionStates
+        );
+    };
+
+    const countTags = text => String(text || '').split(/[,\n]/).map(tag => tag.trim()).filter(Boolean).length;
+    const readAreaText = area => area ? (area.innerText || area.textContent || '') : '';
+
+    const appendHighlightedText = (target, text) => {
+        const pattern = /(Model:\s*[^,]+|ADetailer[^:]*:\s*[^,]+|Hires\s+(?:checkpoint|Module\s+\d+|CFG\s+Scale|upscale|steps|upscaler):\s*[^,]+|Lora\s+hashes:\s*(?:"[^"]+"|\{[^}]+\}|[^,]+))/gi;
+        let cursor = 0;
+        let match;
+        while ((match = pattern.exec(text)) !== null) {
+            if (match.index > cursor) target.appendChild(document.createTextNode(text.substring(cursor, match.index)));
+            const span = document.createElement('span');
+            span.textContent = match[0];
+            if (/^Model:/i.test(match[0])) span.style.color = '#4a9eff';
+            else if (/^ADetailer/i.test(match[0])) span.style.color = '#bb86fc';
+            else if (/^Hires/i.test(match[0])) span.style.color = '#03dac6';
+            else span.style.color = '#ffcb2b';
+            span.style.fontWeight = 'bold';
+            target.appendChild(span);
+            cursor = pattern.lastIndex;
+        }
+        if (cursor < text.length) target.appendChild(document.createTextNode(text.substring(cursor)));
+    };
+
+    const createTextArea = (text, dataFields, highlight = false) => {
+        const area = document.createElement('div');
+        area.className = 'ai-meta-text-area';
+        const displayText = toDisplayText(text);
+        if (highlight && displayText) appendHighlightedText(area, displayText);
+        else area.textContent = displayText || 'None';
+        if (!displayText) area.classList.add('empty');
+        if (Array.isArray(dataFields) && dataFields.length > 0) {
+            area.setAttribute('data-field', dataFields.join(','));
+        }
+        if (editingEnabled) area.contentEditable = 'true';
+        return area;
+    };
+
+    const renderSection = sectionModelItem => {
         const section = document.createElement('div');
-        section.className = `ai-meta-section ${className}`;
+        section.className = 'ai-meta-section';
+        section.dataset.sectionId = sectionModelItem.id;
+        const defaultOpen = getInitialSectionState(
+            sectionModelItem.id,
+            sectionModelItem.defaultOpen
+        );
+        if (!defaultOpen) section.classList.add('collapsed');
 
         const sectionHeader = document.createElement('div');
         sectionHeader.className = 'ai-meta-section-header';
+        sectionHeader.addEventListener('click', () => section.classList.toggle('collapsed'));
+
+        const chevron = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+        chevron.classList.add('ai-meta-chevron');
+        chevron.setAttribute('viewBox', '0 0 12 12');
+        chevron.setAttribute('width', '14');
+        chevron.setAttribute('height', '14');
+        chevron.setAttribute('aria-hidden', 'true');
+        chevron.setAttribute('focusable', 'false');
+        const chevronPath = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+        chevronPath.setAttribute('d', 'M2 4.5 6 8l4-3.5');
+        chevronPath.setAttribute('fill', 'none');
+        chevronPath.setAttribute('stroke', 'currentColor');
+        chevronPath.setAttribute('stroke-width', '1.5');
+        chevronPath.setAttribute('stroke-linecap', 'round');
+        chevronPath.setAttribute('stroke-linejoin', 'round');
+        chevron.appendChild(chevronPath);
+        sectionHeader.appendChild(chevron);
 
         const label = document.createElement('span');
         label.className = 'ai-meta-section-label';
-        label.textContent = titleText;
+        label.textContent = sectionModelItem.name;
+        sectionHeader.appendChild(label);
+
+        const values = sectionModelItem.children
+            ? sectionModelItem.children.map(child => child.text).join('\n')
+            : sectionModelItem.text;
+        if (sectionModelItem.kind === 'positive' || sectionModelItem.kind === 'negative') {
+            const tally = document.createElement('span');
+            tally.className = 'ai-meta-section-tally';
+            tally.textContent = String(countTags(values));
+            sectionHeader.appendChild(tally);
+        }
 
         const copyBtn = document.createElement('button');
         copyBtn.className = 'ai-meta-copy-btn';
         copyBtn.textContent = 'Copy';
         copyBtn.setAttribute('data-tooltip', 'Copy to clipboard');
-
-        // 編集内容を考慮したコピー
-        copyBtn.onclick = (e) => {
-            e.stopPropagation();
-            const area = section.querySelector('.ai-meta-text-area');
-            const textToCopy = area ? area.innerText : textContent;
-            copyToClipboard(textToCopy, copyBtn);
-        };
-
-        sectionHeader.appendChild(label);
+        copyBtn.addEventListener('click', event => {
+            event.stopPropagation();
+            const areas = Array.from(section.querySelectorAll('.ai-meta-text-area'));
+            copyToClipboard(areas.map(readAreaText).join('\n'), copyBtn);
+        });
         sectionHeader.appendChild(copyBtn);
 
-        const textArea = document.createElement('div');
-        textArea.className = 'ai-meta-text-area';
-        textArea.innerText = textContent || 'None';
-        if (!textContent) textArea.classList.add('empty');
-
-        // 編集許可設定 (標準で有効、設定による制限も可能)
-        if (typeof settings.enableMetadataEditing === 'undefined' || settings.enableMetadataEditing) {
-            textArea.contentEditable = "true";
+        const body = document.createElement('div');
+        body.className = 'ai-meta-section-body';
+        if (sectionModelItem.children && sectionModelItem.children.length > 0) {
+            sectionModelItem.children.forEach(child => {
+                const block = document.createElement('div');
+                block.className = 'ai-meta-char-block';
+                const childLabel = document.createElement('div');
+                childLabel.className = 'ai-meta-char-label';
+                childLabel.textContent = child.label;
+                block.appendChild(childLabel);
+                block.appendChild(createTextArea(child.text, child.dataFields));
+                body.appendChild(block);
+            });
+        } else {
+            body.appendChild(createTextArea(sectionModelItem.text, sectionModelItem.dataFields, sectionModelItem.highlight));
         }
-
         section.appendChild(sectionHeader);
-        section.appendChild(textArea);
-
+        section.appendChild(body);
         return section;
     };
 
-    // 各セクション追加
-    content.appendChild(createSection('Positive Prompt', positive, 'positive-section'));
-    content.appendChild(createSection('Negative Prompt', negative, 'negative-section'));
+    const renderGrid = rows => {
+        if (!Array.isArray(rows) || rows.length === 0) return null;
+        const section = document.createElement('div');
+        section.className = 'ai-meta-section ai-meta-grid';
+        section.dataset.sectionId = 'grid';
+        if (!getInitialSectionState('grid', true)) section.classList.add('collapsed');
+        const sectionHeader = document.createElement('div');
+        sectionHeader.className = 'ai-meta-section-header';
+        sectionHeader.addEventListener('click', () => section.classList.toggle('collapsed'));
+        const chevron = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+        chevron.classList.add('ai-meta-chevron');
+        chevron.setAttribute('viewBox', '0 0 12 12');
+        chevron.setAttribute('width', '14');
+        chevron.setAttribute('height', '14');
+        chevron.setAttribute('aria-hidden', 'true');
+        chevron.setAttribute('focusable', 'false');
+        const chevronPath = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+        chevronPath.setAttribute('d', 'M2 4.5 6 8l4-3.5');
+        chevronPath.setAttribute('fill', 'none');
+        chevronPath.setAttribute('stroke', 'currentColor');
+        chevronPath.setAttribute('stroke-width', '1.5');
+        chevronPath.setAttribute('stroke-linecap', 'round');
+        chevronPath.setAttribute('stroke-linejoin', 'round');
+        chevron.appendChild(chevronPath);
+        sectionHeader.appendChild(chevron);
+        const label = document.createElement('span');
+        label.className = 'ai-meta-section-label';
+        label.textContent = 'Generation Grid';
+        sectionHeader.appendChild(label);
+        section.appendChild(sectionHeader);
+        const body = document.createElement('div');
+        body.className = 'ai-meta-section-body ai-meta-grid-body';
+        rows.forEach(row => {
+            if (!row || row.key == null || row.key === '' ||
+                row.value == null || row.value === '') return;
+            const gridRow = document.createElement('div');
+            gridRow.className = 'ai-meta-grid-row';
+            const key = document.createElement('span');
+            key.className = 'ai-meta-grid-key';
+            key.textContent = row.key;
+            const value = document.createElement('span');
+            value.className = 'ai-meta-grid-val';
+            value.textContent = row.value;
+            value.dataset.gridValue = row.value;
+            gridRow.appendChild(key);
+            gridRow.appendChild(value);
+            body.appendChild(gridRow);
+        });
+        section.appendChild(body);
+        return section;
+    };
 
-    // Other Settings セクション（特別処理）
-    const otherSection = document.createElement('div');
-    otherSection.className = 'ai-meta-section other-section';
-
-    const otherHeader = document.createElement('div');
-    otherHeader.className = 'ai-meta-section-header';
-
-    const otherLabel = document.createElement('span');
-    otherLabel.className = 'ai-meta-section-label';
-    otherLabel.textContent = 'Other Settings';
-
-    // Other全体のコピーボタン
-    const otherCopyBtn = document.createElement('button');
-    otherCopyBtn.className = 'ai-meta-copy-btn';
-    otherCopyBtn.textContent = 'Copy';
-    otherCopyBtn.setAttribute('data-tooltip', 'Copy all other settings');
-
-    // otherオブジェクトを文字列化（キー: 値の形式）
-    let otherText = '';
-    if (other && typeof other === 'object' && Object.keys(other).length > 0) {
-        for (const [key, value] of Object.entries(other)) {
-            // 値が長い場合は改行を入れる
-            const valueStr = typeof value === 'object' ? JSON.stringify(value, null, 2) : String(value);
-            otherText += `${key}:\n${valueStr}\n\n`;
+    let gridInserted = false;
+    const negativeIndexes = sectionModel
+        .map((section, index) => ({ section, index }))
+        .filter(({ section }) => section.id === 'negative' || section.id === 'charUndesired')
+        .map(({ index }) => index);
+    const lastNegativeIndex = negativeIndexes.length > 0
+        ? negativeIndexes[negativeIndexes.length - 1]
+        : -1;
+    sectionModel.forEach((sectionModelItem, index) => {
+        content.appendChild(renderSection(sectionModelItem));
+        const shouldInsertGrid = lastNegativeIndex >= 0
+            ? index === lastNegativeIndex
+            : sectionModelItem.kind === 'positive';
+        if (!gridInserted && shouldInsertGrid) {
+            const grid = renderGrid(gridRows);
+            if (grid) content.appendChild(grid);
+            gridInserted = true;
         }
-        otherText = otherText.trim();
+    });
+    if (!gridInserted) {
+        const grid = renderGrid(gridRows);
+        if (grid) content.appendChild(grid);
     }
 
-    setupCopyButton(otherCopyBtn, otherText || 'None');
-
-    otherHeader.appendChild(otherLabel);
-    otherHeader.appendChild(otherCopyBtn);
-
-    const otherTextArea = document.createElement('div');
-    otherTextArea.className = 'ai-meta-text-area';
-
-    if (other && typeof other === 'object' && Object.keys(other).length > 0) {
-        // キーと値のリスト形式で表示
-        for (const [key, value] of Object.entries(other)) {
-            const itemDiv = document.createElement('div');
-            itemDiv.className = 'ai-meta-other-item';
-            itemDiv.style.marginBottom = '12px';
-
-            const keySpan = document.createElement('div');
-            keySpan.style.fontWeight = 'bold';
-            keySpan.style.marginBottom = '4px';
-            keySpan.style.color = '#4a9eff';
-            keySpan.textContent = key;
-
-            const valueDiv = document.createElement('div');
-            valueDiv.style.whiteSpace = 'pre-wrap';
-            valueDiv.style.wordBreak = 'break-word';
-            valueDiv.style.fontFamily = 'monospace';
-            valueDiv.style.fontSize = '0.9em';
-
-            // 値が長いJSON等の場合は整形
-            const valueStr = typeof value === 'object' ? JSON.stringify(value, null, 2) : String(value);
-
-            // parameters_settingsの場合、項目ごとに異なる色でハイライト
-            if (key === 'parameters_settings' && typeof valueStr === 'string') {
-                // XSS対策: HTMLエンティティをエスケープしてからハイライト処理を行う
-                const escapeHtml = (str) => str.replace(/[&<>"']/g, m => ({
-                    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
-                }[m]));
-
-                let highlighted = escapeHtml(valueStr);
-
-                // 1. Model関連 (青系)
-                highlighted = highlighted.replace(
-                    /(Model:\s*[^,]+)/gi,
-                    '<span style="color: #4a9eff; font-weight: bold;">$1</span>'
-                );
-
-                // 2. ADetailer関連 (紫系)
-                highlighted = highlighted.replace(
-                    /(ADetailer[^:]*:\s*[^,]+)/gi,
-                    '<span style="color: #bb86fc; font-weight: bold;">$1</span>'
-                );
-
-                // 3. Hires関連 (緑系)
-                highlighted = highlighted.replace(
-                    /(Hires\s+checkpoint:\s*[^,]+|Hires\s+(?:Module\s+\d+|CFG\s+Scale|upscale|steps|upscaler):\s*[^,]+)/gi,
-                    '<span style="color: #03dac6; font-weight: bold;">$1</span>'
-                );
-
-                // 4. Lora関連 (黄系)
-                highlighted = highlighted.replace(
-                    /(Lora\s+hashes:\s*(?:"[^"]+"|\{[^\}]+\}|[^,]+))/gi,
-                    '<span style="color: #ffcb2b; font-weight: bold;">$1</span>'
-                );
-
-                valueDiv.innerHTML = highlighted;
-            } else {
-                valueDiv.textContent = valueStr;
-            }
-
-            itemDiv.appendChild(keySpan);
-            itemDiv.appendChild(valueDiv);
-            otherTextArea.appendChild(itemDiv);
-        }
-    } else {
-        otherTextArea.textContent = 'None';
-        otherTextArea.classList.add('empty');
-    }
-
-    otherSection.appendChild(otherHeader);
-    otherSection.appendChild(otherTextArea);
-    content.appendChild(otherSection);
-
-    // フッター
     const footer = document.createElement('div');
     footer.className = 'ai-meta-modal-footer';
-
-    // 実験的書き換え機能ボタン (隠し設定有効時のみ)
-    if (settings.advancedModeEnabled && settings.enableExperimentalWriting && imageUrl) {
+    if (modalSettings.advancedModeEnabled && modalSettings.enableExperimentalWriting && imageUrl) {
         const writeBtn = document.createElement('button');
         writeBtn.className = 'ai-meta-copy-all-btn';
         writeBtn.textContent = 'Update & Download';
-        writeBtn.style.backgroundColor = '#d32f2f'; // 警告色
+        writeBtn.style.backgroundColor = '#d32f2f';
         writeBtn.setAttribute('data-tooltip', '埋め込みメタデータを更新してダウンロード (PNG/WebP/JPEG対応、AVIFは非対応)');
-
-        writeBtn.onclick = async (e) => {
-            e.stopPropagation();
-            // 全セクションからデータを収集
-            const sections = content.querySelectorAll('.ai-meta-section');
-            const metadataPayload = {};
-            sections.forEach(sec => {
-                const label = sec.querySelector('.ai-meta-section-label').textContent;
-                const area = sec.querySelector('.ai-meta-text-area');
-                if (label === 'Positive Prompt') metadataPayload.positive = area.innerText;
-                else if (label === 'Negative Prompt') metadataPayload.negative = area.innerText;
-                else if (label === 'Other Settings') metadataPayload.other = area.innerText;
+        writeBtn.onclick = async event => {
+            event.stopPropagation();
+            const payload = {};
+            content.querySelectorAll('.ai-meta-section:not(.ai-meta-grid)').forEach(section => {
+                const label = section.querySelector('.ai-meta-section-label');
+                const area = section.querySelector('.ai-meta-text-area');
+                if (!label || !area) return;
+                if (label.textContent === 'Positive Prompt') payload.positive = readAreaText(area);
+                else if (label.textContent === 'Negative Prompt') payload.negative = readAreaText(area);
+                else if (label.textContent === 'Other Settings') payload.other = readAreaText(area);
             });
-
-            // ステルスメタデータの警告
-            const hasStealthData = metadata && Object.keys(metadata).some(k =>
-                k.startsWith('Stealth PNG Info')
-            );
-            const stealthWarning = hasStealthData
-                ? '\n\n⚠ この画像にはアルファチャンネルに隠されたステルスメタデータが含まれています。\n保存後もステルスデータは残ります。'
-                : '';
-
-            if (window.confirm(`編集したメタデータで画像を再保存（ダウンロード）しますか？\n※元のファイルは変更されません。${stealthWarning}`)) {
-                writeBtn.disabled = true;
-                writeBtn.textContent = 'Processing...';
-                try {
-                    const response = await browserAPI.runtime.sendMessage({
-                        action: 'writeMetadataAndDownload',
-                        imageUrl: imageUrl,
-                        metadata: metadataPayload
-                    });
-                    if (response && response.success) {
-                        showNotification('Metadata updated and download started!');
-                    } else {
-                        throw new Error(response.error || 'Failed to process image');
-                    }
-                } catch (err) {
-                    showNotification('Error: ' + err.message, 'error');
-                } finally {
-                    writeBtn.disabled = false;
-                    writeBtn.textContent = 'Update & Download';
-                }
+            const hasStealthData = metadata && Object.keys(metadata).some(key => key.startsWith('Stealth PNG Info'));
+            const warning = hasStealthData ? '\n\n⚠ この画像にはアルファチャンネルに隠されたステルスメタデータが含まれています。\n保存後もステルスデータは残ります。' : '';
+            if (!window.confirm(`編集したメタデータで画像を再保存（ダウンロード）しますか？\n※元のファイルは変更されません。${warning}`)) return;
+            writeBtn.disabled = true;
+            writeBtn.textContent = 'Processing...';
+            try {
+                const response = await browserAPI.runtime.sendMessage({ action: 'writeMetadataAndDownload', imageUrl, metadata: payload });
+                if (response && response.success) showNotification('Metadata updated and download started!');
+                else throw new Error(response && response.error ? response.error : 'Failed to process image');
+            } catch (error) {
+                showNotification('Error: ' + error.message, 'error');
+            } finally {
+                writeBtn.disabled = false;
+                writeBtn.textContent = 'Update & Download';
             }
         };
         footer.appendChild(writeBtn);
@@ -600,37 +1490,22 @@ function createModal(metadata, imageUrl = null) {
     copyAllBtn.className = 'ai-meta-copy-all-btn';
     copyAllBtn.textContent = 'Copy All Data';
     copyAllBtn.setAttribute('data-tooltip', 'Copy all metadata (raw format)');
-
-    // 全データをraw形式で結合（編集内容を反映させるため、その場で取得）
-    copyAllBtn.onclick = (e) => {
-        e.stopPropagation();
-        let allDataRaw = '';
-        const sections = content.querySelectorAll('.ai-meta-section');
-        sections.forEach(sec => {
-            const label = sec.querySelector('.ai-meta-section-label').textContent;
-            const area = sec.querySelector('.ai-meta-text-area');
-            const text = area ? area.innerText : '';
-            allDataRaw += `${label}:\n${text}\n\n`;
-        });
-        copyToClipboard(allDataRaw.trim(), copyAllBtn);
+    copyAllBtn.onclick = event => {
+        event.stopPropagation();
+        const text = Array.from(content.querySelectorAll('.ai-meta-section:not(.ai-meta-grid)')).map(section => {
+            const label = section.querySelector('.ai-meta-section-label');
+            const areas = Array.from(section.querySelectorAll('.ai-meta-text-area'));
+            return `${label ? label.textContent : ''}:\n${areas.map(readAreaText).join('\n')}`;
+        }).join('\n\n');
+        copyToClipboard(text.trim(), copyAllBtn);
     };
-
     footer.appendChild(copyAllBtn);
 
-    // 組み立て
     modal.appendChild(header);
     modal.appendChild(content);
     modal.appendChild(footer);
     overlay.appendChild(modal);
-
-    // スクロールロック (オプション)
-    // if (document.body) {
-    //     document.body.style.overflow = 'hidden';
-    // }
-
-    // ドラッグ & リサイズ初期化
     initDragAndResize(modal, header);
-
     return overlay;
 }
 
@@ -807,11 +1682,17 @@ function showNotification(message, type = 'success') {
 function createDownloadButton() {
     const btn = document.createElement('div');
     btn.className = 'ai-meta-download-fab';
-    btn.innerHTML = `
-        <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="white" stroke-width="2">
-            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3" />
-        </svg>
-    `;
+    const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    svg.setAttribute('viewBox', '0 0 24 24');
+    svg.setAttribute('width', '24');
+    svg.setAttribute('height', '24');
+    svg.setAttribute('fill', 'none');
+    svg.setAttribute('stroke', 'white');
+    svg.setAttribute('stroke-width', '2');
+    const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+    path.setAttribute('d', 'M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3');
+    svg.appendChild(path);
+    btn.appendChild(svg);
     btn.title = 'Download AI Images';
 
     // スタイル (JSで直接書いても良いがCSSの方が管理しやすい)
@@ -846,12 +1727,13 @@ function createDownloaderModal(images, context) {
     // ヘッダー
     const header = document.createElement('div');
     header.className = 'ai-meta-modal-header';
-    header.innerHTML = `<h2>Select Images to Download</h2>`;
+    const headerTitle = document.createElement('h2');
+    headerTitle.textContent = 'Select Images to Download';
+    header.appendChild(headerTitle);
 
     const closeBtn = document.createElement('button');
     closeBtn.className = 'ai-meta-close-btn';
-    closeBtn.innerHTML = '&times;';
-    header.appendChild(closeBtn);
+    closeBtn.textContent = '×';
 
     // フィルタ・設定エリア
     const toolbar = document.createElement('div');
@@ -937,7 +1819,9 @@ function createDownloaderModal(images, context) {
 
     // 画像アイテム作成
     const renderImages = (onlyAI = true) => {
-        content.innerHTML = '';
+        while (content.firstChild) {
+            content.removeChild(content.firstChild);
+        }
 
         // 設定を読み込み (settings_loader.js が window.settings をセットしている前提)
         const settings = window.settings || { minPixelCount: 0, minImageSize: 0 };

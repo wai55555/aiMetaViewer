@@ -164,13 +164,19 @@ function createBadgeElement(metadata, originalUrl) {
  * @param {HTMLElement} badge
  */
 function attachBadgeClickHandler(badge) {
-    badge.addEventListener('click', (e) => {
+    badge.addEventListener('click', async (e) => {
         e.preventDefault();
         e.stopPropagation();
         const currentMetadata = badge._metadata;
         if (currentMetadata && document.body) {
-            const modal = createModal(currentMetadata, badge._originalUrl); // ui.js
-            document.body.appendChild(modal);
+            try {
+                const modal = await createModal(currentMetadata, badge._originalUrl); // ui.js
+                if (document.body) document.body.appendChild(modal);
+            } catch (error) {
+                if (typeof debugLog === 'function') {
+                    debugLog('[AI Meta Viewer] Failed to create metadata modal.');
+                }
+            }
         }
     });
 }

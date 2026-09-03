@@ -1,8 +1,202 @@
 // background.js - Universal Background Script (Chrome & Firefox)
+const INITIALIZATION_STATES = Object.freeze({
+    PENDING: 'pending',
+    READY: 'ready',
+    FATAL: 'fatal',
+});
+const SAFE_DIAGNOSTIC_MAX_LENGTH = 240;
+const SAFE_CATEGORIES = Object.freeze([
+    'acquisition', 'cache', 'download', 'fatal-initialization', 'message',
+    'parser', 'scanner', 'settings', 'storage', 'unknown',
+]);
+const SAFE_PHASES = Object.freeze([
+    'background', 'content', 'download', 'initialization', 'settings', 'unknown',
+]);
+const SAFE_ERROR_TYPES = Object.freeze([
+    'abort', 'import', 'invalid-response', 'network', 'storage', 'timeout', 'unknown',
+]);
+const SAFE_SCHEMES = Object.freeze(['file', 'http', 'https', 'blob']);
+const SAFE_SCANNER_STATUSES = Object.freeze([
+    'complete', 'empty-confirmed', 'found', 'invalid-png', 'not-found',
+    'partial', 'unresolved', 'unsupported-format', 'unknown',
+]);
+
+let initializationState = INITIALIZATION_STATES.PENDING;
+let fatalInitializationSignalEmitted = false;
+let settings = { debugMode: false };
+
+function getSafeEnum(value, allowedValues) {
+    return allowedValues.includes(value) ? value : 'unknown';
+}
+
+function inferSafeCategory(value) {
+    if (typeof value !== 'string') return 'unknown';
+    const lowerValue = value.toLowerCase();
+    if (lowerValue.includes('fatal') || lowerValue.includes('import script')) {
+        return 'fatal-initialization';
+    }
+    if (lowerValue.includes('cache')) return 'cache';
+    if (lowerValue.includes('storage')) return 'storage';
+    if (lowerValue.includes('setting')) return 'settings';
+    if (lowerValue.includes('download')) return 'download';
+    if (lowerValue.includes('message') || lowerValue.includes('notify')) return 'message';
+    if (lowerValue.includes('scan')) return 'scanner';
+    if (lowerValue.includes('parse') || lowerValue.includes('metadata')) return 'parser';
+    if (lowerValue.includes('fetch') || lowerValue.includes('range') || lowerValue.includes('network')) {
+        return 'acquisition';
+    }
+    return 'unknown';
+}
+
+function inferSafeErrorType(value) {
+    if (typeof value !== 'string') return 'unknown';
+    const lowerValue = value.toLowerCase();
+    if (lowerValue.includes('timeout') || lowerValue.includes('stall')) return 'timeout';
+    if (lowerValue.includes('abort')) return 'abort';
+    if (lowerValue.includes('import')) return 'import';
+    if (lowerValue.includes('storage') || lowerValue.includes('quota')) return 'storage';
+    if (lowerValue.includes('network') || lowerValue.includes('fetch')) return 'network';
+    if (lowerValue.includes('invalid') || lowerValue.includes('response')) return 'invalid-response';
+    return 'unknown';
+}
+
+function getSafeScheme(value) {
+    try {
+        const protocol = typeof value === 'string'
+            ? new URL(value).protocol
+            : value?.protocol;
+        const scheme = typeof protocol === 'string' ? protocol.replace(/:$/, '').toLowerCase() : '';
+        return SAFE_SCHEMES.includes(scheme) ? scheme : undefined;
+    } catch (error) {
+        return undefined;
+    }
+}
+
+function applySafeDiagnosticObject(diagnostic, value) {
+    if (value === null || typeof value !== 'object') return;
+
+    try {
+        if (value instanceof Error || typeof value.name === 'string') {
+            diagnostic.errorType = inferSafeErrorType(value.name);
+        }
+        const safeKeys = ['category', 'phase', 'status', 'bodyPresent', 'scannerStatus', 'retryable'];
+        for (const key of safeKeys) {
+            if (!Object.prototype.hasOwnProperty.call(value, key)) continue;
+            const entry = value[key];
+            if (key === 'category') diagnostic.category = getSafeEnum(entry, SAFE_CATEGORIES);
+            if (key === 'phase') diagnostic.phase = getSafeEnum(entry, SAFE_PHASES);
+            if (key === 'status' && Number.isInteger(entry) && entry >= 100 && entry <= 599) {
+                diagnostic.status = entry;
+            }
+            if (key === 'bodyPresent' && typeof entry === 'boolean') diagnostic.bodyPresent = entry;
+            if (key === 'retryable' && typeof entry === 'boolean') diagnostic.retryable = entry;
+            if (key === 'scannerStatus') {
+                diagnostic.scannerStatus = getSafeEnum(entry, SAFE_SCANNER_STATUSES);
+            }
+        }
+        const scheme = getSafeScheme(value.url || value);
+        if (scheme) diagnostic.scheme = scheme;
+        if (typeof value.errorType === 'string') {
+            diagnostic.errorType = getSafeEnum(value.errorType, SAFE_ERROR_TYPES);
+        }
+        if (typeof value.errorName === 'string') {
+            diagnostic.errorType = inferSafeErrorType(value.errorName);
+        }
+        if (value.error && typeof value.error === 'object') {
+            applySafeDiagnosticObject(diagnostic, value.error);
+        }
+    } catch (error) {
+        // 異常なgetterやProxyは展開せず、固定のunknownへ落とす。
+        diagnostic.errorType = 'unknown';
+    }
+}
+
+function toSafeDiagnostic(...args) {
+    const diagnostic = {
+        category: 'unknown',
+        phase: 'background',
+        errorType: 'unknown',
+        redacted: true,
+    };
+
+    for (const value of args) {
+        if (typeof value === 'string') {
+            const category = inferSafeCategory(value);
+            if (category !== 'unknown') diagnostic.category = category;
+            const errorType = inferSafeErrorType(value);
+            if (errorType !== 'unknown') diagnostic.errorType = errorType;
+            const scheme = getSafeScheme(value);
+            if (scheme) diagnostic.scheme = scheme;
+        } else if (typeof value === 'number' && Number.isInteger(value) && value >= 100 && value <= 599) {
+            diagnostic.status = value;
+        } else {
+            applySafeDiagnosticObject(diagnostic, value);
+        }
+    }
+
+    diagnostic.category = getSafeEnum(diagnostic.category, SAFE_CATEGORIES);
+    diagnostic.phase = getSafeEnum(diagnostic.phase, SAFE_PHASES);
+    diagnostic.errorType = getSafeEnum(diagnostic.errorType, SAFE_ERROR_TYPES);
+    return diagnostic;
+}
+
+function formatSafeDiagnostic(diagnostic) {
+    const fields = [
+        ['category', getSafeEnum(diagnostic?.category, SAFE_CATEGORIES)],
+        ['phase', getSafeEnum(diagnostic?.phase, SAFE_PHASES)],
+        ['errorType', getSafeEnum(diagnostic?.errorType, SAFE_ERROR_TYPES)],
+        ['status', Number.isInteger(diagnostic?.status) ? diagnostic.status : undefined],
+        ['bodyPresent', typeof diagnostic?.bodyPresent === 'boolean' ? diagnostic.bodyPresent : undefined],
+        ['scannerStatus', getSafeEnum(diagnostic?.scannerStatus, SAFE_SCANNER_STATUSES)],
+        ['retryable', typeof diagnostic?.retryable === 'boolean' ? diagnostic.retryable : undefined],
+        ['scheme', getSafeEnum(diagnostic?.scheme, SAFE_SCHEMES)],
+        ['redacted', true],
+    ];
+    return fields
+        .filter(([, value]) => value !== undefined && value !== 'unknown')
+        .map(([key, value]) => `${key}=${value}`)
+        .join(' ')
+        .slice(0, SAFE_DIAGNOSTIC_MAX_LENGTH);
+}
+
+function debugLog(...args) {
+    if (settings?.debugMode !== true) return;
+    console.log(formatSafeDiagnostic(toSafeDiagnostic(...args)));
+}
+
+function emitFatalInitializationFailure() {
+    if (fatalInitializationSignalEmitted) return;
+    initializationState = INITIALIZATION_STATES.FATAL;
+    fatalInitializationSignalEmitted = true;
+    const diagnostic = {
+        category: 'fatal-initialization',
+        phase: 'initialization',
+        errorType: 'import',
+        retryable: false,
+        redacted: true,
+    };
+    console.error(`[AI Meta Viewer] ${formatSafeDiagnostic(diagnostic)}`);
+}
+
+function createInitializationUnavailableResult() {
+    return {
+        success: false,
+        error: 'Background initialization unavailable.',
+        diagnostics: {
+            category: 'fatal-initialization',
+            phase: 'initialization',
+            errorType: 'import',
+            retryable: false,
+            redacted: true,
+        },
+    };
+}
+
 try {
     importScripts('pako.js', 'jszip.min.js', 'parser.js', 'png_metadata_scanner.js');
-} catch (e) {
-    console.error('[AI Meta Viewer] Failed to import scripts in Service Worker:', e);
+    initializationState = INITIALIZATION_STATES.READY;
+} catch (error) {
+    emitFatalInitializationFailure();
 }
 
 // ブラウザAPI統一（Chrome/Firefox両対応）
@@ -90,7 +284,7 @@ class PersistentLRUCache {
                 }
             }
         } catch (e) {
-            console.error('Cache init error:', e);
+            debugLog('Cache init error', e);
         }
     }
 
@@ -101,7 +295,7 @@ class PersistentLRUCache {
             try {
                 await this.storage.set({ [this.metaKey]: Array.from(this.index.entries()) });
             } catch (e) {
-                console.error('Cache index save error:', e);
+                debugLog('Cache index save error', e);
             }
         }, 500); // R1-c: デバウンス短縮（2000ms→500ms）でonSuspend前に保存される確率を向上
     }
@@ -139,7 +333,7 @@ class PersistentLRUCache {
             }
             return cachedValue;
         } catch (e) {
-            console.error('Cache get error:', e);
+            debugLog('Cache get error', e);
             return undefined;
         }
     }
@@ -184,7 +378,7 @@ class PersistentLRUCache {
             await this.saveIndex();
             return { stored: true };
         } catch (e) {
-            console.error('Cache set error:', e);
+            debugLog('Cache set error', e);
             return { stored: false, reason: 'storage-error' };
         }
     }
@@ -486,26 +680,50 @@ chrome.downloads.onDeterminingFilename.addListener((item, suggest) => {
     }
 });
 
+const DOWNLOAD_NOTIFICATION_FILENAME_MAX_LENGTH = 80;
+
+function getSafeDownloadNotificationFilename(value) {
+    if (typeof value !== 'string' || /^[a-z][a-z\d+.-]*:\/\//i.test(value)) {
+        return 'file';
+    }
+
+    const basename = value.split(/[\\/]/).pop() || '';
+    const safeBasename = basename
+        .split(/[?#]/, 1)[0]
+        .replace(/[\u0000-\u001f\u007f]/g, '')
+        .replace(/[\\/:*?"<>|]/g, '_')
+        .trim()
+        .slice(0, DOWNLOAD_NOTIFICATION_FILENAME_MAX_LENGTH);
+
+    return safeBasename || 'file';
+}
+
 // ダウンロード状態の監視 (失敗通知用)
 chrome.downloads.onChanged.addListener((delta) => {
     if (delta.state && delta.state.current === 'interrupted') {
         chrome.downloads.search({ id: delta.id }, (items) => {
             if (items && items[0]) {
                 const item = items[0];
-                const filename = item.filename.split(/[\\/]/).pop();
-                const error = item.error || 'Unknown error';
-                console.error(`[AI Meta Viewer] Download failed: ${filename}`, error);
+                const filename = getSafeDownloadNotificationFilename(item.filename);
+                const diagnostic = {
+                    category: 'download',
+                    phase: 'download',
+                    errorType: inferSafeErrorType(item.error)
+                };
 
-                // アクティブなタブに通知を送る
+                // アクティブなタブに通知を送る。診断ログとは独立して実行する。
                 chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
                     if (tabs[0]) {
                         chrome.tabs.sendMessage(tabs[0].id, {
                             action: 'showNotification',
-                            message: `Download failed: ${filename} (${error})`,
+                            message: `Download failed: ${filename}`,
                             type: 'error'
                         }).catch(() => { });
                     }
                 });
+
+                // 通知には診断情報やraw errorを渡さない。
+                debugLog('[AI Meta Viewer] Download failed', diagnostic);
             }
         });
     }
@@ -674,6 +892,11 @@ class ConcurrencyGate {
     start(waiter) {
         this.active += 1;
         this.inflightBytes += waiter.charge;
+        // 実行枠へ入った待機者はabort listenerの所有を終える。
+        if (waiter.signal && waiter.onAbort) {
+            waiter.signal.removeEventListener('abort', waiter.onAbort);
+            waiter.onAbort = null;
+        }
         const tabKey = waiter.tabId === null ? 'none' : waiter.tabId;
         this.sequence += 1;
         this.tabLastServed.set(tabKey, this.sequence);
@@ -707,7 +930,7 @@ class ConcurrencyGate {
         order = ANALYSIS_ORDER_FIFO, signal = null } = {}) {
         this.sequence += 1;
         const waiter = {
-            charge, priority, tabId, order,
+            charge, priority, tabId, order, signal,
             sequence: this.sequence,
             released: false,
             resolve: null,
@@ -764,10 +987,33 @@ function createAnalysisAbortError(message = 'Image metadata analysis was aborted
  * @returns {Object} - stream 互換オブジェクト
  */
 function withStallTimeout(body, onStall) {
+    let activeReader = null;
+    let readerCancelled = false;
+    let readerReleased = false;
+    const cancelReader = async (reason) => {
+        if (readerCancelled) return;
+        readerCancelled = true;
+        if (activeReader?.cancel) {
+            await activeReader.cancel(reason);
+        } else if (body?.cancel) {
+            await body.cancel(reason);
+        }
+    };
+    const releaseReader = () => {
+        if (readerReleased) return;
+        readerReleased = true;
+        activeReader?.releaseLock?.();
+    };
     return {
-        cancel: (reason) => body.cancel(reason),
+        cancel: cancelReader,
+        // scannerがreaderを取得できない場合も、取得層からbodyを回収できる。
+        cleanup: async (reason) => {
+            try { await cancelReader(reason); } catch (error) { }
+            try { releaseReader(); } catch (error) { }
+        },
         getReader() {
             const reader = body.getReader();
+            activeReader = reader;
             let timer = null;
             const clear = () => {
                 if (timer !== null) {
@@ -787,11 +1033,11 @@ function withStallTimeout(body, onStall) {
                 },
                 cancel(reason) {
                     clear();
-                    return reader.cancel(reason);
+                    return cancelReader(reason);
                 },
                 releaseLock() {
                     clear();
-                    reader.releaseLock();
+                    releaseReader();
                 },
             };
         },
@@ -807,11 +1053,26 @@ function withStallTimeout(body, onStall) {
  * @returns {Object} - stream 互換オブジェクト
  */
 function createReplayStream(bufferedChunks, reader) {
+    let readerCancelled = false;
+    let readerReleased = false;
+    const cancelReader = async (reason) => {
+        if (readerCancelled) return;
+        readerCancelled = true;
+        await reader.cancel(reason);
+    };
+    const releaseReader = () => {
+        if (readerReleased) return;
+        readerReleased = true;
+        reader.releaseLock();
+    };
     return {
-        cancel: (reason) => reader.cancel(reason),
+        cancel: cancelReader,
+        cleanup: async (reason) => {
+            try { await cancelReader(reason); } catch (error) { }
+            try { releaseReader(); } catch (error) { }
+        },
         getReader() {
             let index = 0;
-            let released = false;
             return {
                 async read() {
                     if (index < bufferedChunks.length) {
@@ -819,14 +1080,8 @@ function createReplayStream(bufferedChunks, reader) {
                     }
                     return reader.read();
                 },
-                cancel(reason) {
-                    return reader.cancel(reason);
-                },
-                releaseLock() {
-                    if (released) return;
-                    released = true;
-                    reader.releaseLock();
-                },
+                cancel: cancelReader,
+                releaseLock: releaseReader,
             };
         },
     };
@@ -852,7 +1107,7 @@ async function runGatedPngStreamScan({ charge, context, openStream }) {
 
     // fetch と body read を一つの AbortController へ束ねる。
     // 上位の取り消しと停滞タイムアウトの双方をここで受ける。
-    const controller = new AbortController();
+    let controller = new AbortController();
     const abortFromParent = () => controller.abort();
     context?.signal?.addEventListener('abort', abortFromParent, { once: true });
     let stalled = false;
@@ -860,11 +1115,13 @@ async function runGatedPngStreamScan({ charge, context, openStream }) {
         stalled = true;
         controller.abort();
     };
-    const openTimer = setTimeout(onStall, PNG_STREAM_STALL_TIMEOUT_MS);
+    let stream = null;
+    let openTimer = setTimeout(onStall, PNG_STREAM_STALL_TIMEOUT_MS);
 
     try {
-        const stream = await openStream(controller.signal);
+        stream = await openStream(controller.signal);
         clearTimeout(openTimer);
+        openTimer = null;
         if (!stream) return null;
         return await scanPngMetadataStream(
             withStallTimeout(stream, onStall),
@@ -872,14 +1129,36 @@ async function runGatedPngStreamScan({ charge, context, openStream }) {
         );
     } catch (error) {
         if (stalled) {
-            throw new Error(
+            const stallError = new Error(
                 `PNG stream stalled for more than ${PNG_STREAM_STALL_TIMEOUT_MS}ms.`
             );
+            stallError.name = 'TimeoutError';
+            throw stallError;
         }
         throw error;
     } finally {
-        clearTimeout(openTimer);
+        if (openTimer !== null) clearTimeout(openTimer);
+        // scannerがreaderを取得する前の例外やgate中断でもbodyを残さない。
+        if (stream?.cleanup) {
+            try { await stream.cleanup(controller.signal.reason); } catch (cleanupError) { }
+        }
         context?.signal?.removeEventListener('abort', abortFromParent);
+        controller = null;
+        release();
+    }
+}
+
+async function runGatedPngBufferScan({ buffer, charge, context }) {
+    const release = await pngFullStreamGate.acquire({
+        charge,
+        priority: context?.priority ?? ANALYSIS_PRIORITY_BATCH,
+        tabId: context?.tabId ?? null,
+        order: context?.order ?? ANALYSIS_ORDER_FIFO,
+        signal: context?.signal ?? null,
+    });
+    try {
+        return scanPngMetadataBuffer(buffer, { signal: context?.signal ?? null });
+    } finally {
         release();
     }
 }
@@ -927,7 +1206,7 @@ function getAnalysisContext(imageUrl) {
 function requestImageMetadata(imageUrl, { tabId = null, priority = ANALYSIS_PRIORITY_BATCH,
     order = ANALYSIS_ORDER_FIFO } = {}) {
     const existing = inFlightAnalyses.get(imageUrl);
-    if (existing) {
+    if (existing && !existing.settled) {
         existing.activeRefs += 1;
         // 後から届いた高優先度要求へ引き上げる
         if (priority > existing.priority) existing.priority = priority;
@@ -940,6 +1219,7 @@ function requestImageMetadata(imageUrl, { tabId = null, priority = ANALYSIS_PRIO
         controller,
         signal: controller.signal,
         activeRefs: 1,
+        settled: false,
         priority,
         order,
         tabId,
@@ -966,7 +1246,13 @@ function requestImageMetadata(imageUrl, { tabId = null, priority = ANALYSIS_PRIO
             return { success: false, error: error.message, aborted: error.name === 'AbortError' };
         } finally {
             if (release) release();
-            inFlightAnalyses.delete(imageUrl);
+            entry.settled = true;
+            entry.activeRefs = 0;
+            if (inFlightAnalyses.get(imageUrl) === entry) {
+                inFlightAnalyses.delete(imageUrl);
+            }
+            entry.controller = null;
+            entry.signal = null;
         }
     })();
     return entry.promise;
@@ -980,9 +1266,10 @@ function requestImageMetadata(imageUrl, { tabId = null, priority = ANALYSIS_PRIO
  */
 function cancelImageMetadata(imageUrl) {
     const entry = inFlightAnalyses.get(imageUrl);
-    if (!entry) return false;
+    if (!entry || entry.settled || entry.activeRefs <= 0) return false;
     entry.activeRefs -= 1;
-    if (entry.activeRefs > 0) return false;
+    if (entry.activeRefs > 0 || !entry.controller) return false;
+    if (entry.controller.signal.aborted) return true;
     entry.controller.abort();
     return true;
 }
@@ -1095,8 +1382,9 @@ function isStructuralRangeFailure(error, status) {
     if (typeof status !== 'number') return false;
     // 206 を返しているのに解析できなかった場合は Range 実装の不備として扱う
     if (status === HTTP_PARTIAL_CONTENT_STATUS) return true;
-    // 200 は Range 無視、416 等は Range 非対応として扱う
-    return status === HTTP_OK_STATUS || status >= 400;
+    // 200 は Range 無視、416 は Range 非対応として扱う。
+    // 429・5xxなどのリソース／一時障害はdomain全体のblock根拠にしない。
+    return status === HTTP_OK_STATUS || status === 416;
 }
 
 // デフォルト設定
@@ -1107,7 +1395,7 @@ const DEFAULT_SETTINGS = {
     downloaderFolderMode: 'id_pageTitle', // 'id_pageTitle', 'pageTitle', 'domain', 'none'
     downloaderBaseFolder: 'AI_Meta_Viewer',
     downloaderUseRoot: false,
-    version: '1.5.5',
+    version: '1.6.0',
     // 共有設定の追加
     modalWidth: 800,
     modalHeight: 600,
@@ -1121,14 +1409,7 @@ const DEFAULT_SETTINGS = {
 };
 
 // 現在の設定（起動時に読み込み）
-let settings = { ...DEFAULT_SETTINGS };
-
-// デバッグログ出力関数
-function debugLog(...args) {
-    if (settings.debugMode) {
-        console.log(...args);
-    }
-}
+settings = { ...DEFAULT_SETTINGS };
 
 /**
  * Range Request の失敗情報を標準化してログに出力する
@@ -1207,7 +1488,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         })
             .then(sendResponse)
             .catch(error => {
-                console.error('Metadata fetch error:', error);
+                debugLog('Metadata fetch error', error);
                 sendResponse({ success: false, error: error.message });
             });
 
@@ -1224,7 +1505,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         })
             .then(sendResponse)
             .catch(error => {
-                console.error('Metadata fetch error:', error);
+                debugLog('Metadata fetch error', error);
                 sendResponse({ success: false, error: error.message });
             });
         return true;
@@ -1239,7 +1520,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         })
             .then(sendResponse)
             .catch(error => {
-                console.error('Metadata fetch error:', error);
+                debugLog('Metadata fetch error', error);
                 sendResponse({ success: false, error: error.message });
             });
         return true;
@@ -1277,7 +1558,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
                 sendResponse(result);
             })
             .catch(error => {
-                console.error('Clear all data error:', error);
+                debugLog('Clear all data error', error);
                 sendResponse({ success: false, error: error.message });
             });
         return true;
@@ -1291,7 +1572,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
                 sendResponse({ success: true, statistics: statistics });
             })
             .catch(error => {
-                console.error('Get data statistics error:', error);
+                debugLog('Get data statistics error', error);
                 sendResponse({ success: false, error: error.message });
             });
         return true;
@@ -1309,7 +1590,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         handleGetMediaSize(request.url)
             .then(sendResponse)
             .catch(error => {
-                console.error('Size fetch error:', error);
+                debugLog('Size fetch error', error);
                 sendResponse({ success: false, error: error.message });
             });
         return true;
@@ -1319,7 +1600,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         handleWriteMetadataAndDownload(request.imageUrl, request.metadata)
             .then(sendResponse)
             .catch(error => {
-                console.error('Write metadata error:', error);
+                debugLog('Write metadata error', error);
                 sendResponse({ success: false, error: error.message });
             });
         return true;
@@ -1455,7 +1736,7 @@ chrome.action.onClicked.addListener(async (tab) => {
     }
 
     chrome.tabs.sendMessage(tab.id, { action: 'scanPage' }).catch(err => {
-        console.error('[AI Meta Viewer] Failed to send scanPage message:', err);
+        debugLog('[AI Meta Viewer] Failed to send scanPage message', err);
     });
 });
 
@@ -1550,7 +1831,7 @@ async function handleDownloadImages(images, context) {
                 saveAs: false
             }, (downloadId) => {
                 if (chrome.runtime.lastError) {
-                    console.error(`[AI Meta Viewer] API Error for ${fullFilename}:`, chrome.runtime.lastError.message);
+                    debugLog('[AI Meta Viewer] Download API error', { category: 'download', phase: 'download', errorType: 'unknown' });
                     // 失敗した場合はキューから削除を試みる
                     const q = downloadPathQueue.get(img.url);
                     if (q) {
@@ -1564,7 +1845,7 @@ async function handleDownloadImages(images, context) {
 
             downloadedCount++;
         } catch (e) {
-            console.error(`[AI Meta Viewer] Catch block error for ${img.url}:`, e);
+            debugLog('[AI Meta Viewer] Download request error', { category: 'download', phase: 'download', errorType: 'unknown' });
         }
     }
 
@@ -1625,7 +1906,7 @@ async function handleCivitaiZipDownload(images, context) {
                         zip.file(sanitize(img.filename), blob);
                     }
                 } catch (e) {
-                    console.error('[AI Meta Viewer] Failed to fetch image for ZIP:', img.url, e);
+                    debugLog('[AI Meta Viewer] ZIP image fetch error', { category: 'download', phase: 'download', errorType: 'unknown' });
                 }
             }
 
@@ -1648,7 +1929,7 @@ async function handleCivitaiZipDownload(images, context) {
 
             downloadedCount += galleryImages.length;
         } catch (e) {
-            console.error('[AI Meta Viewer] ZIP compression error:', e);
+            debugLog('[AI Meta Viewer] ZIP compression error', e);
             throw e;
         }
     }
@@ -1662,6 +1943,10 @@ async function handleCivitaiZipDownload(images, context) {
  * Adaptive Range Request Logic 実装
  */
 async function handleFetchImageMetadata(imageUrl) {
+    if (initializationState === INITIALIZATION_STATES.FATAL) {
+        return createInitializationUnavailableResult();
+    }
+
     debugLog('[AI Meta Viewer] Fetching metadata for:', imageUrl);
 
     // blob: URL は Service Worker からアクセス不可のためスキップ
@@ -1701,17 +1986,98 @@ async function handleFetchImageMetadata(imageUrl) {
         }
     }
 
+    // 取得開始前にschemeを一度だけ解決し、file:をHTTP取得経路から分離する。
+    let parsedImageUrl = null;
+    let imageScheme = '';
+    try {
+        parsedImageUrl = new URL(imageUrl);
+        imageScheme = parsedImageUrl.protocol;
+    } catch (urlError) {
+        // 後続の既存取得経路で従来どおり失敗分類するため、schemeは空のままにする。
+    }
+
     // parser.js チェック
     if (typeof extractMetadata !== 'function') {
         debugLog('[AI Meta Viewer] Error: extractMetadata function not found');
         return { success: false, error: 'Parser not loaded' };
     }
 
+    const isFileScheme = imageScheme === 'file:';
+    let filePhase = isFileScheme ? 'acquisition' : null;
+    let fileResponseStatus;
+    let fileBodyPresent;
+    const sanitizeFileDiagnosticMessage = (error) => {
+        const rawMessage = typeof error === 'string'
+            ? error
+            : error?.message || String(error || 'Unknown error');
+        return rawMessage
+            .replace(/(?:file:\/\/|[A-Za-z]:[\\/])[^\s'"`)]*/gi, '[redacted-path]')
+            .replace(/(?:^|\s)\/[^\s'"`)]*/g, '$1[redacted-path]')
+            .replace(/(?:\b[0-9a-f]{2}\s+){3,}[0-9a-f]{2}\b/gi, '[redacted-bytes]')
+            .slice(0, 240);
+    };
+    const classifyFileError = (error) => {
+        if (error?.name === 'AbortError') {
+            return error?.isTimeout || /stalled|timeout/i.test(error.message || '')
+                ? 'timeout'
+                : 'abort';
+        }
+        if (error?.name === 'TimeoutError' || /stalled|timeout/i.test(error?.message || '')) {
+            return 'timeout';
+        }
+        if (filePhase === 'acquisition' &&
+            ['NotAllowedError', 'SecurityError', 'NetworkError'].includes(error?.name)) {
+            return 'file-access';
+        }
+        return 'acquisition';
+    };
+    const createFileFailureResult = (error) => {
+        const category = classifyFileError(error);
+        const safeMessages = {
+            'file-access': 'File access was denied.',
+            acquisition: 'File metadata acquisition failed.',
+            timeout: 'File metadata acquisition timed out.',
+            abort: 'File metadata acquisition was aborted.',
+        };
+        const diagnostics = {
+            category,
+            scheme: 'file',
+            phase: filePhase || 'acquisition',
+            status: typeof fileResponseStatus === 'number' ? fileResponseStatus : undefined,
+            bodyPresent: fileBodyPresent === true,
+            errorName: error?.name || 'Error',
+            message: safeMessages[category] || sanitizeFileDiagnosticMessage(error),
+        };
+        return {
+            success: false,
+            error: diagnostics.message || category,
+            diagnostics,
+        };
+    };
+
+    const sanitizeScannerDiagnostics = (value, depth = 0) => {
+        const forbiddenKeys = new Set([
+            'metadata', 'payload', 'bytes', 'signature', 'observedPrefix', 'value',
+        ]);
+        if (depth > 4 || value === null || value === undefined) return value;
+        if (typeof value === 'string') return sanitizeFileDiagnosticMessage(value);
+        if (typeof value !== 'object') return value;
+        if (Array.isArray(value)) {
+            return value.slice(0, 32).map((entry) => sanitizeScannerDiagnostics(entry, depth + 1));
+        }
+        const result = {};
+        for (const [key, entry] of Object.entries(value).slice(0, 32)) {
+            if (forbiddenKeys.has(key)) continue;
+            result[key] = sanitizeScannerDiagnostics(entry, depth + 1);
+        }
+        return result;
+    };
+
     try {
         let buffer;
         let isRangeRequest = false;
         let rangeRepresentationComplete = false;
-        let domain = '';
+        let domain = parsedImageUrl?.hostname || '';
         let totalFileSize = 0; // 追加：Rangeリクエスト時の総サイズ保持
         // Content-Range の complete-length が `*` の場合、総サイズは不明となる。
         // tail fetch は総サイズが既知であることを前提とするため明示的に区別する。
@@ -1719,7 +2085,8 @@ async function handleFetchImageMetadata(imageUrl) {
         // PNG を全body保持せず stream で受け取った場合の入力。
         // これが設定されている間は buffer を持たない。
         let pngStreamInput = null;
-        try { domain = new URL(imageUrl).hostname; } catch (e) { }
+        let pngBufferRequiresGate = false;
+        let pngBufferCharge = PNG_FULL_STREAM_UNKNOWN_SIZE_CHARGE_BYTES;
 
         // リダイレクト解決済みのURLを保持
         let activeUrl = imageUrl;
@@ -1752,7 +2119,10 @@ async function handleFetchImageMetadata(imageUrl) {
          * @param {Object} [options] - PNG stream許可設定
          * @returns {Promise<Object>} - bufferまたはPNG streamの解析入力
          */
-        const readResponseForMetadata = async (response, { allowPngStream = true } = {}) => {
+        const readResponseForMetadata = async (response, {
+            allowPngStream = true,
+            signal = null,
+        } = {}) => {
             const declaredLength = Number(response.headers?.get?.('content-length'));
             const charge = Number.isSafeInteger(declaredLength) && declaredLength > 0
                 ? declaredLength
@@ -1768,7 +2138,7 @@ async function handleFetchImageMetadata(imageUrl) {
                             new Uint8Array(fullBuffer).subarray(0, PNG_SIGNATURE.length)
                         );
                     }
-                    return { kind: 'png-buffer', buffer: fullBuffer };
+                    return { kind: 'png-buffer', buffer: fullBuffer, charge, gateRequired: true };
                 }
                 const format = detectImageFormat(fullBuffer);
                 const budget = getMetadataHeadBudget(format);
@@ -1809,6 +2179,7 @@ async function handleFetchImageMetadata(imageUrl) {
             let format = null;
             let handedOverToScanner = false;
             let boundedMetadata = null;
+            let nextParseAt = 0;
 
             const materialize = () => {
                 const buffer = new Uint8Array(totalLength);
@@ -1819,8 +2190,22 @@ async function handleFetchImageMetadata(imageUrl) {
                 }
                 return buffer.buffer;
             };
+            let readerCancelled = false;
+            let readerReleased = false;
+            let abortListener = null;
             const cancelReader = async () => {
+                if (readerCancelled) return;
+                readerCancelled = true;
                 try { await reader.cancel(); } catch (e) { debugLog('[AI Meta Viewer] metadata reader cancel failed:', e.message); }
+            };
+            const releaseReader = () => {
+                if (readerReleased) return;
+                readerReleased = true;
+                try { reader.releaseLock(); } catch (e) { debugLog('[AI Meta Viewer] metadata reader release failed:', e.message); }
+            };
+            if (signal) {
+                abortListener = () => { void cancelReader(); };
+                signal.addEventListener('abort', abortListener, { once: true });
             };
 
             try {
@@ -1872,16 +2257,28 @@ async function handleFetchImageMetadata(imageUrl) {
                     totalLength += accepted.byteLength;
 
                     if (format) {
-                        const partialBuffer = materialize();
-                        const partialMetadata = extractMetadata(partialBuffer, {
-                            format,
-                            inputComplete: false,
-                        });
-                        boundedMetadata = partialMetadata;
-                        const state = getMetadataState(partialMetadata);
-                        if (state === 'resolved' || state === 'empty-confirmed') {
-                            await cancelReader();
-                            return { kind: 'buffer', buffer: partialBuffer };
+                        if (nextParseAt === 0) {
+                            nextParseAt = Math.min(budget, Math.max(formatPrefixLimit, 4096));
+                        }
+                        // chunkごとのmaterializeを避け、解析点を指数的に増やす。
+                        // これにより大きな非PNG streamでも累積O(n²)にならない。
+                        const shouldParse = totalLength >= nextParseAt || totalLength >= budget;
+                        if (shouldParse) {
+                            const partialBuffer = materialize();
+                            const partialMetadata = extractMetadata(partialBuffer, {
+                                format,
+                                inputComplete: false,
+                            });
+                            boundedMetadata = partialMetadata;
+                            const state = getMetadataState(partialMetadata);
+                            if (state === 'resolved' || state === 'empty-confirmed') {
+                                await cancelReader();
+                                return { kind: 'buffer', buffer: partialBuffer };
+                            }
+                            nextParseAt = Math.min(
+                                budget,
+                                Math.max(nextParseAt * 2, nextParseAt + 4096),
+                            );
                         }
                     }
 
@@ -1904,7 +2301,13 @@ async function handleFetchImageMetadata(imageUrl) {
                     }
                 }
             } finally {
-                if (!handedOverToScanner) reader.releaseLock();
+                if (signal && abortListener) {
+                    signal.removeEventListener('abort', abortListener);
+                }
+                if (!handedOverToScanner) {
+                    await cancelReader();
+                    releaseReader();
+                }
             }
 
             if (pngPrefix === PNG_PREFIX_UNDETERMINED) pngPrefix = PNG_PREFIX_NOT_PNG;
@@ -1966,7 +2369,66 @@ async function handleFetchImageMetadata(imageUrl) {
             return input.buffer;
         };
 
-        {
+        if (isFileScheme) {
+            let fileController = new AbortController();
+            const analysisContext = getAnalysisContext(imageUrl);
+            const parentSignal = analysisContext?.signal;
+            const abortFromParent = () => fileController?.abort();
+            let parentListenerAttached = false;
+            try {
+                if (parentSignal) {
+                    if (parentSignal.aborted) throw createAnalysisAbortError();
+                    parentSignal.addEventListener('abort', abortFromParent, { once: true });
+                    parentListenerAttached = true;
+                }
+                const response = await fetch(imageUrl, {
+                    redirect: 'follow',
+                    signal: fileController.signal,
+                });
+                fileResponseStatus = response?.status;
+                fileBodyPresent = Boolean(response?.body);
+                if (!response || response.status !== HTTP_OK_STATUS) {
+                    const statusError = new Error(
+                        `File fetch failed with HTTP ${response?.status ?? 'unknown'}.`
+                    );
+                    statusError.name = 'ResponseStatusError';
+                    throw statusError;
+                }
+                if (!response.body) {
+                    const bodyError = new Error('File response body is unavailable.');
+                    bodyError.name = 'ResponseBodyError';
+                    throw bodyError;
+                }
+                const input = await readResponseForMetadata(response, {
+                    allowPngStream: true,
+                    signal: fileController.signal,
+                });
+                if (input.kind === 'png-stream') {
+                    pngStreamInput = input;
+                    rangeRepresentationComplete = true;
+                } else {
+                    buffer = input.buffer;
+                    pngBufferRequiresGate = input.gateRequired === true;
+                    pngBufferCharge = input.charge || PNG_FULL_STREAM_UNKNOWN_SIZE_CHARGE_BYTES;
+                    totalFileSizeKnown = input.totalFileSizeKnown !== false;
+                    totalFileSize = totalFileSizeKnown
+                        ? (input.totalFileSize || buffer.byteLength)
+                        : buffer.byteLength;
+                    rangeRepresentationComplete = input.inputComplete !== false;
+                }
+            } catch (error) {
+                if (pngStreamInput?.stream?.cleanup) {
+                    try { await pngStreamInput.stream.cleanup(error); } catch (cleanupError) { }
+                    pngStreamInput = null;
+                }
+                return createFileFailureResult(error);
+            } finally {
+                if (parentSignal && parentListenerAttached) {
+                    parentSignal.removeEventListener('abort', abortFromParent);
+                }
+                fileController = null;
+            }
+        } else {
             // URLフェッチ: Range Request 試行
             const shouldUseRange = !rangeRequestBlockList.has(domain);
 
@@ -2052,6 +2514,8 @@ async function handleFetchImageMetadata(imageUrl) {
                                 pngStreamInput = input;
                             } else {
                                 buffer = input.buffer;
+                                pngBufferRequiresGate = input.gateRequired === true;
+                                pngBufferCharge = input.charge || PNG_FULL_STREAM_UNKNOWN_SIZE_CHARGE_BYTES;
                                 totalFileSizeKnown = input.totalFileSizeKnown !== false;
                                 totalFileSize = totalFileSizeKnown
                                     ? (input.totalFileSize || buffer.byteLength)
@@ -2130,6 +2594,8 @@ async function handleFetchImageMetadata(imageUrl) {
                         pngStreamInput = fallbackInput;
                     } else {
                         buffer = fallbackInput.buffer;
+                        pngBufferRequiresGate = fallbackInput.gateRequired === true;
+                        pngBufferCharge = fallbackInput.charge || PNG_FULL_STREAM_UNKNOWN_SIZE_CHARGE_BYTES;
                         totalFileSizeKnown = fallbackInput.totalFileSizeKnown !== false;
                         totalFileSize = totalFileSizeKnown
                             ? (fallbackInput.totalFileSize || buffer.byteLength)
@@ -2152,6 +2618,8 @@ async function handleFetchImageMetadata(imageUrl) {
                     pngStreamInput = blockedInput;
                 } else {
                     buffer = blockedInput.buffer;
+                    pngBufferRequiresGate = blockedInput.gateRequired === true;
+                    pngBufferCharge = blockedInput.charge || PNG_FULL_STREAM_UNKNOWN_SIZE_CHARGE_BYTES;
                     totalFileSizeKnown = blockedInput.totalFileSizeKnown !== false;
                     totalFileSize = totalFileSizeKnown
                         ? (blockedInput.totalFileSize || buffer.byteLength)
@@ -2167,6 +2635,7 @@ async function handleFetchImageMetadata(imageUrl) {
 
         const detectedFormat = pngStreamInput ? 'png' : detectImageFormat(buffer);
         if (detectedFormat === 'png') {
+            if (isFileScheme) filePhase = 'scanner';
             const analysisContext = getAnalysisContext(imageUrl);
 
             /**
@@ -2235,7 +2704,11 @@ async function handleFetchImageMetadata(imageUrl) {
                     },
                 });
                 if (streamed) return streamed;
-                return scanPngMetadataBuffer(bufferedFallback);
+                return runGatedPngBufferScan({
+                    buffer: bufferedFallback,
+                    charge,
+                    context: analysisContext,
+                });
             };
 
             const completeRepresentation = !isRangeRequest || rangeRepresentationComplete;
@@ -2245,10 +2718,22 @@ async function handleFetchImageMetadata(imageUrl) {
                 // 追加取得せず、そのまま同一scannerへ渡す。
                 const streamInput = pngStreamInput;
                 pngStreamInput = null;
-                scanResult = await runGatedPngStreamScan({
-                    charge: streamInput.charge,
+                try {
+                    scanResult = await runGatedPngStreamScan({
+                        charge: streamInput.charge,
+                        context: analysisContext,
+                        openStream: async () => streamInput.stream,
+                    });
+                } finally {
+                    try { await streamInput?.stream?.cleanup?.(); } catch (cleanupError) { }
+                }
+            } else if (pngBufferRequiresGate) {
+                // Response.bodyが無い実装では全body bufferを取得済みでも、
+                // PNGの展開・検証は全body gateの集約予算内で実行する。
+                scanResult = await runGatedPngBufferScan({
+                    buffer,
+                    charge: pngBufferCharge,
                     context: analysisContext,
-                    openStream: async () => streamInput.stream,
                 });
             } else if (completeRepresentation) {
                 // 初期206は要求Range上限で有界化されているため、保持済みbytesをbufferで渡す。
@@ -2279,6 +2764,7 @@ async function handleFetchImageMetadata(imageUrl) {
                 return {
                     success: true,
                     metadata: scanResult.metadata,
+                    ...(isFileScheme ? { scannerStatus: scanResult.status } : {}),
                     diagnostics: scanResult.diagnostics
                 };
             }
@@ -2292,15 +2778,43 @@ async function handleFetchImageMetadata(imageUrl) {
                 return {
                     success: true,
                     metadata: {},
+                    ...(isFileScheme ? { scannerStatus: scanResult.status } : {}),
                     diagnostics: scanResult.diagnostics
                 };
             }
 
             const reason = scanResult.reason || scanResult.limit || scanResult.status;
+            if (isFileScheme) {
+                const category = scanResult.status === 'invalid-png'
+                    ? 'invalid-png'
+                    : scanResult.status === 'resource-limit'
+                        ? 'resource-limit'
+                        : 'scanner-failure';
+                const scannerDiagnostics = sanitizeScannerDiagnostics(scanResult.diagnostics);
+                const diagnostics = {
+                    category,
+                    scheme: 'file',
+                    phase: 'scanner',
+                    status: typeof fileResponseStatus === 'number' ? fileResponseStatus : undefined,
+                    bodyPresent: fileBodyPresent === true,
+                    errorName: 'PngScannerError',
+                    message: `PNG scanner failed (${category}).`,
+                    scannerStatus: scanResult.status,
+                    ...(scanResult.reason ? { scannerReason: scanResult.reason } : {}),
+                    ...(scannerDiagnostics ? { scannerDiagnostics } : {}),
+                };
+                return {
+                    success: false,
+                    error: diagnostics.message,
+                    scannerStatus: scanResult.status,
+                    ...(scanResult.reason ? { scannerReason: scanResult.reason } : {}),
+                    diagnostics,
+                };
+            }
             return {
                 success: false,
                 error: `PNG scan failed: ${reason}`,
-                diagnostics: scanResult.diagnostics
+                diagnostics: scanResult.diagnostics,
             };
         }
 
@@ -2312,7 +2826,7 @@ async function handleFetchImageMetadata(imageUrl) {
             });
 
             // メタデータ不足時の再試行ロジック
-            if (getMetadataState(metadata) === 'unresolved') {
+            if (getMetadataState(metadata) === 'unresolved' && !isFileScheme) {
 
                 if (!isRangeRequest) {
                     // file:// URL 等で Range が暗黙的に効いてバッファが切り詰められたケース
@@ -2554,6 +3068,7 @@ async function handleFetchImageMetadata(imageUrl) {
         return { success: true, metadata: metadata };
 
     } catch (error) {
+        if (isFileScheme) return createFileFailureResult(error);
         debugLog('[AI Meta Viewer] handleFetchImageMetadata error:', error.message);
         const result = { success: false, error: error.message };
         if (Array.isArray(error.diagnostics)) result.diagnostics = error.diagnostics;
@@ -2596,7 +3111,7 @@ chrome.runtime.onSuspend.addListener(async () => {
             [metadataCache.metaKey]: Array.from(metadataCache.index.entries())
         });
     } catch (e) {
-        console.error('[AI Meta Viewer] Failed to save cache index on suspend:', e);
+        debugLog('[AI Meta Viewer] Failed to save cache index on suspend', e);
     }
 });
 

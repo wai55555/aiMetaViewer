@@ -19,6 +19,8 @@
     const STEALTH_HEADER_BITS = STEALTH_SIGNATURE_BITS + STEALTH_LENGTH_BITS;
     const MAX_PNG_DIMENSION = 16384;
     const MAX_ROW_BYTES = 1024 * 1024;
+    // IDAT展開量の上限。行構造検証が巨大なdecoded領域を許可しないようにする。
+    const MAX_DECODED_BYTES = 512 * 1024 * 1024;
     const MAX_STEALTH_COMPRESSED_BYTES = 8 * 1024 * 1024;
     const MAX_STEALTH_METADATA_BYTES = 8 * 1024 * 1024;
     const MAX_TEXT_CHUNK_BYTES = 8 * 1024 * 1024;
@@ -271,12 +273,12 @@
                 rowBytes: calculateStructureRowBytes(passWidth, channels, bitDepth, offset),
             });
         }
-        const expectedDecodedBytes = passes.reduce(
-            (total, pass) => total + pass.height * (pass.rowBytes + 1),
-            0,
-        );
-        if (!Number.isSafeInteger(expectedDecodedBytes)) {
-            throw new PngResourceLimitError('MAX_DECODED_BYTES', expectedDecodedBytes, offset);
+        let expectedDecodedBytes = 0;
+        for (const pass of passes) {
+            expectedDecodedBytes += pass.height * (pass.rowBytes + 1);
+            if (!Number.isSafeInteger(expectedDecodedBytes) || expectedDecodedBytes > MAX_DECODED_BYTES) {
+                throw new PngResourceLimitError('MAX_DECODED_BYTES', expectedDecodedBytes, offset);
+            }
         }
         return {
             width,
@@ -1189,8 +1191,8 @@
                 this.analysisEndReason = END_INTENTIONAL_STOP;
                 this.collector.add({ category: 'intentional-stealth-stop', offset: diagnosticOffset });
                 releaseCandidates(this.candidates, diagnosticOffset);
-                this.idatInflate = null;
-                this.rowAssembler = null;
+                // 全候補reject後もPNG構造検証用のInflateとrow validatorは維持する。
+                // IENDまでzlib終端、decoded byte数、scanlineを検証する必要がある。
             }
         }
 
@@ -1373,6 +1375,10 @@
                     throw error;
                 }
                 if (scanner.state === 'DONE') {
+                    // IEND後のsuffix転送を継続させない。reader.cancel()失敗は
+                    // scanner結果を隠さないようcancelReader内で握りつぶす。
+                    await cancelReader(reader);
+                    readerCancelled = true;
                     terminatedNormally = true;
                     return scanner.makeResult();
                 }
@@ -1393,6 +1399,7 @@
     globalObject.PNG_METADATA_SCANNER_CONSTANTS = Object.freeze({
         MAX_PNG_DIMENSION,
         MAX_ROW_BYTES,
+        MAX_DECODED_BYTES,
         MAX_STEALTH_COMPRESSED_BYTES,
         MAX_STEALTH_METADATA_BYTES,
         MAX_TEXT_CHUNK_BYTES,

@@ -22,7 +22,15 @@ const DEFAULT_SETTINGS = {
     enableExperimentalWriting: false,
     advancedModeEnabled: false,
     disableScanner: false,
-    version: '1.5.5'
+    sectionDefaultOpenNegative: false,
+    sectionDefaultOpenGenSettings: false,
+    sectionDefaultOpenCharPrompts: false,
+    sectionDefaultOpenCharUndesired: false,
+    sectionDefaultOpenNovelaiParams: false,
+    sectionDefaultOpenRawComment: false,
+    sectionDefaultOpenWorkflow: false,
+    sectionDefaultOpenOther: false,
+    version: '1.6.0'
 };
 
 // DOM Elements
@@ -45,6 +53,14 @@ const downloaderFolderModeSelect = document.getElementById('downloaderFolderMode
 const downloaderBaseFolderInput = document.getElementById('downloaderBaseFolder');
 const downloaderUseRootCheckbox = document.getElementById('downloaderUseRoot');
 const baseFolderContainer = document.getElementById('baseFolderContainer');
+const sectionDefaultOpenNegativeCheckbox = document.getElementById('sectionDefaultOpenNegative');
+const sectionDefaultOpenGenSettingsCheckbox = document.getElementById('sectionDefaultOpenGenSettings');
+const sectionDefaultOpenCharPromptsCheckbox = document.getElementById('sectionDefaultOpenCharPrompts');
+const sectionDefaultOpenCharUndesiredCheckbox = document.getElementById('sectionDefaultOpenCharUndesired');
+const sectionDefaultOpenNovelaiParamsCheckbox = document.getElementById('sectionDefaultOpenNovelaiParams');
+const sectionDefaultOpenRawCommentCheckbox = document.getElementById('sectionDefaultOpenRawComment');
+const sectionDefaultOpenWorkflowCheckbox = document.getElementById('sectionDefaultOpenWorkflow');
+const sectionDefaultOpenOtherCheckbox = document.getElementById('sectionDefaultOpenOther');
 
 // Window & Interaction Elements
 const modalWidthInput = document.getElementById('modalWidth');
@@ -221,6 +237,14 @@ async function loadSettings() {
         downloaderUseRootCheckbox.checked = settings.downloaderUseRoot;
         updateBaseFolderVisibility();
     }
+    if (sectionDefaultOpenNegativeCheckbox) sectionDefaultOpenNegativeCheckbox.checked = settings.sectionDefaultOpenNegative;
+    if (sectionDefaultOpenGenSettingsCheckbox) sectionDefaultOpenGenSettingsCheckbox.checked = settings.sectionDefaultOpenGenSettings;
+    if (sectionDefaultOpenCharPromptsCheckbox) sectionDefaultOpenCharPromptsCheckbox.checked = settings.sectionDefaultOpenCharPrompts;
+    if (sectionDefaultOpenCharUndesiredCheckbox) sectionDefaultOpenCharUndesiredCheckbox.checked = settings.sectionDefaultOpenCharUndesired;
+    if (sectionDefaultOpenNovelaiParamsCheckbox) sectionDefaultOpenNovelaiParamsCheckbox.checked = settings.sectionDefaultOpenNovelaiParams;
+    if (sectionDefaultOpenRawCommentCheckbox) sectionDefaultOpenRawCommentCheckbox.checked = settings.sectionDefaultOpenRawComment;
+    if (sectionDefaultOpenWorkflowCheckbox) sectionDefaultOpenWorkflowCheckbox.checked = settings.sectionDefaultOpenWorkflow;
+    if (sectionDefaultOpenOtherCheckbox) sectionDefaultOpenOtherCheckbox.checked = settings.sectionDefaultOpenOther;
 
     // Window & Interaction
     if (modalWidthInput) modalWidthInput.value = settings.modalWidth;
@@ -276,6 +300,14 @@ async function saveSettings() {
         downloaderFolderMode: downloaderFolderModeSelect ? downloaderFolderModeSelect.value : 'pageTitle',
         downloaderBaseFolder: downloaderBaseFolderInput ? downloaderBaseFolderInput.value.trim() : 'AI_Meta_Viewer',
         downloaderUseRoot: downloaderUseRootCheckbox ? downloaderUseRootCheckbox.checked : false,
+        sectionDefaultOpenNegative: sectionDefaultOpenNegativeCheckbox ? sectionDefaultOpenNegativeCheckbox.checked : false,
+        sectionDefaultOpenGenSettings: sectionDefaultOpenGenSettingsCheckbox ? sectionDefaultOpenGenSettingsCheckbox.checked : false,
+        sectionDefaultOpenCharPrompts: sectionDefaultOpenCharPromptsCheckbox ? sectionDefaultOpenCharPromptsCheckbox.checked : false,
+        sectionDefaultOpenCharUndesired: sectionDefaultOpenCharUndesiredCheckbox ? sectionDefaultOpenCharUndesiredCheckbox.checked : false,
+        sectionDefaultOpenNovelaiParams: sectionDefaultOpenNovelaiParamsCheckbox ? sectionDefaultOpenNovelaiParamsCheckbox.checked : false,
+        sectionDefaultOpenRawComment: sectionDefaultOpenRawCommentCheckbox ? sectionDefaultOpenRawCommentCheckbox.checked : false,
+        sectionDefaultOpenWorkflow: sectionDefaultOpenWorkflowCheckbox ? sectionDefaultOpenWorkflowCheckbox.checked : false,
+        sectionDefaultOpenOther: sectionDefaultOpenOtherCheckbox ? sectionDefaultOpenOtherCheckbox.checked : false,
         modalWidth: parseInt(modalWidthInput ? modalWidthInput.value : '600', 10) || 600,
         modalHeight: parseInt(modalHeightInput ? modalHeightInput.value : '500', 10) || 500,
         enableMetadataEditing: enableMetadataEditingCheckbox ? enableMetadataEditingCheckbox.checked : false,
