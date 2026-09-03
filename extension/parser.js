@@ -716,7 +716,13 @@ function extractAvifMetadata(buffer, options = {}) {
  */
 function extractSafetensorsMetadata(buffer, options = {}) {
   const view = new Uint8Array(buffer);
+  const inputComplete = options.inputComplete === true;
   if (view.length < SAFETENSORS_HEADER_LENGTH_BYTES) {
+    if (inputComplete) {
+      return setParserState({}, PARSER_STATE_EMPTY_CONFIRMED, {
+        parserReason: 'truncated',
+      });
+    }
     return setParserState({}, PARSER_STATE_UNRESOLVED, {
       isIncomplete: true,
       // suggestedSizeはRangeのinclusive endとして返す。
@@ -726,6 +732,11 @@ function extractSafetensorsMetadata(buffer, options = {}) {
 
   const headerSize = getUint64LE(view, 0);
   if (!Number.isSafeInteger(headerSize) || headerSize > SAFETENSORS_MAX_HEADER_BYTES) {
+    if (inputComplete) {
+      return setParserState({}, PARSER_STATE_EMPTY_CONFIRMED, {
+        parserReason: 'resource-limit',
+      });
+    }
     return setParserState({}, PARSER_STATE_UNRESOLVED, {
       isIncomplete: true,
       parserReason: 'resource-limit',
@@ -733,6 +744,11 @@ function extractSafetensorsMetadata(buffer, options = {}) {
     });
   }
   if (headerSize > view.length - SAFETENSORS_HEADER_LENGTH_BYTES) {
+    if (inputComplete) {
+      return setParserState({}, PARSER_STATE_EMPTY_CONFIRMED, {
+        parserReason: 'truncated',
+      });
+    }
     return setParserState({}, PARSER_STATE_UNRESOLVED, {
       isIncomplete: true,
       // length prefixとheader本体を合わせた必要byte数をinclusive endへ変換する。

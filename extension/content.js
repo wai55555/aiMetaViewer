@@ -51,6 +51,38 @@ const CONTENT_SAFE_ENUMS = Object.freeze({
     scheme: Object.freeze(['file', 'http', 'https'])
 });
 
+const TRANSIENT_EXTENSION_CONTEXT_ERROR_CODE = 'transient-extension-context';
+const TRANSIENT_EXTENSION_CONTEXT_ERROR_PATTERNS = Object.freeze([
+    'extension context invalidated',
+    'extension context is invalid',
+    'receiving end does not exist',
+    'could not establish connection',
+    'the message port closed before a response was received',
+    'the message channel closed before a response was received',
+]);
+
+function getExtensionMessageErrorText(error) {
+    if (typeof error === 'string') return error;
+    try {
+        return error && typeof error.message === 'string' ? error.message : '';
+    } catch (_) {
+        return '';
+    }
+}
+
+function isTransientExtensionContextError(error) {
+    if (error && error.code === TRANSIENT_EXTENSION_CONTEXT_ERROR_CODE) return true;
+    const message = getExtensionMessageErrorText(error).toLowerCase();
+    return message.length > 0 && TRANSIENT_EXTENSION_CONTEXT_ERROR_PATTERNS.some(pattern => message.includes(pattern));
+}
+
+function createTransientExtensionContextError() {
+    const error = new Error('Extension context invalidated');
+    error.name = 'TransientExtensionContextError';
+    error.code = TRANSIENT_EXTENSION_CONTEXT_ERROR_CODE;
+    return error;
+}
+
 function readSafeContentProperty(value, key) {
     try {
         return value !== null && value !== undefined && Object.prototype.hasOwnProperty.call(value, key)
@@ -547,26 +579,28 @@ async function checkImageMetadata(img, requestOptions = {}) {
                     ? response
                     : { success: false, diagnostics: { category: 'response-contract', phase: 'content' } };
             } catch (e) {
-                if (e.message && e.message.includes('Extension context invalidated')) {
-                    if (settings.debugMode) {
-                        debugLog({ category: 'message', phase: 'content', errorType: 'unknown', retryable: true });
-                    }
-                }
+                const isTransientMessageFailure = isTransientExtensionContextError(e);
                 failureResponse = {
                     success: false,
+                    transient: isTransientMessageFailure,
                     diagnostics: {
                         category: 'message',
                         phase: 'content',
-                        errorType: 'unknown'
+                        errorType: 'unknown',
+                        ...(isTransientMessageFailure ? { retryable: true } : {})
                     }
                 };
+                // 拡張機能切断時は候補URLを続けて試行せず、失敗として終了する。
+                if (isTransientMessageFailure) break;
             }
         }
 
         // failureが一つでも残っている場合、別候補のemptyで成功確定しない。
         if (analysisOutcome !== 'metadata' && failureResponse) {
             analysisOutcome = 'failure';
-            logContentAnalysisFailure(failureResponse);
+            if (failureResponse.transient !== true) {
+                logContentAnalysisFailure(failureResponse);
+            }
             return;
         }
 
@@ -657,6 +691,8 @@ async function checkImageMetadata(img, requestOptions = {}) {
  * 内部error、payload、bytes、署名、ローカルpathは記録しない。
  */
 function logContentAnalysisFailure(response) {
+    if (response?.transient === true) return;
+
     const diagnostics = Array.isArray(response?.diagnostics)
         ? response.diagnostics[0]
         : response?.diagnostics;
@@ -978,35 +1014,29 @@ function isExtensionContextValid() {
  */
 async function sendMessageToBrave(message) {
     // 軽量なコンテキストチェック（ログ出力なし）
-    if (!chrome || !chrome.runtime || typeof chrome.runtime.sendMessage !== 'function') {
-        throw new Error('Extension context invalid');
+    if (typeof chrome === 'undefined' || !chrome.runtime || typeof chrome.runtime.sendMessage !== 'function') {
+        throw createTransientExtensionContextError();
     }
 
     return new Promise((resolve, reject) => {
         try {
             chrome.runtime.sendMessage(message, (response) => {
                 if (chrome.runtime.lastError) {
-                    const error = chrome.runtime.lastError.message;
-                    // コンテキスト無効化エラーの場合は特別に処理
-                    if (error.includes('Extension context invalidated') ||
-                        error.includes('receiving end does not exist') ||
-                        error.includes('Could not establish connection')) {
-                        reject(new Error('Extension context invalidated'));
+                    const lastError = chrome.runtime.lastError;
+                    if (isTransientExtensionContextError(lastError)) {
+                        reject(createTransientExtensionContextError());
                     } else {
-                        reject(new Error(error));
+                        reject(new Error(getExtensionMessageErrorText(lastError) || 'Extension message failed'));
                     }
                 } else {
                     resolve(response);
                 }
             });
         } catch (e) {
-            const errorMsg = e.message || '';
-            if (!errorMsg.includes('Extension context invalidated') &&
-                !errorMsg.includes('receiving end does not exist') &&
-                !errorMsg.includes('Could not establish connection')) {
+            if (!isTransientExtensionContextError(e)) {
                 debugLog({ category: 'message', phase: 'content', errorType: 'unknown', retryable: true });
             }
-            reject(e);
+            reject(isTransientExtensionContextError(e) ? createTransientExtensionContextError() : e);
         }
     });
 }
@@ -1067,15 +1097,17 @@ async function checkMetadataForElement(el) {
             processedImages.delete(el);
         }
     } catch (e) {
-        // エラーの種類に応じた公開可能な診断だけをdebug modeへ出す。
-        logContentAnalysisFailure({
-            success: false,
-            diagnostics: {
-                category: 'message',
-                phase: 'content',
-                errorType: 'unknown'
-            }
-        });
+        // 切断系は通常の診断ログへ出さず、markerだけを解除して再解析可能にする。
+        if (!isTransientExtensionContextError(e)) {
+            logContentAnalysisFailure({
+                success: false,
+                diagnostics: {
+                    category: 'message',
+                    phase: 'content',
+                    errorType: 'unknown'
+                }
+            });
+        }
         processedImages.delete(el);
     }
 }

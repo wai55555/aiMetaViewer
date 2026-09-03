@@ -182,11 +182,12 @@ async function fetchMetadataBatch(urlsToFetch, urlToImagesMap, onProgress, isCan
     let processedCount = 0;
     let foundCount = 0;
     let uniqueFetchCount = 0;
+    let transientMessageFailure = false;
 
     const queue = [...urlsToFetch];
 
     async function worker() {
-        while (queue.length > 0 && !isCancelled()) {
+        while (queue.length > 0 && !isCancelled() && !transientMessageFailure) {
             const url = queue.shift();
             uniqueFetchCount++;
 
@@ -212,7 +213,13 @@ async function fetchMetadataBatch(urlsToFetch, urlToImagesMap, onProgress, isCan
                     fetchResults.set(url, null);
                 }
             } catch (e) {
-                console.error('[AI Meta Viewer] Error fetching URL:', url, e);
+                const isTransientMessageFailure = typeof isTransientExtensionContextError === 'function' &&
+                    isTransientExtensionContextError(e);
+                if (isTransientMessageFailure) {
+                    transientMessageFailure = true;
+                } else if (typeof debugLog === 'function') {
+                    debugLog({ category: 'message', phase: 'scanner', errorType: 'unknown', retryable: true });
+                }
                 // 取得・解析例外は再試行可能性を残すためnegative cacheへ入れない。
                 fetchResults.set(url, null);
             }

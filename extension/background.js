@@ -997,6 +997,7 @@ function createAnalysisAbortError(message = 'Image metadata analysis was aborted
 function withStallTimeout(body, onStall, signal = null) {
     let activeReader = null;
     let readerCancelled = false;
+    let readerCancellationPromise = null;
     let readerReleased = false;
     let abortListener = null;
     let terminationError = null;
@@ -1005,13 +1006,21 @@ function withStallTimeout(body, onStall, signal = null) {
     };
     const cancelReader = async (reason) => {
         rememberTermination(reason);
-        if (readerCancelled) return;
-        readerCancelled = true;
-        if (activeReader?.cancel) {
-            await activeReader.cancel(reason);
-        } else if (body?.cancel) {
-            await body.cancel(reason);
+        if (readerCancellationPromise) {
+            await readerCancellationPromise;
+            return;
         }
+        readerCancelled = true;
+        const cancel = activeReader?.cancel
+            ? () => activeReader.cancel(reason)
+            : body?.cancel
+                ? () => body.cancel(reason)
+                : null;
+        if (!cancel) return;
+        readerCancellationPromise = Promise.resolve()
+            .then(cancel)
+            .catch(() => { });
+        await readerCancellationPromise;
     };
     const releaseReader = () => {
         if (readerReleased) return;
@@ -1101,11 +1110,18 @@ function withStallTimeout(body, onStall, signal = null) {
  */
 function createReplayStream(bufferedChunks, reader) {
     let readerCancelled = false;
+    let readerCancellationPromise = null;
     let readerReleased = false;
     const cancelReader = async (reason) => {
-        if (readerCancelled) return;
+        if (readerCancellationPromise) {
+            await readerCancellationPromise;
+            return;
+        }
         readerCancelled = true;
-        await reader.cancel(reason);
+        readerCancellationPromise = Promise.resolve()
+            .then(() => reader.cancel(reason))
+            .catch(() => { });
+        await readerCancellationPromise;
     };
     const releaseReader = () => {
         if (readerReleased) return;
@@ -2297,6 +2313,7 @@ async function handleFetchImageMetadata(imageUrl) {
                 return buffer.buffer;
             };
             let readerCancelled = false;
+            let readerCancellationPromise = null;
             let readerReleased = false;
             let abortListener = null;
             let readerTerminationError = null;
@@ -2313,9 +2330,17 @@ async function handleFetchImageMetadata(imageUrl) {
             };
             const cancelReader = async (reason = null) => {
                 rememberReaderTermination(reason);
-                if (readerCancelled) return;
+                if (readerCancellationPromise) {
+                    await readerCancellationPromise;
+                    return;
+                }
                 readerCancelled = true;
-                try { await reader.cancel(reason); } catch (e) { debugLog('[AI Meta Viewer] metadata reader cancel failed:', e.message); }
+                readerCancellationPromise = Promise.resolve()
+                    .then(() => reader.cancel(reason))
+                    .catch((error) => {
+                        debugLog('[AI Meta Viewer] metadata reader cancel failed:', error);
+                    });
+                await readerCancellationPromise;
             };
             const releaseReader = () => {
                 if (readerReleased) return;

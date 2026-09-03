@@ -1331,9 +1331,9 @@
         return error;
     }
 
-    async function cancelReader(reader) {
+    async function cancelReader(reader, reason = undefined) {
         try {
-            await reader.cancel();
+            await reader.cancel(reason);
         } catch (error) {
             // 解析失敗時のreader解放を優先し、cancel失敗は結果を上書きしない。
         }
@@ -1349,8 +1349,23 @@
         // 異常終了（abort、read rejection、予期しない例外）では下流bodyを止めるため
         // cancelしてからreleaseする。cancel失敗は元の失敗理由を上書きしない。
         let readerCancelled = false;
+        let readerCancellationPromise = null;
         let terminatedNormally = false;
+        let abortListener = null;
+        const cancelActiveReader = (reason) => {
+            if (readerCancellationPromise) return readerCancellationPromise;
+            readerCancelled = true;
+            readerCancellationPromise = cancelReader(reader, reason);
+            return readerCancellationPromise;
+        };
         try {
+            if (options?.signal) {
+                abortListener = () => {
+                    void cancelActiveReader(createAbortError('PNG scan aborted.'));
+                };
+                options.signal.addEventListener('abort', abortListener, { once: true });
+                if (options.signal.aborted) abortListener();
+            }
             while (true) {
                 scanner.checkAbort();
                 const record = await reader.read();
@@ -1364,14 +1379,14 @@
                 } catch (error) {
                     if (error instanceof PngResourceLimitError) {
                         appendResourceDiagnostic(scanner, error);
-                        await cancelReader(reader);
+                        await cancelActiveReader();
                         readerCancelled = true;
                         terminatedNormally = true;
                         return scanner.makeResult();
                     }
                     if (error instanceof PngStructuralError) {
                         appendStructuralDiagnostic(scanner, error);
-                        await cancelReader(reader);
+                        await cancelActiveReader();
                         readerCancelled = true;
                         terminatedNormally = true;
                         return scanner.makeResult();
@@ -1381,18 +1396,24 @@
                 if (scanner.state === 'DONE') {
                     // IEND後のsuffix転送を継続させない。reader.cancel()失敗は
                     // scanner結果を隠さないようcancelReader内で握りつぶす。
-                    await cancelReader(reader);
+                    await cancelActiveReader();
                     readerCancelled = true;
                     terminatedNormally = true;
                     return scanner.makeResult();
                 }
             }
+            scanner.checkAbort();
             const result = scanner.finishInput();
             terminatedNormally = true;
             return result;
         } finally {
+            if (options?.signal && abortListener) {
+                options.signal.removeEventListener('abort', abortListener);
+            }
             if (!terminatedNormally && !readerCancelled) {
-                await cancelReader(reader);
+                await cancelActiveReader();
+            } else if (readerCancellationPromise) {
+                await readerCancellationPromise;
             }
             reader.releaseLock();
         }
