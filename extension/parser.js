@@ -719,7 +719,8 @@ function extractSafetensorsMetadata(buffer, options = {}) {
   if (view.length < SAFETENSORS_HEADER_LENGTH_BYTES) {
     return setParserState({}, PARSER_STATE_UNRESOLVED, {
       isIncomplete: true,
-      suggestedSize: SAFETENSORS_METADATA_HEAD_BUDGET_BYTES,
+      // suggestedSizeはRangeのinclusive endとして返す。
+      suggestedSize: SAFETENSORS_HEADER_LENGTH_BYTES - 1,
     });
   }
 
@@ -728,15 +729,16 @@ function extractSafetensorsMetadata(buffer, options = {}) {
     return setParserState({}, PARSER_STATE_UNRESOLVED, {
       isIncomplete: true,
       parserReason: 'resource-limit',
-      suggestedSize: SAFETENSORS_METADATA_HEAD_BUDGET_BYTES,
+      suggestedSize: SAFETENSORS_METADATA_HEAD_BUDGET_BYTES - 1,
     });
   }
   if (headerSize > view.length - SAFETENSORS_HEADER_LENGTH_BYTES) {
     return setParserState({}, PARSER_STATE_UNRESOLVED, {
       isIncomplete: true,
+      // length prefixとheader本体を合わせた必要byte数をinclusive endへ変換する。
       suggestedSize: Math.min(
-        SAFETENSORS_METADATA_HEAD_BUDGET_BYTES,
-        headerSize + SAFETENSORS_HEADER_LENGTH_BYTES,
+        SAFETENSORS_METADATA_HEAD_BUDGET_BYTES - 1,
+        headerSize + SAFETENSORS_HEADER_LENGTH_BYTES - 1,
       ),
     });
   }

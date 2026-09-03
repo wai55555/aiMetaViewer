@@ -1354,6 +1354,7 @@
             while (true) {
                 scanner.checkAbort();
                 const record = await reader.read();
+                scanner.checkAbort();
                 if (record.done) break;
                 if (record.value === undefined || record.value === null) {
                     throw new TypeError('PNG scanner stream returned an empty chunk value.');

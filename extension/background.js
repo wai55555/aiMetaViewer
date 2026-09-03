@@ -999,7 +999,12 @@ function withStallTimeout(body, onStall, signal = null) {
     let readerCancelled = false;
     let readerReleased = false;
     let abortListener = null;
+    let terminationError = null;
+    const rememberTermination = (reason) => {
+        if (reason && !terminationError) terminationError = reason;
+    };
     const cancelReader = async (reason) => {
+        rememberTermination(reason);
         if (readerCancelled) return;
         readerCancelled = true;
         if (activeReader?.cancel) {
@@ -1013,7 +1018,11 @@ function withStallTimeout(body, onStall, signal = null) {
         readerReleased = true;
         activeReader?.releaseLock?.();
     };
-    const onAbort = () => { void cancelReader(createAnalysisAbortError()); };
+    const onAbort = () => {
+        const abortError = createAnalysisAbortError();
+        rememberTermination(abortError);
+        void cancelReader(abortError);
+    };
     if (signal) {
         abortListener = onAbort;
         signal.addEventListener('abort', abortListener, { once: true });
@@ -1048,15 +1057,23 @@ function withStallTimeout(body, onStall, signal = null) {
                 async read() {
                     clear();
                     if (signal?.aborted) {
-                        await cancelReader(createAnalysisAbortError());
-                        throw createAnalysisAbortError();
+                        const abortError = createAnalysisAbortError();
+                        rememberTermination(abortError);
+                        await cancelReader(abortError);
+                        throw abortError;
                     }
                     timer = setTimeout(() => {
+                        const timeoutError = new Error('PNG stream read stalled.');
+                        timeoutError.name = 'TimeoutError';
+                        rememberTermination(timeoutError);
+                        void cancelReader(timeoutError);
                         onStall();
-                        void cancelReader();
                     }, PNG_STREAM_STALL_TIMEOUT_MS);
                     try {
-                        return await reader.read();
+                        const record = await reader.read();
+                        if (terminationError) throw terminationError;
+                        if (signal?.aborted) throw createAnalysisAbortError();
+                        return record;
                     } finally {
                         clear();
                     }
@@ -1153,10 +1170,19 @@ async function runGatedPngStreamScan({ charge, context, openStream }) {
         clearTimeout(openTimer);
         openTimer = null;
         if (!stream) return null;
-        return await scanPngMetadataStream(
+        const result = await scanPngMetadataStream(
             withStallTimeout(stream, onStall, controller.signal),
             { signal: controller.signal }
         );
+        if (stalled) {
+            const stallError = new Error(
+                `PNG stream stalled for more than ${PNG_STREAM_STALL_TIMEOUT_MS}ms.`
+            );
+            stallError.name = 'TimeoutError';
+            throw stallError;
+        }
+        if (context?.signal?.aborted) throw createAnalysisAbortError();
+        return result;
     } catch (error) {
         if (stalled) {
             const stallError = new Error(
@@ -1165,6 +1191,7 @@ async function runGatedPngStreamScan({ charge, context, openStream }) {
             stallError.name = 'TimeoutError';
             throw stallError;
         }
+        if (context?.signal?.aborted) throw createAnalysisAbortError();
         throw error;
     } finally {
         if (openTimer !== null) clearTimeout(openTimer);
@@ -1187,7 +1214,9 @@ async function runGatedPngBufferScan({ buffer, charge, context }) {
         signal: context?.signal ?? null,
     });
     try {
-        return scanPngMetadataBuffer(buffer, { signal: context?.signal ?? null });
+        const result = scanPngMetadataBuffer(buffer, { signal: context?.signal ?? null });
+        if (context?.signal?.aborted) throw createAnalysisAbortError();
+        return result;
     } finally {
         release();
     }
@@ -2197,6 +2226,7 @@ async function handleFetchImageMetadata(imageUrl) {
                     );
                 }
                 const fullBuffer = await response.arrayBuffer();
+                if (signal?.aborted) throw createAnalysisAbortError();
                 if (fullBuffer.byteLength > bodylessLimit ||
                     (hasDeclaredLength && fullBuffer.byteLength > declaredLength)) {
                     throw createMetadataSizeLimitError(fullBuffer.byteLength, bodylessLimit);
@@ -2269,10 +2299,23 @@ async function handleFetchImageMetadata(imageUrl) {
             let readerCancelled = false;
             let readerReleased = false;
             let abortListener = null;
-            const cancelReader = async () => {
+            let readerTerminationError = null;
+            const rememberReaderTermination = (reason) => {
+                if (reason && !readerTerminationError) readerTerminationError = reason;
+            };
+            const assertReaderActive = () => {
+                if (readerTerminationError) throw readerTerminationError;
+                if (signal?.aborted) {
+                    const abortError = createAnalysisAbortError();
+                    rememberReaderTermination(abortError);
+                    throw abortError;
+                }
+            };
+            const cancelReader = async (reason = null) => {
+                rememberReaderTermination(reason);
                 if (readerCancelled) return;
                 readerCancelled = true;
-                try { await reader.cancel(); } catch (e) { debugLog('[AI Meta Viewer] metadata reader cancel failed:', e.message); }
+                try { await reader.cancel(reason); } catch (e) { debugLog('[AI Meta Viewer] metadata reader cancel failed:', e.message); }
             };
             const releaseReader = () => {
                 if (readerReleased) return;
@@ -2280,21 +2323,29 @@ async function handleFetchImageMetadata(imageUrl) {
                 try { reader.releaseLock(); } catch (e) { debugLog('[AI Meta Viewer] metadata reader release failed:', e.message); }
             };
             if (signal) {
-                abortListener = () => { void cancelReader(createAnalysisAbortError()); };
+                abortListener = () => {
+                    const abortError = createAnalysisAbortError();
+                    rememberReaderTermination(abortError);
+                    void cancelReader(abortError);
+                };
                 signal.addEventListener('abort', abortListener, { once: true });
+                if (signal.aborted) abortListener();
             }
             const readWithStallTimeout = async () => {
                 let timer = null;
                 const timeoutPromise = new Promise((resolve, reject) => {
                     timer = setTimeout(() => {
-                        void cancelReader();
                         const timeoutError = new Error('Metadata response stream stalled.');
                         timeoutError.name = 'TimeoutError';
+                        rememberReaderTermination(timeoutError);
+                        void cancelReader(timeoutError);
                         reject(timeoutError);
                     }, PNG_STREAM_STALL_TIMEOUT_MS);
                 });
                 try {
-                    return await Promise.race([reader.read(), timeoutPromise]);
+                    const record = await Promise.race([reader.read(), timeoutPromise]);
+                    assertReaderActive();
+                    return record;
                 } finally {
                     if (timer !== null) clearTimeout(timer);
                 }
@@ -2303,8 +2354,9 @@ async function handleFetchImageMetadata(imageUrl) {
             try {
                 while (true) {
                     const record = await readWithStallTimeout();
+                    // cancel後のpending readがdoneで解決しても、終了理由をEOFへ変換しない。
+                    assertReaderActive();
                     if (record.done) break;
-                    if (signal?.aborted) throw createAnalysisAbortError();
                     const chunk = record.value instanceof Uint8Array
                         ? record.value
                         : new Uint8Array(record.value);
@@ -2318,6 +2370,7 @@ async function handleFetchImageMetadata(imageUrl) {
                         pngPrefix = classifyPngPrefix(prefix.subarray(0, prefixLength));
                     }
                     if (pngPrefix === PNG_PREFIX_PNG) {
+                        assertReaderActive();
                         if (!allowPngStream) {
                             await cancelReader();
                             throw createRepresentationMismatchError(prefix.subarray(0, prefixLength));
@@ -2369,6 +2422,7 @@ async function handleFetchImageMetadata(imageUrl) {
                             const state = getMetadataState(partialMetadata);
                             if (state === 'resolved' || state === 'empty-confirmed') {
                                 await cancelReader();
+                                assertReaderActive();
                                 return { kind: 'buffer', buffer: partialBuffer };
                             }
                             nextParseAt = Math.min(
@@ -2410,6 +2464,7 @@ async function handleFetchImageMetadata(imageUrl) {
             }
 
             if (pngPrefix === PNG_PREFIX_UNDETERMINED) pngPrefix = PNG_PREFIX_NOT_PNG;
+            assertReaderActive();
             const buffer = materialize();
             if (!format && prefixLength >= 3) {
                 format = detectImageFormat(buffer);
@@ -2434,6 +2489,7 @@ async function handleFetchImageMetadata(imageUrl) {
             } else if (totalLength > FULL_FETCH_SIZE_LIMIT) {
                 throw createMetadataSizeLimitError(totalLength, FULL_FETCH_SIZE_LIMIT);
             }
+            assertReaderActive();
             return { kind: 'buffer', buffer };
         };
 
@@ -2601,6 +2657,7 @@ async function handleFetchImageMetadata(imageUrl) {
                             }
                             isRangeRequest = true;
                             buffer = await response.arrayBuffer();
+                            if (analysisSignal?.aborted) throw createAnalysisAbortError();
                             if (buffer.byteLength !== contentRange.length) {
                                 throw new Error('Content-Range length does not match response body length.');
                             }
@@ -2648,6 +2705,7 @@ async function handleFetchImageMetadata(imageUrl) {
                     // full fetch へ fallback せず、二重ダウンロードを避ける。
                     if (e.name === METADATA_SIZE_LIMIT_ERROR_NAME ||
                         e.name === METADATA_HEAD_BUDGET_ERROR_NAME) throw e;
+                    if (analysisSignal?.aborted) throw createAnalysisAbortError();
 
                     const rangeFailure = {
                         phase: 'initial',
@@ -2773,7 +2831,9 @@ async function handleFetchImageMetadata(imageUrl) {
                             let prefixLength = 0;
                             try {
                                 while (prefixLength < PNG_SIGNATURE.length) {
+                                    if (signal?.aborted) throw createAnalysisAbortError();
                                     const record = await reader.read();
+                                    if (signal?.aborted) throw createAnalysisAbortError();
                                     if (record.done) break;
                                     const chunk = record.value instanceof Uint8Array
                                         ? record.value
@@ -2792,6 +2852,7 @@ async function handleFetchImageMetadata(imageUrl) {
                                 if (classifyPngPrefix(prefix.subarray(0, prefixLength)) !== PNG_PREFIX_PNG) {
                                     throw createRepresentationMismatchError(prefix.subarray(0, prefixLength));
                                 }
+                                if (signal?.aborted) throw createAnalysisAbortError();
                                 return createReplayStream(prefixChunks, reader);
                             } catch (error) {
                                 try { await reader.cancel(); } catch (cancelError) {
@@ -2805,6 +2866,7 @@ async function handleFetchImageMetadata(imageUrl) {
                         }
 
                         bufferedFallback = await response.arrayBuffer();
+                        if (signal?.aborted) throw createAnalysisAbortError();
                         const prefix = new Uint8Array(bufferedFallback).subarray(0, PNG_SIGNATURE.length);
                         if (classifyPngPrefix(prefix) !== PNG_PREFIX_PNG) {
                             throw createRepresentationMismatchError(prefix);
@@ -2821,6 +2883,7 @@ async function handleFetchImageMetadata(imageUrl) {
             };
 
             const completeRepresentation = !isRangeRequest || rangeRepresentationComplete;
+            if (analysisSignal?.aborted) throw createAnalysisAbortError();
             let scanResult;
             if (pngStreamInput) {
                 // Rangeを無視されたHTTP 200など、全body を保持せず stream で受け取った入力。
@@ -2846,14 +2909,16 @@ async function handleFetchImageMetadata(imageUrl) {
                 });
             } else if (completeRepresentation) {
                 // 初期206は要求Range上限で有界化されているため、保持済みbytesをbufferで渡す。
-                scanResult = scanPngMetadataBuffer(buffer);
+                scanResult = scanPngMetadataBuffer(buffer, { signal: analysisSignal });
             } else {
                 // partial headは後続断片へ接続せず、byte 0からのstreamだけを解析する。
                 buffer = null;
                 scanResult = await scanPngFromByteZero(activeUrl);
             }
 
+            if (analysisSignal?.aborted) throw createAnalysisAbortError();
             if (scanResult.status === 'normal' || scanResult.status === 'stealth') {
+                if (analysisSignal?.aborted) throw createAnalysisAbortError();
                 const cacheResult = await metadataCache.set(
                     imageUrl,
                     scanResult.metadata,
@@ -2880,6 +2945,7 @@ async function handleFetchImageMetadata(imageUrl) {
             if (scanResult.status === 'not-found') {
                 // 有効IENDまで確認済みのnot-foundだけを、版数付きnegative cacheへ保存する。
                 // invalid/resource-limit/取得失敗はこの分岐へ到達しないため保存しない。
+                if (analysisSignal?.aborted) throw createAnalysisAbortError();
                 await metadataCache.set(imageUrl, {}, {
                     scannerVersion: PNG_SCANNER_CACHE_VERSION,
                     parserState: 'empty-confirmed',
