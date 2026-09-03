@@ -1015,6 +1015,9 @@
                     throw new PngStructuralError('PNG IEND framing or order is invalid.');
                 }
             } else if (this.currentType === CHUNK_PLTE) {
+                if (this.ihdr && (this.ihdr.colorType === 0 || this.ihdr.colorType === 4)) {
+                    throw new PngStructuralError('PNG PLTE is invalid for grayscale color types.');
+                }
                 if (this.plteSeen || this.idatSeen || this.currentChunkOffset < PNG_SIGNATURE_LENGTH ||
                     this.currentLength < MIN_PLTE_ENTRIES * PLTE_ENTRY_BYTES ||
                     this.currentLength > MAX_PLTE_ENTRIES * PLTE_ENTRY_BYTES ||

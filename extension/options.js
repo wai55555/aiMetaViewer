@@ -263,7 +263,16 @@ async function loadSettings() {
     if (advancedSection) {
         advancedSection.style.display = settings.advancedModeEnabled ? 'block' : 'none';
     }
-    if (versionDisplay) versionDisplay.textContent = 'v' + settings.version;
+    let applicationVersion = DEFAULT_SETTINGS.version;
+    try {
+        const manifest = chrome.runtime.getManifest();
+        if (manifest && typeof manifest.version === 'string' && manifest.version.length > 0) {
+            applicationVersion = manifest.version;
+        }
+    } catch (error) {
+        // manifest取得不能時は既定の製品versionを表示する。
+    }
+    if (versionDisplay) versionDisplay.textContent = 'v' + applicationVersion;
 
     // データ統計を表示
     await OptionsPageEnhancer.displayDataStatistics();

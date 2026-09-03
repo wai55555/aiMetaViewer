@@ -1018,7 +1018,9 @@ const sectionStateStore = (() => {
             const result = method(...args, callback);
             if (result && typeof result.then === 'function') {
                 result.then(value => finish(resolve, value), error => finish(reject, error));
-            } else if (result !== undefined || method.length <= args.length) {
+            } else if (result !== undefined) {
+                // 同期APIの非undefined戻り値だけは直ちに完了扱いにする。
+                // callback APIのundefined戻り値はcallbackが呼ばれるまで待つ。
                 finish(resolve, result);
             }
         } catch (error) {
@@ -1048,19 +1050,20 @@ const sectionStateStore = (() => {
         const normalizedSnapshot = normalize(currentStates);
         if (!isPlainObject(currentStates)) return false;
 
-        const mergedMap = cloneMap(lastValidMap);
-        Object.keys(normalizedSnapshot).forEach(identifier => {
-            Object.defineProperty(mergedMap, identifier, {
-                configurable: true,
-                enumerable: true,
-                value: normalizedSnapshot[identifier],
-                writable: true
-            });
-        });
-
         const storage = getStorage();
         if (!storage || typeof storage.set !== 'function') return false;
         try {
+            // 保存直前のstorage状態を読み直し、別tabの更新をmerge基礎へ反映する。
+            const latestMap = await load();
+            const mergedMap = cloneMap(latestMap);
+            Object.keys(normalizedSnapshot).forEach(identifier => {
+                Object.defineProperty(mergedMap, identifier, {
+                    configurable: true,
+                    enumerable: true,
+                    value: normalizedSnapshot[identifier],
+                    writable: true
+                });
+            });
             await callStorageMethod(storage.set.bind(storage), [{
                 [STORAGE_KEY]: mergedMap
             }]);
@@ -1085,29 +1088,6 @@ const sectionStateStore = (() => {
 })();
 
 if (typeof window !== 'undefined') window.sectionStateStore = sectionStateStore;
-
-/**
- * セクションモデルを既存モーダル用の値へ変換する。
- * @param {Object} metadata - 生のメタデータ
- * @param {Array<Object>} sections - セクションモデル
- * @returns {{positive:string, negative:string, other:Object}} - 既存形式
- */
-function sectionsToLegacyTabs(metadata, sections) {
-    const source = metadata && typeof metadata === 'object' ? metadata : {};
-    const positiveSection = sections.find(section => section.id === 'positive');
-    const negativeSection = sections.find(section => section.id === 'negative');
-    const other = { ...source };
-    delete other.parameters;
-    delete other.Description;
-    if (positiveSection && positiveSection.name === 'Prompt' && source.prompt) delete other.prompt;
-    const settingsSection = sections.find(section => section.id === 'genSettings');
-    if (settingsSection) other.parameters_settings = settingsSection.text;
-    return {
-        positive: positiveSection ? positiveSection.text : '',
-        negative: negativeSection ? negativeSection.text : '',
-        other
-    };
-}
 
 /**
  * コピー機能の実装
@@ -1460,12 +1440,22 @@ async function createModal(metadata, imageUrl = null) {
             event.stopPropagation();
             const payload = {};
             content.querySelectorAll('.ai-meta-section:not(.ai-meta-grid)').forEach(section => {
-                const label = section.querySelector('.ai-meta-section-label');
                 const area = section.querySelector('.ai-meta-text-area');
-                if (!label || !area) return;
-                if (label.textContent === 'Positive Prompt') payload.positive = readAreaText(area);
-                else if (label.textContent === 'Negative Prompt') payload.negative = readAreaText(area);
-                else if (label.textContent === 'Other Settings') payload.other = readAreaText(area);
+                if (!area) return;
+                const sectionId = section.dataset.sectionId;
+                const dataFields = String(area.dataset.field || '')
+                    .split(',')
+                    .map(field => field.trim())
+                    .filter(Boolean);
+                const isPositive = sectionId === 'positive' || dataFields.includes('description');
+                const isNegative = sectionId === 'negative' || dataFields.some(field =>
+                    field === 'negative' || field === 'negative_prompt' || field === 'negativePrompt'
+                );
+                const isOther = sectionId === 'genSettings' || sectionId === 'other' ||
+                    dataFields.some(field => ['parameters_settings', 'other'].includes(field));
+                if (isPositive) payload.positive = readAreaText(area);
+                else if (isNegative) payload.negative = readAreaText(area);
+                else if (isOther) payload.other = readAreaText(area);
             });
             const hasStealthData = metadata && Object.keys(metadata).some(key => key.startsWith('Stealth PNG Info'));
             const warning = hasStealthData ? '\n\n⚠ この画像にはアルファチャンネルに隠されたステルスメタデータが含まれています。\n保存後もステルスデータは残ります。' : '';
@@ -1734,6 +1724,7 @@ function createDownloaderModal(images, context) {
     const closeBtn = document.createElement('button');
     closeBtn.className = 'ai-meta-close-btn';
     closeBtn.textContent = '×';
+    header.appendChild(closeBtn);
 
     // フィルタ・設定エリア
     const toolbar = document.createElement('div');

@@ -37,10 +37,17 @@ const MAX_DEBUG_LOGS = 20; // 最大保持ログ数
 let contentSettingsReady = false;
 
 const CONTENT_SAFE_ENUMS = Object.freeze({
-    category: Object.freeze(['acquisition', 'parser', 'scanner', 'message', 'cache', 'storage', 'settings', 'fatal-initialization']),
-    phase: Object.freeze(['background', 'content', 'settings', 'initialization', 'download']),
+    category: Object.freeze([
+        'acquisition', 'file-access', 'representation-mismatch', 'resource-limit',
+        'scanner-failure', 'cancelled', 'parser', 'scanner', 'message', 'cache',
+        'storage', 'settings', 'fatal-initialization',
+    ]),
+    phase: Object.freeze(['background', 'content', 'settings', 'initialization', 'download', 'acquisition', 'scanner']),
     errorType: Object.freeze(['timeout', 'abort', 'network', 'invalid-response', 'storage', 'import', 'unknown']),
-    scannerStatus: Object.freeze(['detected', 'empty', 'failed', 'skipped', 'unknown']),
+    scannerStatus: Object.freeze([
+        'detected', 'empty', 'failed', 'skipped', 'complete', 'not-found',
+        'invalid-png', 'resource-limit', 'scanner-failure', 'cancelled', 'unknown',
+    ]),
     scheme: Object.freeze(['file', 'http', 'https'])
 });
 
@@ -309,6 +316,12 @@ const activeAnalysisUrls = new WeakMap();
 const cancelledAnalyses = new WeakSet();
 
 /**
+ * cancel通知を同一解析につき一度だけ送るための状態。
+ * @type {WeakSet<HTMLImageElement>}
+ */
+const cancelNotificationsSent = new WeakSet();
+
+/**
  * 実行中の解析を background へ取り消し通知する
  * @param {HTMLImageElement} img - 対象画像
  */
@@ -317,7 +330,8 @@ function cancelActiveAnalysis(img) {
     // 取り消し直後から再度viewport判定を受けられるようmarkerを除去する。
     processedImages.delete(img);
     const url = activeAnalysisUrls.get(img);
-    if (!url) return;
+    if (!url || cancelNotificationsSent.has(img)) return;
+    cancelNotificationsSent.add(img);
     debugLog('[AI Meta Viewer] Cancelling in-flight analysis:', url.substring(0, 80));
     sendMessageToBrave({ action: 'cancelImageMetadata', imageUrl: url }).catch(() => {
         // 取り消し通知の失敗は解析結果に影響しない
@@ -331,6 +345,7 @@ function cancelActiveAnalysis(img) {
 function clearActiveAnalysis(img) {
     activeAnalysisUrls.delete(img);
     cancelledAnalyses.delete(img);
+    cancelNotificationsSent.delete(img);
 }
 
 /**
@@ -1114,12 +1129,14 @@ const viewportAnalysisQueue = {
         const entry = this.pending.get(img);
         if (!entry) return;
         this.sequence += 1;
-        this.pending.set(img, { sequence: this.sequence, hover: true });
-        if (this.settleTimer !== null) {
-            clearTimeout(this.settleTimer);
-            this.settleTimer = null;
+        const promotedEntry = { sequence: this.sequence, hover: true };
+        // hover対象だけをpendingから取り出して開始する。全体drainは行わない。
+        if (this.running.size < MAX_INFLIGHT_VIEWPORT_ANALYSES) {
+            this.pending.delete(img);
+            this.start(img, promotedEntry);
+        } else {
+            this.pending.set(img, promotedEntry);
         }
-        this.drain();
     },
 
     /**
@@ -1257,6 +1274,7 @@ function distanceFromViewportCenter(element) {
  * @param {HTMLImageElement} img - 対象画像
  */
 function cleanupRemovedImage(img) {
+    viewportAnalysisQueue.observer?.unobserve(img);
     const wasRunning = viewportAnalysisQueue.running.has(img);
     viewportAnalysisQueue.cancel(img);
     if (!wasRunning) cancelActiveAnalysis(img);

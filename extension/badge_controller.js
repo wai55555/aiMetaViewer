@@ -167,16 +167,21 @@ function attachBadgeClickHandler(badge) {
     badge.addEventListener('click', async (e) => {
         e.preventDefault();
         e.stopPropagation();
+        if (badge._modalCreationInFlight) return;
+
         const currentMetadata = badge._metadata;
-        if (currentMetadata && document.body) {
-            try {
-                const modal = await createModal(currentMetadata, badge._originalUrl); // ui.js
-                if (document.body) document.body.appendChild(modal);
-            } catch (error) {
-                if (typeof debugLog === 'function') {
-                    debugLog('[AI Meta Viewer] Failed to create metadata modal.');
-                }
+        if (!currentMetadata || !document.body) return;
+
+        badge._modalCreationInFlight = true;
+        try {
+            const modal = await createModal(currentMetadata, badge._originalUrl); // ui.js
+            if (document.body) document.body.appendChild(modal);
+        } catch (error) {
+            if (typeof debugLog === 'function') {
+                debugLog('[AI Meta Viewer] Failed to create metadata modal.');
             }
+        } finally {
+            badge._modalCreationInFlight = false;
         }
     });
 }

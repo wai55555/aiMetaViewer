@@ -43,17 +43,20 @@ const safeDiagnostic = (() => {
     const SAFE_DIAGNOSTIC_MAX_LENGTH = 240;
     const SAFE_DIAGNOSTIC_ENUMS = Object.freeze({
         category: Object.freeze([
-            'acquisition', 'parser', 'scanner', 'message', 'cache', 'storage',
-            'settings', 'fatal-initialization'
+            'acquisition', 'file-access', 'representation-mismatch', 'resource-limit',
+            'scanner-failure', 'cancelled', 'parser', 'scanner', 'message', 'cache',
+            'storage', 'settings', 'fatal-initialization', 'unknown'
         ]),
         phase: Object.freeze([
-            'background', 'content', 'settings', 'initialization', 'download'
+            'background', 'content', 'settings', 'initialization', 'download',
+            'acquisition', 'scanner', 'unknown'
         ]),
         errorType: Object.freeze([
             'timeout', 'abort', 'network', 'invalid-response', 'storage', 'import', 'unknown'
         ]),
         scannerStatus: Object.freeze([
-            'detected', 'empty', 'failed', 'skipped', 'unknown'
+            'detected', 'empty', 'failed', 'skipped', 'complete', 'not-found',
+            'invalid-png', 'resource-limit', 'scanner-failure', 'cancelled', 'unknown'
         ]),
         scheme: Object.freeze(['file', 'http', 'https'])
     });
@@ -73,6 +76,14 @@ const safeDiagnostic = (() => {
             // getterやProxyの例外を診断処理へ伝播させない。
         }
         return undefined;
+    }
+
+    function readSafeProperty(value, key) {
+        try {
+            return value !== null && value !== undefined ? value[key] : undefined;
+        } catch (_) {
+            return undefined;
+        }
     }
 
     function markSafeDiagnosticField(diagnostic, key, value) {
@@ -95,12 +106,14 @@ const safeDiagnostic = (() => {
     function classifyErrorType(errorName) {
         if (typeof errorName !== 'string') return 'unknown';
         const normalized = errorName.toLowerCase();
-        if (normalized === 'aborterror' || normalized === 'abort') return 'abort';
-        if (normalized === 'timeouterror' || normalized === 'timeout') return 'timeout';
-        if (normalized === 'networkerror' || normalized === 'network') return 'network';
-        if (normalized === 'syntaxerror' || normalized === 'invalidresponse') return 'invalid-response';
-        if (normalized === 'quotaerror' || normalized === 'storageerror') return 'storage';
-        if (normalized === 'importerror') return 'import';
+        if (normalized.includes('abort')) return 'abort';
+        if (normalized.includes('timeout') || normalized.includes('stall')) return 'timeout';
+        if (normalized.includes('network')) return 'network';
+        if (normalized.includes('syntax') || normalized.includes('invalid') || normalized.includes('response')) {
+            return 'invalid-response';
+        }
+        if (normalized.includes('quota') || normalized.includes('storage')) return 'storage';
+        if (normalized.includes('import')) return 'import';
         return 'unknown';
     }
 
@@ -168,15 +181,18 @@ const safeDiagnostic = (() => {
         if (typeof value === 'object' || typeof value === 'function') {
             let errorLike = false;
             try {
+                const errorName = readSafeProperty(value, 'name');
+                const errorMessage = readSafeProperty(value, 'message');
+                const errorStack = readSafeProperty(value, 'stack');
                 errorLike = value instanceof Error ||
-                    (typeof value.name === 'string' &&
-                        (typeof value.message === 'string' || typeof value.stack === 'string'));
+                    (typeof errorName === 'string' &&
+                        (typeof errorMessage === 'string' || typeof errorStack === 'string'));
             } catch (_) {
                 diagnostic.redacted = true;
             }
 
             if (errorLike) {
-                diagnostic.errorType = classifyErrorType(readOwnProperty(value, 'name'));
+                diagnostic.errorType = classifyErrorType(readSafeProperty(value, 'name'));
                 diagnostic.redacted = true;
                 return;
             }
@@ -263,11 +279,14 @@ window.loadSettings = async function () {
         return window.settings;
     } catch (e) {
         settingsLoadState = 'failed';
-        window.debugLog({
+        const diagnostic = safeDiagnostic.toSafeDiagnostic([{
             category: 'storage',
             phase: 'settings',
             errorType: 'storage'
-        });
+        }]);
+        if (window.settings && window.settings.debugMode === true) {
+            console.log(safeDiagnostic.formatSafeDiagnostic(diagnostic));
+        }
         return window.settings;
     }
 };

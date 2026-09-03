@@ -38,8 +38,12 @@ const MAX_FORMAT_MIN_PREFIX_BYTES = Math.max(...Object.values(FORMAT_MIN_PREFIX_
  */
 const FTYP_SEARCH_LIMIT_BYTES = 256;
 
-/** Safetensors headerサイズとして解析対象にする上限 */
-const SAFETENSORS_MAX_HEADER_BYTES = 16 * 1024 * 1024;
+/** Safetensorsのlength prefixのbyte数 */
+const SAFETENSORS_HEADER_LENGTH_BYTES = 8;
+/** Safetensors先頭length prefixを含むmetadata head予算 */
+const SAFETENSORS_METADATA_HEAD_BUDGET_BYTES = 16 * 1024 * 1024;
+/** Safetensors header本体へ割り当てられる最大byte数 */
+const SAFETENSORS_MAX_HEADER_BYTES = SAFETENSORS_METADATA_HEAD_BUDGET_BYTES - SAFETENSORS_HEADER_LENGTH_BYTES;
 
 /** 非PNG parserの内部状態 */
 const PARSER_STATE_RESOLVED = 'resolved';
@@ -50,7 +54,6 @@ const PARSER_STATE_UNSUPPORTED_FORMAT = 'unsupported-format';
 /** 形式別metadata head budget */
 const JPEG_METADATA_HEAD_BUDGET_BYTES = 256 * 1024;
 const AVIF_METADATA_HEAD_BUDGET_BYTES = 256 * 1024;
-const SAFETENSORS_METADATA_HEAD_BUDGET_BYTES = 16 * 1024 * 1024;
 
 /** JSON開始文字 '{' */
 const JSON_OBJECT_START_BYTE = 0x7B;
@@ -713,10 +716,10 @@ function extractAvifMetadata(buffer, options = {}) {
  */
 function extractSafetensorsMetadata(buffer, options = {}) {
   const view = new Uint8Array(buffer);
-  if (view.length < 8) {
+  if (view.length < SAFETENSORS_HEADER_LENGTH_BYTES) {
     return setParserState({}, PARSER_STATE_UNRESOLVED, {
       isIncomplete: true,
-      suggestedSize: SAFETENSORS_METADATA_HEAD_BUDGET_BYTES - 1,
+      suggestedSize: SAFETENSORS_METADATA_HEAD_BUDGET_BYTES,
     });
   }
 
@@ -725,13 +728,16 @@ function extractSafetensorsMetadata(buffer, options = {}) {
     return setParserState({}, PARSER_STATE_UNRESOLVED, {
       isIncomplete: true,
       parserReason: 'resource-limit',
-      suggestedSize: SAFETENSORS_METADATA_HEAD_BUDGET_BYTES - 1,
+      suggestedSize: SAFETENSORS_METADATA_HEAD_BUDGET_BYTES,
     });
   }
-  if (headerSize > view.length - 8) {
+  if (headerSize > view.length - SAFETENSORS_HEADER_LENGTH_BYTES) {
     return setParserState({}, PARSER_STATE_UNRESOLVED, {
       isIncomplete: true,
-      suggestedSize: headerSize + 7,
+      suggestedSize: Math.min(
+        SAFETENSORS_METADATA_HEAD_BUDGET_BYTES,
+        headerSize + SAFETENSORS_HEADER_LENGTH_BYTES,
+      ),
     });
   }
 
@@ -751,14 +757,14 @@ function extractSafetensorsMetadata(buffer, options = {}) {
 function extractSafetensorsMetadataLegacy(buffer) {
   const view = new Uint8Array(buffer);
 
-  if (view.length < 8) {
+  if (view.length < SAFETENSORS_HEADER_LENGTH_BYTES) {
     return { isIncomplete: true, suggestedSize: 65536 };
   }
 
   const headerSize = getUint64LE(view, 0);
 
   // ヘッダーサイズが現在のバッファを超えている場合
-  if (headerSize > view.length - 8) {
+  if (headerSize > view.length - SAFETENSORS_HEADER_LENGTH_BYTES) {
     // 巨大すぎるヘッダー（100MB超）は異常とみなす
     if (headerSize > 100 * 1024 * 1024) return {};
 
