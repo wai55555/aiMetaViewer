@@ -1380,6 +1380,7 @@
                     if (error instanceof PngResourceLimitError) {
                         appendResourceDiagnostic(scanner, error);
                         await cancelActiveReader();
+                        scanner.checkAbort();
                         readerCancelled = true;
                         terminatedNormally = true;
                         return scanner.makeResult();
@@ -1387,6 +1388,7 @@
                     if (error instanceof PngStructuralError) {
                         appendStructuralDiagnostic(scanner, error);
                         await cancelActiveReader();
+                        scanner.checkAbort();
                         readerCancelled = true;
                         terminatedNormally = true;
                         return scanner.makeResult();
@@ -1397,6 +1399,7 @@
                     // IEND後のsuffix転送を継続させない。reader.cancel()失敗は
                     // scanner結果を隠さないようcancelReader内で握りつぶす。
                     await cancelActiveReader();
+                    scanner.checkAbort();
                     readerCancelled = true;
                     terminatedNormally = true;
                     return scanner.makeResult();

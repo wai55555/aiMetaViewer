@@ -48,6 +48,7 @@ const SAFETENSORS_MAX_HEADER_BYTES = SAFETENSORS_METADATA_HEAD_BUDGET_BYTES - SA
 /** 非PNG parserの内部状態 */
 const PARSER_STATE_RESOLVED = 'resolved';
 const PARSER_STATE_EMPTY_CONFIRMED = 'empty-confirmed';
+const PARSER_STATE_RESOURCE_LIMIT = 'resource-limit';
 const PARSER_STATE_UNRESOLVED = 'unresolved';
 const PARSER_STATE_UNSUPPORTED_FORMAT = 'unsupported-format';
 
@@ -733,7 +734,7 @@ function extractSafetensorsMetadata(buffer, options = {}) {
   const headerSize = getUint64LE(view, 0);
   if (!Number.isSafeInteger(headerSize) || headerSize > SAFETENSORS_MAX_HEADER_BYTES) {
     if (inputComplete) {
-      return setParserState({}, PARSER_STATE_EMPTY_CONFIRMED, {
+      return setParserState({}, PARSER_STATE_RESOURCE_LIMIT, {
         parserReason: 'resource-limit',
       });
     }

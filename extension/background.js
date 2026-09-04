@@ -1385,7 +1385,7 @@ const METADATA_SAFETENSORS_HEAD_BUDGET_BYTES = 16 * 1024 * 1024;
 /**
  * parserの内部状態をbackground側の互換入力から解決する。
  * @param {Object} metadata - parser結果
- * @returns {string} - resolved / empty-confirmed / unresolved / unsupported-format
+ * @returns {string} - resolved / empty-confirmed / resource-limit / unresolved / unsupported-format
  */
 function getMetadataState(metadata) {
     if (!metadata || typeof metadata !== 'object') return 'unresolved';
@@ -3268,6 +3268,16 @@ async function handleFetchImageMetadata(imageUrl) {
         }
 
         const metadataState = getMetadataState(metadata);
+        if (metadataState === 'resource-limit') {
+            const error = new Error('Metadata parsing exceeded the resource limit.');
+            error.name = 'MetadataResourceLimitError';
+            error.diagnostics = [{
+                category: 'resource-limit',
+                phase: 'parser',
+                reason: metadata.parserReason || 'resource-limit',
+            }];
+            throw error;
+        }
         if (metadataState === 'unresolved') {
             throw new Error('Metadata parsing did not produce a complete representation.');
         }
