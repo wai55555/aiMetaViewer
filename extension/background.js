@@ -1,8 +1,204 @@
 // background.js - Universal Background Script (Chrome & Firefox)
+const INITIALIZATION_STATES = Object.freeze({
+    PENDING: 'pending',
+    READY: 'ready',
+    FATAL: 'fatal',
+});
+const SAFE_DIAGNOSTIC_MAX_LENGTH = 240;
+const SAFE_CATEGORIES = Object.freeze([
+    'acquisition', 'file-access', 'representation-mismatch', 'resource-limit',
+    'scanner-failure', 'cancelled', 'cache', 'download', 'fatal-initialization', 'message',
+    'parser', 'scanner', 'settings', 'storage', 'unknown',
+]);
+const SAFE_PHASES = Object.freeze([
+    'background', 'content', 'download', 'initialization', 'settings', 'acquisition', 'scanner', 'unknown',
+]);
+const SAFE_ERROR_TYPES = Object.freeze([
+    'abort', 'import', 'invalid-response', 'network', 'storage', 'timeout', 'unknown',
+]);
+const SAFE_SCHEMES = Object.freeze(['file', 'http', 'https', 'blob']);
+const SAFE_SCANNER_STATUSES = Object.freeze([
+    'complete', 'empty-confirmed', 'found', 'invalid-png', 'not-found',
+    'partial', 'unresolved', 'unsupported-format', 'resource-limit',
+    'scanner-failure', 'cancelled', 'unknown',
+]);
+
+let initializationState = INITIALIZATION_STATES.PENDING;
+let fatalInitializationSignalEmitted = false;
+let settings = { debugMode: false };
+
+function getSafeEnum(value, allowedValues) {
+    return allowedValues.includes(value) ? value : 'unknown';
+}
+
+function inferSafeCategory(value) {
+    if (typeof value !== 'string') return 'unknown';
+    const lowerValue = value.toLowerCase();
+    if (lowerValue.includes('fatal') || lowerValue.includes('import script')) {
+        return 'fatal-initialization';
+    }
+    if (lowerValue.includes('cache')) return 'cache';
+    if (lowerValue.includes('storage')) return 'storage';
+    if (lowerValue.includes('setting')) return 'settings';
+    if (lowerValue.includes('download')) return 'download';
+    if (lowerValue.includes('message') || lowerValue.includes('notify')) return 'message';
+    if (lowerValue.includes('scan')) return 'scanner';
+    if (lowerValue.includes('parse') || lowerValue.includes('metadata')) return 'parser';
+    if (lowerValue.includes('fetch') || lowerValue.includes('range') || lowerValue.includes('network')) {
+        return 'acquisition';
+    }
+    return 'unknown';
+}
+
+function inferSafeErrorType(value) {
+    if (typeof value !== 'string') return 'unknown';
+    const lowerValue = value.toLowerCase();
+    if (lowerValue.includes('timeout') || lowerValue.includes('stall')) return 'timeout';
+    if (lowerValue.includes('abort')) return 'abort';
+    if (lowerValue.includes('import')) return 'import';
+    if (lowerValue.includes('storage') || lowerValue.includes('quota')) return 'storage';
+    if (lowerValue.includes('network') || lowerValue.includes('fetch')) return 'network';
+    if (lowerValue.includes('invalid') || lowerValue.includes('response')) return 'invalid-response';
+    return 'unknown';
+}
+
+function getSafeScheme(value) {
+    try {
+        const protocol = typeof value === 'string'
+            ? new URL(value).protocol
+            : value?.protocol;
+        const scheme = typeof protocol === 'string' ? protocol.replace(/:$/, '').toLowerCase() : '';
+        return SAFE_SCHEMES.includes(scheme) ? scheme : undefined;
+    } catch (error) {
+        return undefined;
+    }
+}
+
+function applySafeDiagnosticObject(diagnostic, value) {
+    if (value === null || typeof value !== 'object') return;
+
+    try {
+        if (value instanceof Error || typeof value.name === 'string') {
+            diagnostic.errorType = inferSafeErrorType(value.name);
+        }
+        const safeKeys = ['category', 'phase', 'status', 'bodyPresent', 'scannerStatus', 'retryable'];
+        for (const key of safeKeys) {
+            if (!Object.prototype.hasOwnProperty.call(value, key)) continue;
+            const entry = value[key];
+            if (key === 'category') diagnostic.category = getSafeEnum(entry, SAFE_CATEGORIES);
+            if (key === 'phase') diagnostic.phase = getSafeEnum(entry, SAFE_PHASES);
+            if (key === 'status' && Number.isInteger(entry) && entry >= 100 && entry <= 599) {
+                diagnostic.status = entry;
+            }
+            if (key === 'bodyPresent' && typeof entry === 'boolean') diagnostic.bodyPresent = entry;
+            if (key === 'retryable' && typeof entry === 'boolean') diagnostic.retryable = entry;
+            if (key === 'scannerStatus') {
+                diagnostic.scannerStatus = getSafeEnum(entry, SAFE_SCANNER_STATUSES);
+            }
+        }
+        const scheme = getSafeScheme(value.url || value);
+        if (scheme) diagnostic.scheme = scheme;
+        if (typeof value.errorType === 'string') {
+            diagnostic.errorType = getSafeEnum(value.errorType, SAFE_ERROR_TYPES);
+        }
+        if (typeof value.errorName === 'string') {
+            diagnostic.errorType = inferSafeErrorType(value.errorName);
+        }
+        if (value.error && typeof value.error === 'object') {
+            applySafeDiagnosticObject(diagnostic, value.error);
+        }
+    } catch (error) {
+        // 異常なgetterやProxyは展開せず、固定のunknownへ落とす。
+        diagnostic.errorType = 'unknown';
+    }
+}
+
+function toSafeDiagnostic(...args) {
+    const diagnostic = {
+        category: 'unknown',
+        phase: 'background',
+        errorType: 'unknown',
+        redacted: true,
+    };
+
+    for (const value of args) {
+        if (typeof value === 'string') {
+            const category = inferSafeCategory(value);
+            if (category !== 'unknown') diagnostic.category = category;
+            const errorType = inferSafeErrorType(value);
+            if (errorType !== 'unknown') diagnostic.errorType = errorType;
+            const scheme = getSafeScheme(value);
+            if (scheme) diagnostic.scheme = scheme;
+        } else if (typeof value === 'number' && Number.isInteger(value) && value >= 100 && value <= 599) {
+            diagnostic.status = value;
+        } else {
+            applySafeDiagnosticObject(diagnostic, value);
+        }
+    }
+
+    diagnostic.category = getSafeEnum(diagnostic.category, SAFE_CATEGORIES);
+    diagnostic.phase = getSafeEnum(diagnostic.phase, SAFE_PHASES);
+    diagnostic.errorType = getSafeEnum(diagnostic.errorType, SAFE_ERROR_TYPES);
+    return diagnostic;
+}
+
+function formatSafeDiagnostic(diagnostic) {
+    const fields = [
+        ['category', getSafeEnum(diagnostic?.category, SAFE_CATEGORIES)],
+        ['phase', getSafeEnum(diagnostic?.phase, SAFE_PHASES)],
+        ['errorType', getSafeEnum(diagnostic?.errorType, SAFE_ERROR_TYPES)],
+        ['status', Number.isInteger(diagnostic?.status) ? diagnostic.status : undefined],
+        ['bodyPresent', typeof diagnostic?.bodyPresent === 'boolean' ? diagnostic.bodyPresent : undefined],
+        ['scannerStatus', getSafeEnum(diagnostic?.scannerStatus, SAFE_SCANNER_STATUSES)],
+        ['retryable', typeof diagnostic?.retryable === 'boolean' ? diagnostic.retryable : undefined],
+        ['scheme', getSafeEnum(diagnostic?.scheme, SAFE_SCHEMES)],
+        ['redacted', true],
+    ];
+    return fields
+        .filter(([, value]) => value !== undefined && value !== 'unknown')
+        .map(([key, value]) => `${key}=${value}`)
+        .join(' ')
+        .slice(0, SAFE_DIAGNOSTIC_MAX_LENGTH);
+}
+
+function debugLog(...args) {
+    if (settings?.debugMode !== true) return;
+    console.log(formatSafeDiagnostic(toSafeDiagnostic(...args)));
+}
+
+function emitFatalInitializationFailure() {
+    if (fatalInitializationSignalEmitted) return;
+    initializationState = INITIALIZATION_STATES.FATAL;
+    fatalInitializationSignalEmitted = true;
+    const diagnostic = {
+        category: 'fatal-initialization',
+        phase: 'initialization',
+        errorType: 'import',
+        retryable: false,
+        redacted: true,
+    };
+    console.error(`[AI Meta Viewer] ${formatSafeDiagnostic(diagnostic)}`);
+}
+
+function createInitializationUnavailableResult() {
+    return {
+        success: false,
+        error: 'Background initialization unavailable.',
+        diagnostics: {
+            category: 'fatal-initialization',
+            phase: 'initialization',
+            errorType: 'import',
+            retryable: false,
+            redacted: true,
+        },
+    };
+}
+
 try {
-    importScripts('pako.js', 'jszip.min.js', 'parser.js');
-} catch (e) {
-    console.error('[AI Meta Viewer] Failed to import scripts in Service Worker:', e);
+    importScripts('pako.js', 'jszip.min.js', 'parser.js', 'png_metadata_scanner.js');
+    initializationState = INITIALIZATION_STATES.READY;
+} catch (error) {
+    emitFatalInitializationFailure();
 }
 
 // ブラウザAPI統一（Chrome/Firefox両対応）
@@ -55,6 +251,8 @@ const browserAPI = (() => {
 // 環境検出
 const isFirefox = typeof browser !== 'undefined';
 const isChrome = typeof chrome !== 'undefined' && !isFirefox;
+const PNG_SCANNER_CACHE_VERSION = 'png-scanner-v1';
+const CACHE_ENTRY_MARKER = 'aiMetaViewerCacheEntry';
 
 // 永続化LRUキャッシュクラス (browserAPI.storage.local使用)
 class PersistentLRUCache {
@@ -88,7 +286,7 @@ class PersistentLRUCache {
                 }
             }
         } catch (e) {
-            console.error('Cache init error:', e);
+            debugLog('Cache init error', e);
         }
     }
 
@@ -99,7 +297,7 @@ class PersistentLRUCache {
             try {
                 await this.storage.set({ [this.metaKey]: Array.from(this.index.entries()) });
             } catch (e) {
-                console.error('Cache index save error:', e);
+                debugLog('Cache index save error', e);
             }
         }, 500); // R1-c: デバウンス短縮（2000ms→500ms）でonSuspend前に保存される確率を向上
     }
@@ -117,24 +315,43 @@ class PersistentLRUCache {
         const key = this.cacheKeyPrefix + url;
         try {
             const result = await this.storage.get(key);
-            return result[key];
+            const cachedValue = result[key];
+            if (cachedValue && typeof cachedValue === 'object' && cachedValue[CACHE_ENTRY_MARKER] === true) {
+                if (cachedValue.scannerVersion && cachedValue.scannerVersion !== PNG_SCANNER_CACHE_VERSION) return undefined;
+                if (cachedValue.parserVersion && cachedValue.parserVersion !== PARSER_CACHE_VERSION) return undefined;
+                const metadata = cachedValue.metadata;
+                if (metadata && typeof metadata === 'object' && cachedValue.parserState) {
+                    Object.defineProperty(metadata, 'cacheEntryState', {
+                        value: cachedValue.parserState,
+                        enumerable: false,
+                        configurable: true,
+                    });
+                }
+                return metadata;
+            }
+            if (cachedValue && typeof cachedValue === 'object' &&
+                !Array.isArray(cachedValue) && Object.keys(cachedValue).length === 0) {
+                return undefined;
+            }
+            return cachedValue;
         } catch (e) {
-            console.error('Cache get error:', e);
+            debugLog('Cache get error', e);
             return undefined;
         }
     }
 
-    async set(url, metadata) {
+    async set(url, metadata, options = {}) {
         await this.initPromise;
         const key = this.cacheKeyPrefix + url;
 
-        // 文字列化した際のおよそのサイズを計算 (簡易的に文字数を使用)
-        const size = JSON.stringify(metadata).length;
+        // JSON文字列をUTF-8へ変換した実byte数をキャッシュ容量として扱う。
+        const serialized = JSON.stringify(metadata);
+        const size = new TextEncoder().encode(serialized).byteLength;
 
         // 【修正】単体で制限サイズを超える巨大なメタデータはキャッシュしない
         if (size > this.byteLimit) {
             debugLog(`[Cache] Metadata size (${size}) exceeds byteLimit (${this.byteLimit}). Skipping cache.`);
-            return;
+            return { stored: false, reason: 'size-limit', limit: this.byteLimit, observed: size };
         }
 
         // 既存エントリがあればサイズを差し引く
@@ -150,11 +367,21 @@ class PersistentLRUCache {
 
             this.index.set(url, { t: Date.now(), s: size });
             this.totalBytes += size;
-
-            await this.storage.set({ [key]: metadata });
+            const cacheValue = options.scannerVersion || options.parserVersion || options.parserState
+                ? {
+                    [CACHE_ENTRY_MARKER]: true,
+                    ...(options.scannerVersion ? { scannerVersion: options.scannerVersion } : {}),
+                    ...(options.parserVersion ? { parserVersion: options.parserVersion } : {}),
+                    ...(options.parserState ? { parserState: options.parserState } : {}),
+                    metadata,
+                }
+                : metadata;
+            await this.storage.set({ [key]: cacheValue });
             await this.saveIndex();
+            return { stored: true };
         } catch (e) {
-            console.error('Cache set error:', e);
+            debugLog('Cache set error', e);
+            return { stored: false, reason: 'storage-error' };
         }
     }
 
@@ -455,38 +682,805 @@ chrome.downloads.onDeterminingFilename.addListener((item, suggest) => {
     }
 });
 
+const DOWNLOAD_NOTIFICATION_FILENAME_MAX_LENGTH = 80;
+
+function getSafeDownloadNotificationFilename(value) {
+    if (typeof value !== 'string' || /^[a-z][a-z\d+.-]*:\/\//i.test(value)) {
+        return 'file';
+    }
+
+    const basename = value.split(/[\\/]/).pop() || '';
+    const safeBasename = basename
+        .split(/[?#]/, 1)[0]
+        .replace(/[\u0000-\u001f\u007f]/g, '')
+        .replace(/[\\/:*?"<>|]/g, '_')
+        .trim()
+        .slice(0, DOWNLOAD_NOTIFICATION_FILENAME_MAX_LENGTH);
+
+    return safeBasename || 'file';
+}
+
 // ダウンロード状態の監視 (失敗通知用)
 chrome.downloads.onChanged.addListener((delta) => {
     if (delta.state && delta.state.current === 'interrupted') {
         chrome.downloads.search({ id: delta.id }, (items) => {
             if (items && items[0]) {
                 const item = items[0];
-                const filename = item.filename.split(/[\\/]/).pop();
-                const error = item.error || 'Unknown error';
-                console.error(`[AI Meta Viewer] Download failed: ${filename}`, error);
+                const filename = getSafeDownloadNotificationFilename(item.filename);
+                const diagnostic = {
+                    category: 'download',
+                    phase: 'download',
+                    errorType: inferSafeErrorType(item.error)
+                };
 
-                // アクティブなタブに通知を送る
+                // アクティブなタブに通知を送る。診断ログとは独立して実行する。
                 chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
                     if (tabs[0]) {
                         chrome.tabs.sendMessage(tabs[0].id, {
                             action: 'showNotification',
-                            message: `Download failed: ${filename} (${error})`,
+                            message: `Download failed: ${filename}`,
                             type: 'error'
                         }).catch(() => { });
                     }
                 });
+
+                // 通知には診断情報やraw errorを渡さない。
+                debugLog('[AI Meta Viewer] Download failed', diagnostic);
             }
         });
     }
 });
 
-// 全取得（arrayBuffer）の安全上限サイズ (2MB)
-// サーバーが Range リクエストを無視して全データを返してきた場合に、
-// この上限を超えるファイルのメモリ読み込みを拒否し、Service Worker の
-// クラッシュ（メモリ不足）を防ぐ。
-// .safetensors のヘッダー取得には先頭 64KB で十分なため、2MB もあれば非常に余裕がある。
-const FULL_FETCH_SIZE_LIMIT = 2 * 1024 * 1024; // 2MB
+// 未知形式またはstreamを持たない環境に対するarrayBufferの安全上限 (2MiB)。
+// JPEG、AVIF、WebP、Safetensorsは形式別head budgetを優先し、
+// PNGはこの上限を適用せずscannerの集約gateで同時性を制御する。
+const FULL_FETCH_SIZE_LIMIT = 2 * 1024 * 1024; // 2MiB
+// bodyなしResponseはarrayBuffer全量取得しかできないため、既知長のfallbackだけ許可する。
+const BODYLESS_PNG_FALLBACK_LIMIT = 16 * 1024 * 1024; // 16MiB
+const FILE_BODYLESS_FALLBACK_LIMIT = 16 * 1024 * 1024; // 16MiB
 const RANGE_REQUEST_TIMEOUT_MS = 10000; // Range取得の本文読み込みを含むタイムアウト
+const HTTP_OK_STATUS = 200;
+const HTTP_PARTIAL_CONTENT_STATUS = 206;
+
+// --- 解析の集約予算 ---
+const PARSER_CACHE_VERSION = 'parser-v1';
+// PNGの単一ファイルサイズ上限は撤廃したままにする。制御対象は同時性である。
+// content script は複数frame・複数tabから要求を送るため、Service Worker が
+// 唯一の集約点となる。以下の上限は必ずここで適用する。
+
+// metadata head (初期Range 64KB) の同時取得数。
+// 64KiB × 4 = 256KiB。全body stream 2本と合わせて同一ホストへ同時6要求となり、
+// HTTP/1.1 における Chrome の同一ホスト接続上限と一致する。
+const MAX_CONCURRENT_METADATA_HEAD_FETCHES = 4;
+
+// 全body stream (byte 0 からのPNG再取得) の同時本数。
+// guard上限に張り付いた最悪ケースは1本あたり約28MiB (Stealth圧縮8MiB +
+// 展開8MiB + text chunk 8MiB + row 2MiB + packed buffer 約1.9MiB) であり、
+// 2本で約56MiB に収まる。4096²の典型ケースでは1本約650KiB。
+const MAX_CONCURRENT_PNG_FULL_STREAMS = 2;
+
+// 全body stream の in-flight 転送量予算。
+// 4K PNG の典型 10〜40MB なら2本、100MB級は自動的に1本へ縮退させる逓減装置。
+const PNG_FULL_STREAM_INFLIGHT_BUDGET_BYTES = 64 * 1024 * 1024;
+
+// Content-Range の total が不明なときに仮計上するサイズ。
+const PNG_FULL_STREAM_UNKNOWN_SIZE_CHARGE_BYTES = 32 * 1024 * 1024;
+
+// 全body stream の停滞タイムアウト。
+// 経過時間ではなく read pending 時間に適用する。40MB を 5MB/s で引くと
+// 8秒かかるため、総時間タイムアウトでは正常な大容量取得を殺してしまう。
+const PNG_STREAM_STALL_TIMEOUT_MS = 15000;
+
+// 解析要求の優先度。hover は待たせない。
+const ANALYSIS_PRIORITY_BATCH = 0;
+const ANALYSIS_PRIORITY_VIEWPORT = 1;
+const ANALYSIS_PRIORITY_HOVER = 2;
+
+// 待機列の取り出し順。viewport 由来は LIFO、明示スキャンは FIFO。
+const ANALYSIS_ORDER_LIFO = 'lifo';
+const ANALYSIS_ORDER_FIFO = 'fifo';
+
+/**
+ * Content-Range ヘッダを解析する。
+ * RFC 7233 は complete-length 不明時の `*` を許容するため、`total` は null を取り得る。
+ * `total === null` は「表現全体かどうか判定不能」を意味し、partial として扱う。
+ * @param {string|null} value - Content-Range ヘッダ値
+ * @returns {{start: number, end: number, total: number|null, length: number}|null}
+ */
+function parseContentRangeHeader(value) {
+    if (typeof value !== 'string') return null;
+    const match = value.match(/^bytes\s+(\d+)-(\d+)\/(\d+|\*)$/);
+    if (!match) return null;
+    const start = Number(match[1]);
+    const end = Number(match[2]);
+    if (![start, end].every(Number.isSafeInteger) || start < 0 || end < start) {
+        return null;
+    }
+    if (match[3] === '*') {
+        return { start, end, total: null, length: end - start + 1 };
+    }
+    const total = Number(match[3]);
+    if (!Number.isSafeInteger(total) || total <= end) {
+        return null;
+    }
+    return { start, end, total, length: end - start + 1 };
+}
+
+/**
+ * 同時実行を有界化するゲート。
+ * 本数上限と in-flight byte 予算の両方を見る。予算を超えた要求は拒否せず
+ * 順番待ちにする。単独で予算を超える要求は、他に走っているものが無いときに
+ * 限り単独実行する。これによりPNGの単一ファイル上限撤廃を維持する。
+ */
+class ConcurrencyGate {
+    /**
+     * @param {Object} config
+     * @param {string} config.name - 診断用の名前
+     * @param {number} config.maxConcurrent - 同時実行数の上限
+     * @param {number} [config.budgetBytes] - in-flight byte 予算
+     */
+    constructor({ name, maxConcurrent, budgetBytes = Number.POSITIVE_INFINITY }) {
+        this.name = name;
+        this.maxConcurrent = maxConcurrent;
+        this.budgetBytes = budgetBytes;
+        this.active = 0;
+        this.inflightBytes = 0;
+        this.waiters = [];
+        this.sequence = 0;
+        // tab 単位の round-robin 用。1つのtabの大量要求が他tabを枯渇させない。
+        this.tabLastServed = new Map();
+    }
+
+    /**
+     * 待機中の要求を受け入れられるか判定する
+     * @param {Object} waiter - 待機エントリ
+     * @returns {boolean}
+     */
+    canAdmit(waiter) {
+        if (this.active >= this.maxConcurrent) return false;
+        if (this.active === 0) return true; // 単独実行なら予算超過でも許可する
+        return this.inflightBytes + waiter.charge <= this.budgetBytes;
+    }
+
+    /**
+     * 次に実行する待機エントリの位置を選ぶ。
+     * priority 降順 → tab round-robin → order (LIFO/FIFO) の順で比較する。
+     * @returns {number} - 見つからない場合 -1
+     */
+    pickWaiterIndex() {
+        let bestIndex = -1;
+        let bestKey = null;
+        for (let index = 0; index < this.waiters.length; index += 1) {
+            const waiter = this.waiters[index];
+            if (!this.canAdmit(waiter)) continue;
+            const tabKey = waiter.tabId === null ? 'none' : waiter.tabId;
+            const key = [
+                -waiter.getPriority(),
+                this.tabLastServed.get(tabKey) || 0,
+                waiter.order === ANALYSIS_ORDER_LIFO ? -waiter.sequence : waiter.sequence,
+            ];
+            if (bestKey === null || ConcurrencyGate.compareKeys(key, bestKey) < 0) {
+                bestIndex = index;
+                bestKey = key;
+            }
+        }
+        return bestIndex;
+    }
+
+    /**
+     * 比較キーの辞書順比較
+     * @param {number[]} left
+     * @param {number[]} right
+     * @returns {number}
+     */
+    static compareKeys(left, right) {
+        for (let index = 0; index < left.length; index += 1) {
+            if (left[index] !== right[index]) return left[index] < right[index] ? -1 : 1;
+        }
+        return 0;
+    }
+
+    /** 待機列から実行可能なものを可能な限り起動する */
+    drain() {
+        while (this.waiters.length > 0) {
+            const index = this.pickWaiterIndex();
+            if (index < 0) return;
+            const [waiter] = this.waiters.splice(index, 1);
+            this.start(waiter);
+        }
+    }
+
+    /**
+     * 実行枠を確保した状態にする
+     * @param {Object} waiter - 待機エントリ
+     */
+    start(waiter) {
+        this.active += 1;
+        this.inflightBytes += waiter.charge;
+        // 実行枠へ入った待機者はabort listenerの所有を終える。
+        if (waiter.signal && waiter.onAbort) {
+            waiter.signal.removeEventListener('abort', waiter.onAbort);
+            waiter.onAbort = null;
+        }
+        const tabKey = waiter.tabId === null ? 'none' : waiter.tabId;
+        this.sequence += 1;
+        this.tabLastServed.set(tabKey, this.sequence);
+        waiter.resolve(() => this.release(waiter));
+    }
+
+    /**
+     * 実行枠を返却する。多重呼び出しは無視する。
+     * @param {Object} waiter - 待機エントリ
+     */
+    release(waiter) {
+        if (waiter.released) return;
+        waiter.released = true;
+        this.active -= 1;
+        this.inflightBytes -= waiter.charge;
+        if (this.inflightBytes < 0) this.inflightBytes = 0;
+        this.drain();
+    }
+
+    /**
+     * 実行枠を取得する。取得できるまで待機する。
+     * @param {Object} [options]
+     * @param {number} [options.charge] - in-flight byte として計上する量
+     * @param {number} [options.priority] - 優先度
+     * @param {number|null} [options.tabId] - 要求元 tab
+     * @param {string} [options.order] - LIFO / FIFO
+     * @param {AbortSignal|null} [options.signal] - 待機中の取り消し用
+     * @returns {Promise<Function>} - 実行枠を返却する関数
+     */
+    acquire({ charge = 0, priority = ANALYSIS_PRIORITY_BATCH, tabId = null,
+        order = ANALYSIS_ORDER_FIFO, signal = null } = {}) {
+        this.sequence += 1;
+        const waiter = {
+            charge,
+            priority: typeof priority === 'function' ? priority() : priority,
+            getPriority: typeof priority === 'function' ? priority : () => priority,
+            tabId, order, signal,
+            sequence: this.sequence,
+            released: false,
+            resolve: null,
+            reject: null,
+        };
+        return new Promise((resolve, reject) => {
+            waiter.resolve = resolve;
+            waiter.reject = reject;
+
+            if (signal) {
+                if (signal.aborted) {
+                    reject(createAnalysisAbortError());
+                    return;
+                }
+                // 待機中に取り消されたら枠を消費せずに離脱する
+                waiter.onAbort = () => {
+                    const index = this.waiters.indexOf(waiter);
+                    if (index >= 0) {
+                        this.waiters.splice(index, 1);
+                        reject(createAnalysisAbortError());
+                    }
+                };
+                signal.addEventListener('abort', waiter.onAbort, { once: true });
+            }
+
+            if (this.canAdmit(waiter) && this.waiters.length === 0) {
+                this.start(waiter);
+                return;
+            }
+            this.waiters.push(waiter);
+            this.drain();
+        });
+    }
+}
+
+/**
+ * abort 由来の失敗を識別できる error を生成する。
+ * abort 結果を success や not-found へ変換しないために名前を固定する。
+ * @param {string} [message]
+ * @returns {Error}
+ */
+function createAnalysisAbortError(message = 'Image metadata analysis was aborted.') {
+    const error = new Error(message);
+    error.name = 'AbortError';
+    return error;
+}
+
+/**
+ * 全body stream を停滞タイムアウト付きに包む。
+ * 経過時間ではなく read pending 時間に適用するため、低速回線でも
+ * 正常な大容量取得を打ち切らない。
+ * @param {Object} body - getReader() を持つ stream
+ * @param {Function} onStall - 停滞時のコールバック
+ * @returns {Object} - stream 互換オブジェクト
+ */
+function withStallTimeout(body, onStall, signal = null) {
+    let activeReader = null;
+    let readerCancelled = false;
+    let readerCancellationPromise = null;
+    let readerReleased = false;
+    let abortListener = null;
+    let terminationError = null;
+    const rememberTermination = (reason) => {
+        if (reason && !terminationError) terminationError = reason;
+    };
+    const cancelReader = async (reason) => {
+        rememberTermination(reason);
+        if (readerCancellationPromise) {
+            await readerCancellationPromise;
+            return;
+        }
+        readerCancelled = true;
+        const cancel = activeReader?.cancel
+            ? () => activeReader.cancel(reason)
+            : body?.cancel
+                ? () => body.cancel(reason)
+                : null;
+        if (!cancel) return;
+        readerCancellationPromise = Promise.resolve()
+            .then(cancel)
+            .catch(() => { });
+        await readerCancellationPromise;
+    };
+    const releaseReader = () => {
+        if (readerReleased) return;
+        readerReleased = true;
+        activeReader?.releaseLock?.();
+    };
+    const onAbort = () => {
+        const abortError = createAnalysisAbortError();
+        rememberTermination(abortError);
+        void cancelReader(abortError);
+    };
+    if (signal) {
+        abortListener = onAbort;
+        signal.addEventListener('abort', abortListener, { once: true });
+        if (signal.aborted) onAbort();
+    }
+    const cleanupAbortListener = () => {
+        if (signal && abortListener) {
+            signal.removeEventListener('abort', abortListener);
+            abortListener = null;
+        }
+    };
+    return {
+        cancel: cancelReader,
+        // scannerがreaderを取得できない場合も、取得層からbodyを回収できる。
+        cleanup: async (reason) => {
+            cleanupAbortListener();
+            try { await cancelReader(reason); } catch (error) { }
+            try { releaseReader(); } catch (error) { }
+        },
+        getReader() {
+            const reader = body.getReader();
+            activeReader = reader;
+            if (signal?.aborted) void cancelReader(createAnalysisAbortError());
+            let timer = null;
+            const clear = () => {
+                if (timer !== null) {
+                    clearTimeout(timer);
+                    timer = null;
+                }
+            };
+            return {
+                async read() {
+                    clear();
+                    if (signal?.aborted) {
+                        const abortError = createAnalysisAbortError();
+                        rememberTermination(abortError);
+                        await cancelReader(abortError);
+                        throw abortError;
+                    }
+                    timer = setTimeout(() => {
+                        const timeoutError = new Error('PNG stream read stalled.');
+                        timeoutError.name = 'TimeoutError';
+                        rememberTermination(timeoutError);
+                        void cancelReader(timeoutError);
+                        onStall();
+                    }, PNG_STREAM_STALL_TIMEOUT_MS);
+                    try {
+                        const record = await reader.read();
+                        if (terminationError) throw terminationError;
+                        if (signal?.aborted) throw createAnalysisAbortError();
+                        return record;
+                    } finally {
+                        clear();
+                    }
+                },
+                cancel(reason) {
+                    clear();
+                    return cancelReader(reason);
+                },
+                releaseLock() {
+                    clear();
+                    releaseReader();
+                },
+            };
+        },
+    };
+}
+
+/**
+ * 既に読み進めた prefix chunk を先に再生し、その後は同じ reader から続きを読む
+ * stream 互換オブジェクトを作る。
+ * PNG判定のために消費した先頭bytesをscannerへ渡し直すために使う。
+ * @param {Uint8Array[]} bufferedChunks - すでに読み終えたchunk
+ * @param {Object} reader - body から取得済みの reader
+ * @returns {Object} - stream 互換オブジェクト
+ */
+function createReplayStream(bufferedChunks, reader) {
+    let readerCancelled = false;
+    let readerCancellationPromise = null;
+    let readerReleased = false;
+    const cancelReader = async (reason) => {
+        if (readerCancellationPromise) {
+            await readerCancellationPromise;
+            return;
+        }
+        readerCancelled = true;
+        readerCancellationPromise = Promise.resolve()
+            .then(() => reader.cancel(reason))
+            .catch(() => { });
+        await readerCancellationPromise;
+    };
+    const releaseReader = () => {
+        if (readerReleased) return;
+        readerReleased = true;
+        reader.releaseLock();
+    };
+    return {
+        cancel: cancelReader,
+        cleanup: async (reason) => {
+            try { await cancelReader(reason); } catch (error) { }
+            try { releaseReader(); } catch (error) { }
+        },
+        getReader() {
+            let index = 0;
+            return {
+                async read() {
+                    if (index < bufferedChunks.length) {
+                        return { done: false, value: bufferedChunks[index++] };
+                    }
+                    return reader.read();
+                },
+                cancel: cancelReader,
+                releaseLock: releaseReader,
+            };
+        },
+    };
+}
+
+/**
+ * 全body stream の PNG 解析を集約ゲート配下で実行する。
+ * ゲート枠を取得してから stream を開くため、枠待ちの間に転送を始めない。
+ * @param {Object} params
+ * @param {number} params.charge - in-flight byte として計上する量
+ * @param {Object|null} params.context - 解析context (優先度・tab・signal)
+ * @param {Function} params.openStream - async (signal) => stream|null
+ * @returns {Promise<Object|null>} - scanner結果。streamを開けない場合はnull
+ */
+async function runGatedPngStreamScan({ charge, context, openStream }) {
+    const release = await pngFullStreamGate.acquire({
+        charge,
+        priority: () => context?.priority ?? ANALYSIS_PRIORITY_BATCH,
+        tabId: context?.tabId ?? null,
+        order: context?.order ?? ANALYSIS_ORDER_FIFO,
+        signal: context?.signal ?? null,
+    });
+
+    // fetch と body read を一つの AbortController へ束ねる。
+    // 上位の取り消しと停滞タイムアウトの双方をここで受ける。
+    let controller = new AbortController();
+    const abortFromParent = () => controller.abort();
+    context?.signal?.addEventListener('abort', abortFromParent, { once: true });
+    let stalled = false;
+    const onStall = () => {
+        stalled = true;
+        controller.abort();
+    };
+    let stream = null;
+    let openTimer = setTimeout(onStall, PNG_STREAM_STALL_TIMEOUT_MS);
+
+    try {
+        stream = await openStream(controller.signal);
+        clearTimeout(openTimer);
+        openTimer = null;
+        if (!stream) return null;
+        const result = await scanPngMetadataStream(
+            withStallTimeout(stream, onStall, controller.signal),
+            { signal: controller.signal }
+        );
+        if (stalled) {
+            const stallError = new Error(
+                `PNG stream stalled for more than ${PNG_STREAM_STALL_TIMEOUT_MS}ms.`
+            );
+            stallError.name = 'TimeoutError';
+            throw stallError;
+        }
+        if (context?.signal?.aborted) throw createAnalysisAbortError();
+        return result;
+    } catch (error) {
+        if (stalled) {
+            const stallError = new Error(
+                `PNG stream stalled for more than ${PNG_STREAM_STALL_TIMEOUT_MS}ms.`
+            );
+            stallError.name = 'TimeoutError';
+            throw stallError;
+        }
+        if (context?.signal?.aborted) throw createAnalysisAbortError();
+        throw error;
+    } finally {
+        if (openTimer !== null) clearTimeout(openTimer);
+        // scannerがreaderを取得する前の例外やgate中断でもbodyを残さない。
+        if (stream?.cleanup) {
+            try { await stream.cleanup(controller.signal.reason); } catch (cleanupError) { }
+        }
+        context?.signal?.removeEventListener('abort', abortFromParent);
+        controller = null;
+        release();
+    }
+}
+
+async function runGatedPngBufferScan({ buffer, charge, context }) {
+    const release = await pngFullStreamGate.acquire({
+        charge,
+        priority: () => context?.priority ?? ANALYSIS_PRIORITY_BATCH,
+        tabId: context?.tabId ?? null,
+        order: context?.order ?? ANALYSIS_ORDER_FIFO,
+        signal: context?.signal ?? null,
+    });
+    try {
+        const result = scanPngMetadataBuffer(buffer, { signal: context?.signal ?? null });
+        if (context?.signal?.aborted) throw createAnalysisAbortError();
+        return result;
+    } finally {
+        release();
+    }
+}
+
+// metadata head 取得のゲート。軽いので比較的広く取る。
+const metadataHeadGate = new ConcurrencyGate({
+    name: 'metadata-head',
+    maxConcurrent: MAX_CONCURRENT_METADATA_HEAD_FETCHES,
+});
+
+// 全body stream のゲート。本数と in-flight byte 予算の両方を適用する。
+const pngFullStreamGate = new ConcurrencyGate({
+    name: 'png-full-stream',
+    maxConcurrent: MAX_CONCURRENT_PNG_FULL_STREAMS,
+    budgetBytes: PNG_FULL_STREAM_INFLIGHT_BUDGET_BYTES,
+});
+
+/**
+ * URL単位で解析を共有する。
+ * 同一URLを複数tab・複数frameが要求しても解析は1本に集約し、
+ * すべての要求元が取り消したときだけ中断する。
+ * handleFetchImageMetadata() の引数契約を変えずに、AbortSignal と
+ * ゲート用contextを内部から参照するための仕組みでもある。
+ */
+const inFlightAnalyses = new Map();
+
+/**
+ * 現在進行中の解析contextを取得する
+ * @param {string} imageUrl
+ * @returns {Object|null}
+ */
+function getAnalysisContext(imageUrl) {
+    return inFlightAnalyses.get(imageUrl) || null;
+}
+
+/**
+ * 解析を開始または既存の解析へ合流する
+ * @param {string} imageUrl - 対象URL
+ * @param {Object} [options]
+ * @param {number|null} [options.tabId] - 要求元tab
+ * @param {number} [options.priority] - 優先度
+ * @param {string} [options.order] - 取り出し順
+ * @returns {Promise<Object>} - handleFetchImageMetadata の結果
+ */
+function requestImageMetadata(imageUrl, { tabId = null, priority = ANALYSIS_PRIORITY_BATCH,
+    order = ANALYSIS_ORDER_FIFO } = {}) {
+    const existing = inFlightAnalyses.get(imageUrl);
+    if (existing && !existing.settled && existing.signal && !existing.signal.aborted) {
+        existing.activeRefs += 1;
+        // 後から届いた高優先度要求へ引き上げる
+        if (priority > existing.priority) existing.priority = priority;
+        if (tabId !== null) existing.tabIds.add(tabId);
+        return existing.promise;
+    }
+
+    const controller = new AbortController();
+    const entry = {
+        controller,
+        signal: controller.signal,
+        activeRefs: 1,
+        settled: false,
+        priority,
+        order,
+        tabId,
+        tabIds: new Set(tabId === null ? [] : [tabId]),
+        promise: null,
+    };
+    inFlightAnalyses.set(imageUrl, entry);
+    entry.promise = (async () => {
+        let release = null;
+        try {
+            release = await metadataHeadGate.acquire({
+                priority: () => entry.priority,
+                tabId: entry.tabId,
+                order: entry.order,
+                signal: entry.signal,
+            });
+            return await handleFetchImageMetadata(imageUrl);
+        } catch (error) {
+            debugLog('[AI Meta Viewer] Analysis rejected before completion:', {
+                url: imageUrl,
+                name: error.name,
+                message: error.message,
+            });
+            return { success: false, error: error.message, aborted: error.name === 'AbortError' };
+        } finally {
+            if (release) release();
+            entry.settled = true;
+            entry.activeRefs = 0;
+            if (inFlightAnalyses.get(imageUrl) === entry) {
+                inFlightAnalyses.delete(imageUrl);
+            }
+            entry.controller = null;
+            entry.signal = null;
+        }
+    })();
+    return entry.promise;
+}
+
+/**
+ * 解析の取り消しを要求する。
+ * すべての要求元が取り消したときだけ実際に中断する。
+ * @param {string} imageUrl - 対象URL
+ * @returns {boolean} - 実際に中断した場合 true
+ */
+function cancelImageMetadata(imageUrl) {
+    const entry = inFlightAnalyses.get(imageUrl);
+    if (!entry || entry.settled || entry.activeRefs <= 0) return false;
+    entry.activeRefs -= 1;
+    if (entry.activeRefs > 0 || !entry.controller) return false;
+    if (entry.controller.signal.aborted) return true;
+    entry.controller.abort();
+    return true;
+}
+
+/**
+ * 要求した Range 上限を超える 206 応答を表す error 名。
+ * Content-Range 自体は自己整合しており Range 実装の不備ではないため、
+ * この失敗で domain 全体の Range を無効化してはならない。
+ */
+const RANGE_OVER_DELIVERY_ERROR_NAME = 'RangeOverDeliveryError';
+
+/**
+ * 要求範囲を超えて配送された 206 応答用の error を生成する
+ * @param {number} observedEnd - 応答が示した end
+ * @param {number} requestedEnd - 要求した end
+ * @returns {Error}
+ */
+function createRangeOverDeliveryError(observedEnd, requestedEnd) {
+    const error = new Error(
+        `Content-Range end (${observedEnd}) exceeds requested range end (${requestedEnd}).`
+    );
+    error.name = RANGE_OVER_DELIVERY_ERROR_NAME;
+    return error;
+}
+
+/**
+ * 非PNG入力が容量上限を超えたことを表す error 名。
+ * 同じ応答を取り直しても結果は変わらないため、full fetch へ fallback しない。
+ */
+const METADATA_SIZE_LIMIT_ERROR_NAME = 'MetadataSizeLimitError';
+const METADATA_HEAD_BUDGET_ERROR_NAME = 'MetadataHeadBudgetError';
+const METADATA_JPEG_HEAD_BUDGET_BYTES = 256 * 1024;
+const METADATA_AVIF_HEAD_BUDGET_BYTES = 256 * 1024;
+const METADATA_WEBP_HEAD_BUDGET_BYTES = 64 * 1024;
+const MAX_WEBP_TAIL_DECLARED_SIZE = 256 * 1024 * 1024;
+const METADATA_SAFETENSORS_HEAD_BUDGET_BYTES = 16 * 1024 * 1024;
+
+/**
+ * parserの内部状態をbackground側の互換入力から解決する。
+ * @param {Object} metadata - parser結果
+ * @returns {string} - resolved / empty-confirmed / resource-limit / unresolved / unsupported-format
+ */
+function getMetadataState(metadata) {
+    if (!metadata || typeof metadata !== 'object') return 'unresolved';
+    if (metadata.parserState) return metadata.parserState;
+    if (metadata.isIncomplete || metadata.requiresTailFetch) return 'unresolved';
+    return Object.keys(metadata).length > 0 ? 'resolved' : 'empty-confirmed';
+}
+
+function getMetadataHeadBudget(format) {
+    switch (format) {
+        case 'jpeg': return METADATA_JPEG_HEAD_BUDGET_BYTES;
+        case 'avif': return METADATA_AVIF_HEAD_BUDGET_BYTES;
+        case 'webp': return METADATA_WEBP_HEAD_BUDGET_BYTES;
+        case 'safetensors': return METADATA_SAFETENSORS_HEAD_BUDGET_BYTES;
+        default: return FULL_FETCH_SIZE_LIMIT;
+    }
+}
+
+/**
+ * WebP RIFFヘッダーに含まれる宣言サイズを安全に取得する。
+ * Content-Lengthがない場合でもtail取得の上限判定にだけ利用する。
+ * @param {Uint8Array|ArrayBuffer} value - 先頭bytes
+ * @returns {number|null} - RIFF全体の宣言サイズ、または不明
+ */
+function getDeclaredWebpSize(value) {
+    const view = value instanceof Uint8Array ? value : new Uint8Array(value || 0);
+    if (view.length < 12 ||
+        view[0] !== 0x52 || view[1] !== 0x49 || view[2] !== 0x46 || view[3] !== 0x46 ||
+        view[8] !== 0x57 || view[9] !== 0x45 || view[10] !== 0x42 || view[11] !== 0x50) {
+        return null;
+    }
+    const riffPayloadSize = view[4] + (view[5] << 8) + (view[6] << 16) + (view[7] * 0x1000000);
+    const totalSize = riffPayloadSize + 8;
+    return Number.isSafeInteger(totalSize) && totalSize >= 12 &&
+        totalSize <= MAX_WEBP_TAIL_DECLARED_SIZE ? totalSize : null;
+}
+
+function isBoundedMetadataFormat(format) {
+    return ['jpeg', 'avif', 'webp', 'safetensors'].includes(format);
+}
+
+/**
+ * 形式別head budgetを使い切っても完了条件に到達しなかった場合のerror。
+ * @param {number} observed - 保持したbyte数
+ * @param {number} limit - 形式別budget
+ * @param {string} format - 形式
+ * @returns {Error}
+ */
+function createMetadataHeadBudgetError(observed, limit, format) {
+    const error = new Error(
+        `${format} metadata head (${observed} bytes) reached budget (${limit} bytes) without a complete parse.`
+    );
+    error.name = METADATA_HEAD_BUDGET_ERROR_NAME;
+    error.format = format;
+    error.limit = limit;
+    error.observed = observed;
+    return error;
+}
+
+/**
+ * 容量上限超過の error を生成する。
+ * @param {number} observed - 観測したbyte数
+ * @param {number} limit - 上限
+ * @returns {Error}
+ */
+function createMetadataSizeLimitError(observed, limit) {
+    const error = new Error(
+        `File size (${observed} bytes) exceeds safety limit (${limit} bytes).`
+    );
+    error.name = METADATA_SIZE_LIMIT_ERROR_NAME;
+    return error;
+}
+
+/**
+ * Range Request 失敗を rangeRequestBlockList へ登録すべきかを判定する。
+ * サーバーが Range を構造的に扱えないと判断できる場合だけ登録する。
+ * timeout・abort・一過性のネットワークエラーで登録すると、その domain の
+ * 以降の全画像が full fetch へ退行し、非PNGの容量上限に直撃するため除外する。
+ * @param {Error} error - 発生した例外
+ * @param {number|undefined} status - HTTP ステータス
+ * @returns {boolean} - block list へ登録する場合 true
+ */
+function isStructuralRangeFailure(error, status) {
+    // AbortError は timeout もしくは明示的な中断であり、Range 非対応の根拠にならない
+    if (error && (error.name === 'AbortError' || error.name === 'TimeoutError')) return false;
+    // 過剰配送は当該リクエストだけの問題であり、以降の Range を諦める理由にならない
+    if (error && error.name === RANGE_OVER_DELIVERY_ERROR_NAME) return false;
+    // ステータスを得られていない場合はネットワーク層の失敗であり構造的判断ができない
+    if (typeof status !== 'number') return false;
+    // 206 を返しているのに解析できなかった場合は Range 実装の不備として扱う
+    if (status === HTTP_PARTIAL_CONTENT_STATUS) return true;
+    // 200 は Range 無視、416 は Range 非対応として扱う。
+    // 429・5xxなどのリソース／一時障害はdomain全体のblock根拠にしない。
+    return status === HTTP_OK_STATUS || status === 416;
+}
 
 // デフォルト設定
 const DEFAULT_SETTINGS = {
@@ -496,7 +1490,7 @@ const DEFAULT_SETTINGS = {
     downloaderFolderMode: 'id_pageTitle', // 'id_pageTitle', 'pageTitle', 'domain', 'none'
     downloaderBaseFolder: 'AI_Meta_Viewer',
     downloaderUseRoot: false,
-    version: '1.5.4.2',
+    version: '1.6.0',
     // 共有設定の追加
     modalWidth: 800,
     modalHeight: 600,
@@ -510,14 +1504,7 @@ const DEFAULT_SETTINGS = {
 };
 
 // 現在の設定（起動時に読み込み）
-let settings = { ...DEFAULT_SETTINGS };
-
-// デバッグログ出力関数
-function debugLog(...args) {
-    if (settings.debugMode) {
-        console.log(...args);
-    }
-}
+settings = { ...DEFAULT_SETTINGS };
 
 /**
  * Range Request の失敗情報を標準化してログに出力する
@@ -587,14 +1574,57 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     }
 
     if (request.action === 'fetchImageMetadata') {
-        handleFetchImageMetadata(request.imageUrl, request.imageData)
+        // 優先度と取り出し順はメッセージ本体ではなく action で表現し、
+        // fetchImageMetadata の契約を { action, imageUrl } のまま維持する。
+        requestImageMetadata(request.imageUrl, {
+            tabId: sender?.tab?.id ?? null,
+            priority: ANALYSIS_PRIORITY_BATCH,
+            order: ANALYSIS_ORDER_FIFO,
+        })
             .then(sendResponse)
             .catch(error => {
-                console.error('Metadata fetch error:', error);
+                debugLog('Metadata fetch error', error);
                 sendResponse({ success: false, error: error.message });
             });
 
         // 非同期レスポンスを返すため true を返す
+        return true;
+    }
+
+    // viewport 由来の解析。待機列は LIFO とし、スクロール中は最新の可視領域を優先する。
+    if (request.action === 'fetchImageMetadataForViewport') {
+        requestImageMetadata(request.imageUrl, {
+            tabId: sender?.tab?.id ?? null,
+            priority: ANALYSIS_PRIORITY_VIEWPORT,
+            order: ANALYSIS_ORDER_LIFO,
+        })
+            .then(sendResponse)
+            .catch(error => {
+                debugLog('Metadata fetch error', error);
+                sendResponse({ success: false, error: error.message });
+            });
+        return true;
+    }
+
+    // hover 由来の解析。待機列の先頭へ昇格させ、待たせない。
+    if (request.action === 'fetchImageMetadataForHover') {
+        requestImageMetadata(request.imageUrl, {
+            tabId: sender?.tab?.id ?? null,
+            priority: ANALYSIS_PRIORITY_HOVER,
+            order: ANALYSIS_ORDER_LIFO,
+        })
+            .then(sendResponse)
+            .catch(error => {
+                debugLog('Metadata fetch error', error);
+                sendResponse({ success: false, error: error.message });
+            });
+        return true;
+    }
+
+    // 画面外へ出た画像などの解析取り消し
+    if (request.action === 'cancelImageMetadata') {
+        const cancelled = cancelImageMetadata(request.imageUrl);
+        sendResponse({ success: true, cancelled });
         return true;
     }
 
@@ -623,7 +1653,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
                 sendResponse(result);
             })
             .catch(error => {
-                console.error('Clear all data error:', error);
+                debugLog('Clear all data error', error);
                 sendResponse({ success: false, error: error.message });
             });
         return true;
@@ -637,7 +1667,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
                 sendResponse({ success: true, statistics: statistics });
             })
             .catch(error => {
-                console.error('Get data statistics error:', error);
+                debugLog('Get data statistics error', error);
                 sendResponse({ success: false, error: error.message });
             });
         return true;
@@ -655,7 +1685,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         handleGetMediaSize(request.url)
             .then(sendResponse)
             .catch(error => {
-                console.error('Size fetch error:', error);
+                debugLog('Size fetch error', error);
                 sendResponse({ success: false, error: error.message });
             });
         return true;
@@ -665,7 +1695,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         handleWriteMetadataAndDownload(request.imageUrl, request.metadata)
             .then(sendResponse)
             .catch(error => {
-                console.error('Write metadata error:', error);
+                debugLog('Write metadata error', error);
                 sendResponse({ success: false, error: error.message });
             });
         return true;
@@ -801,7 +1831,7 @@ chrome.action.onClicked.addListener(async (tab) => {
     }
 
     chrome.tabs.sendMessage(tab.id, { action: 'scanPage' }).catch(err => {
-        console.error('[AI Meta Viewer] Failed to send scanPage message:', err);
+        debugLog('[AI Meta Viewer] Failed to send scanPage message', err);
     });
 });
 
@@ -896,7 +1926,7 @@ async function handleDownloadImages(images, context) {
                 saveAs: false
             }, (downloadId) => {
                 if (chrome.runtime.lastError) {
-                    console.error(`[AI Meta Viewer] API Error for ${fullFilename}:`, chrome.runtime.lastError.message);
+                    debugLog('[AI Meta Viewer] Download API error', { category: 'download', phase: 'download', errorType: 'unknown' });
                     // 失敗した場合はキューから削除を試みる
                     const q = downloadPathQueue.get(img.url);
                     if (q) {
@@ -910,7 +1940,7 @@ async function handleDownloadImages(images, context) {
 
             downloadedCount++;
         } catch (e) {
-            console.error(`[AI Meta Viewer] Catch block error for ${img.url}:`, e);
+            debugLog('[AI Meta Viewer] Download request error', { category: 'download', phase: 'download', errorType: 'unknown' });
         }
     }
 
@@ -971,7 +2001,7 @@ async function handleCivitaiZipDownload(images, context) {
                         zip.file(sanitize(img.filename), blob);
                     }
                 } catch (e) {
-                    console.error('[AI Meta Viewer] Failed to fetch image for ZIP:', img.url, e);
+                    debugLog('[AI Meta Viewer] ZIP image fetch error', { category: 'download', phase: 'download', errorType: 'unknown' });
                 }
             }
 
@@ -994,7 +2024,7 @@ async function handleCivitaiZipDownload(images, context) {
 
             downloadedCount += galleryImages.length;
         } catch (e) {
-            console.error('[AI Meta Viewer] ZIP compression error:', e);
+            debugLog('[AI Meta Viewer] ZIP compression error', e);
             throw e;
         }
     }
@@ -1007,7 +2037,13 @@ async function handleCivitaiZipDownload(images, context) {
  * 画像を取得してメタデータを抽出
  * Adaptive Range Request Logic 実装
  */
-async function handleFetchImageMetadata(imageUrl, base64Data = null) {
+async function handleFetchImageMetadata(imageUrl) {
+    if (typeof initializationState !== 'undefined' &&
+        typeof INITIALIZATION_STATES !== 'undefined' &&
+        initializationState === INITIALIZATION_STATES.FATAL) {
+        return createInitializationUnavailableResult();
+    }
+
     debugLog('[AI Meta Viewer] Fetching metadata for:', imageUrl);
 
     // blob: URL は Service Worker からアクセス不可のためスキップ
@@ -1028,13 +2064,33 @@ async function handleFetchImageMetadata(imageUrl, base64Data = null) {
             cachedMetadata: cachedMetadata
         });
 
-        // 空のメタデータがキャッシュされているが、Safetensors の場合は最新の取得ロジックを試す価値がある
-        if (Object.keys(cachedMetadata).length === 0 && isSafetensorsUrl) {
-            debugLog('[AI Meta Viewer] Cached metadata is empty for Safetensors. Bypassing cache to retry with new logic...', imageUrl);
+        if (cachedMetadata.cacheEntryState === 'empty-confirmed' ||
+            cachedMetadata.cacheEntryState === 'unsupported-format') {
+            return { success: true, metadata: {}, cached: true };
+        }
+
+        // 空のメタデータは旧scanner版の結果を含み得るため再解析する。
+        // Safetensorsの既存判定・ログ挙動は維持する。
+        if (Object.keys(cachedMetadata).length === 0) {
+            if (isSafetensorsUrl) {
+                debugLog('[AI Meta Viewer] Cached metadata is empty for Safetensors. Bypassing cache to retry with new logic...', imageUrl);
+            } else {
+                debugLog('[AI Meta Viewer] Empty cached metadata treated as a cache miss:', imageUrl);
+            }
         } else {
             debugLog('[AI Meta Viewer] Persistent Cache hit:', imageUrl, 'Keys:', Object.keys(cachedMetadata).join(', '));
             return { success: true, metadata: cachedMetadata, cached: true };
         }
+    }
+
+    // 取得開始前にschemeを一度だけ解決し、file:をHTTP取得経路から分離する。
+    let parsedImageUrl = null;
+    let imageScheme = '';
+    try {
+        parsedImageUrl = new URL(imageUrl);
+        imageScheme = parsedImageUrl.protocol;
+    } catch (urlError) {
+        // 後続の既存取得経路で従来どおり失敗分類するため、schemeは空のままにする。
     }
 
     // parser.js チェック
@@ -1043,37 +2099,511 @@ async function handleFetchImageMetadata(imageUrl, base64Data = null) {
         return { success: false, error: 'Parser not loaded' };
     }
 
+    const isFileScheme = imageScheme === 'file:';
+    let filePhase = isFileScheme ? 'acquisition' : null;
+    let fileResponseStatus;
+    let fileBodyPresent;
+    const sanitizeFileDiagnosticMessage = (error) => {
+        const rawMessage = typeof error === 'string'
+            ? error
+            : error?.message || String(error || 'Unknown error');
+        return rawMessage
+            .replace(/(?:file:\/\/|[A-Za-z]:[\\/])[^\s'"`)]*/gi, '[redacted-path]')
+            .replace(/(?:^|\s)\/[^\s'"`)]*/g, '$1[redacted-path]')
+            .replace(/(?:\b[0-9a-f]{2}\s+){3,}[0-9a-f]{2}\b/gi, '[redacted-bytes]')
+            .slice(0, 240);
+    };
+    const classifyFileError = (error) => {
+        if (error?.name === 'AbortError') {
+            return error?.isTimeout || /stalled|timeout/i.test(error.message || '')
+                ? 'timeout'
+                : 'abort';
+        }
+        if (error?.name === 'TimeoutError' || /stalled|timeout/i.test(error?.message || '')) {
+            return 'timeout';
+        }
+        if (filePhase === 'acquisition' &&
+            ['NotAllowedError', 'SecurityError', 'NetworkError'].includes(error?.name)) {
+            return 'file-access';
+        }
+        return 'acquisition';
+    };
+    const createFileFailureResult = (error) => {
+        const category = classifyFileError(error);
+        const safeMessages = {
+            'file-access': 'File access was denied.',
+            acquisition: 'File metadata acquisition failed.',
+            timeout: 'File metadata acquisition timed out.',
+            abort: 'File metadata acquisition was aborted.',
+        };
+        const diagnostics = {
+            category,
+            scheme: 'file',
+            phase: filePhase || 'acquisition',
+            status: typeof fileResponseStatus === 'number' ? fileResponseStatus : undefined,
+            bodyPresent: fileBodyPresent === true,
+            errorName: error?.name || 'Error',
+            message: safeMessages[category] || sanitizeFileDiagnosticMessage(error),
+        };
+        return {
+            success: false,
+            error: diagnostics.message || category,
+            diagnostics,
+        };
+    };
+
+    const sanitizeScannerDiagnostics = (value, depth = 0) => {
+        const forbiddenKeys = new Set([
+            'metadata', 'payload', 'bytes', 'signature', 'observedPrefix', 'value',
+        ]);
+        if (depth > 4 || value === null || value === undefined) return value;
+        if (typeof value === 'string') return sanitizeFileDiagnosticMessage(value);
+        if (typeof value !== 'object') return value;
+        if (Array.isArray(value)) {
+            return value.slice(0, 32).map((entry) => sanitizeScannerDiagnostics(entry, depth + 1));
+        }
+        const result = {};
+        for (const [key, entry] of Object.entries(value).slice(0, 32)) {
+            if (forbiddenKeys.has(key)) continue;
+            result[key] = sanitizeScannerDiagnostics(entry, depth + 1);
+        }
+        return result;
+    };
+
     try {
         let buffer;
         let isRangeRequest = false;
-        let domain = '';
+        let rangeRepresentationComplete = false;
+        let domain = parsedImageUrl?.hostname || '';
         let totalFileSize = 0; // 追加：Rangeリクエスト時の総サイズ保持
-        try { domain = new URL(imageUrl).hostname; } catch (e) { }
+        // Content-Range の complete-length が `*` の場合、総サイズは不明となる。
+        // tail fetch は総サイズが既知であることを前提とするため明示的に区別する。
+        let totalFileSizeKnown = false;
+        // PNG を全body保持せず stream で受け取った場合の入力。
+        // これが設定されている間は buffer を持たない。
+        let pngStreamInput = null;
+        let pngBufferRequiresGate = false;
+        let pngBufferCharge = PNG_FULL_STREAM_UNKNOWN_SIZE_CHARGE_BYTES;
 
-        // リダイレクト解決済みのURLを保持
+        // 解析単位のAbortSignalを全取得・再試行経路へ伝播する。
+        const analysisSignal = getAnalysisContext(imageUrl)?.signal || null;
         let activeUrl = imageUrl;
 
         /**
-         * 安全ガード付きの全取得 Fetch
+         * byte-0再取得でPNG以外のrepresentationが返った場合のerrorを生成する。
+         * drift自体は検出せず、再取得結果をPNG入力として検証した結果だけを返す。
+         * @param {Uint8Array} prefix - 再取得bodyの先頭bytes
+         * @returns {Error} - representation mismatch error
          */
-        const safeFetchFull = async (url) => {
-            const response = await fetch(url, { redirect: 'follow' });
-            if (!response.ok) throw new Error(`HTTP ${response.status}`);
-
-            const contentLength = parseInt(response.headers.get('Content-Length') || '0', 10);
-            if (contentLength > FULL_FETCH_SIZE_LIMIT) {
-                if (response.body) response.body.cancel();
-                throw new Error(`File size (${contentLength} bytes) exceeds safety limit (${FULL_FETCH_SIZE_LIMIT} bytes).`);
-            }
-
-            return await response.arrayBuffer();
+        const createRepresentationMismatchError = (prefix) => {
+            const bytes = prefix instanceof Uint8Array ? prefix : new Uint8Array(prefix);
+            const error = new Error(
+                'PNG representation mismatch: byte-0 response does not start with the PNG signature.'
+            );
+            error.name = 'RepresentationMismatchError';
+            error.category = 'representation-mismatch';
+            error.diagnostics = [{
+                category: 'representation-mismatch',
+                expected: 'png-signature',
+                observedPrefix: Array.from(bytes).map((value) => value.toString(16).padStart(2, '0')).join(' '),
+            }];
+            return error;
         };
 
-        if (base64Data) {
-            // Base64データが提供されている場合（ローカルファイルなど）
-            debugLog('[AI Meta Viewer] Using provided Base64 data');
-            const response = await fetch(base64Data);
-            buffer = await response.arrayBuffer();
+        /**
+         * 応答をmetadata解析用のbounded inputへ変換する。
+         * PNGはsignature後にstreamへ渡し、非PNGは形式別完了条件またはhead budgetで止める。
+         * @param {Response} response - 応答
+         * @param {Object} [options] - PNG stream許可設定
+         * @returns {Promise<Object>} - bufferまたはPNG streamの解析入力
+         */
+        const readResponseForMetadata = async (response, {
+            allowPngStream = true,
+            allowBodylessFileFallback = false,
+            signal = null,
+        } = {}) => {
+            const declaredLength = Number(response.headers?.get?.('content-length'));
+            const charge = Number.isSafeInteger(declaredLength) && declaredLength > 0
+                ? declaredLength
+                : PNG_FULL_STREAM_UNKNOWN_SIZE_CHARGE_BYTES;
+            const formatPrefixLimit = 12;
+
+            if (!response.body || typeof response.body.getReader !== 'function') {
+                const contentType = String(response.headers?.get?.('content-type') || '').toLowerCase();
+                const bodylessPng = contentType.includes('image/png');
+                const bodylessLimit = allowBodylessFileFallback
+                    ? FILE_BODYLESS_FALLBACK_LIMIT
+                    : bodylessPng ? BODYLESS_PNG_FALLBACK_LIMIT : FULL_FETCH_SIZE_LIMIT;
+                const hasDeclaredLength = Number.isSafeInteger(declaredLength) && declaredLength >= 0;
+                if (!hasDeclaredLength || declaredLength > bodylessLimit) {
+                    throw createMetadataSizeLimitError(
+                        hasDeclaredLength ? declaredLength : bodylessLimit + 1,
+                        bodylessLimit,
+                    );
+                }
+                const fullBuffer = await response.arrayBuffer();
+                if (signal?.aborted) throw createAnalysisAbortError();
+                if (fullBuffer.byteLength > bodylessLimit ||
+                    (hasDeclaredLength && fullBuffer.byteLength > declaredLength)) {
+                    throw createMetadataSizeLimitError(fullBuffer.byteLength, bodylessLimit);
+                }
+                const pngPrefix = classifyPngPrefix(fullBuffer);
+                if (pngPrefix === PNG_PREFIX_PNG) {
+                    if (!allowPngStream) {
+                        throw createRepresentationMismatchError(
+                            new Uint8Array(fullBuffer).subarray(0, PNG_SIGNATURE.length)
+                        );
+                    }
+                    return {
+                        kind: 'png-buffer',
+                        buffer: fullBuffer,
+                        charge,
+                        gateRequired: true,
+                    };
+                }
+                const format = detectImageFormat(fullBuffer);
+                const budget = getMetadataHeadBudget(format);
+                if (isBoundedMetadataFormat(format) && fullBuffer.byteLength > budget) {
+                    const limited = fullBuffer.slice(0, budget);
+                    const boundedMetadata = extractMetadata(limited, {
+                        format,
+                        inputComplete: false,
+                    });
+                    const state = getMetadataState(boundedMetadata);
+                    if (state === 'resolved' || state === 'empty-confirmed') {
+                        return { kind: 'buffer', buffer: limited };
+                    }
+                    if (format === 'webp' && boundedMetadata.requiresTailFetch) {
+                        return {
+                            kind: 'buffer',
+                            buffer: limited,
+                            inputComplete: false,
+                            requiresTailFetch: true,
+                            totalFileSize: fullBuffer.byteLength,
+                            totalFileSizeKnown: true,
+                        };
+                    }
+                    throw createMetadataHeadBudgetError(fullBuffer.byteLength, budget, format);
+                }
+                if (!format && fullBuffer.byteLength > FULL_FETCH_SIZE_LIMIT) {
+                    throw createMetadataSizeLimitError(fullBuffer.byteLength, FULL_FETCH_SIZE_LIMIT);
+                }
+                return { kind: 'buffer', buffer: fullBuffer };
+            }
+
+            const reader = response.body.getReader();
+            const chunks = [];
+            const prefix = new Uint8Array(formatPrefixLimit);
+            let prefixLength = 0;
+            let totalLength = 0;
+            let pngPrefix = PNG_PREFIX_UNDETERMINED;
+            let format = null;
+            let handedOverToScanner = false;
+            let boundedMetadata = null;
+            let declaredFormatSize = null;
+            let nextParseAt = 0;
+
+            const materialize = () => {
+                const buffer = new Uint8Array(totalLength);
+                let offset = 0;
+                for (const chunk of chunks) {
+                    buffer.set(chunk, offset);
+                    offset += chunk.byteLength;
+                }
+                return buffer.buffer;
+            };
+            let readerCancelled = false;
+            let readerCancellationPromise = null;
+            let readerReleased = false;
+            let abortListener = null;
+            let readerTerminationError = null;
+            const rememberReaderTermination = (reason) => {
+                if (reason && !readerTerminationError) readerTerminationError = reason;
+            };
+            const assertReaderActive = () => {
+                if (readerTerminationError) throw readerTerminationError;
+                if (signal?.aborted) {
+                    const abortError = createAnalysisAbortError();
+                    rememberReaderTermination(abortError);
+                    throw abortError;
+                }
+            };
+            const cancelReader = async (reason = null) => {
+                rememberReaderTermination(reason);
+                if (readerCancellationPromise) {
+                    await readerCancellationPromise;
+                    return;
+                }
+                readerCancelled = true;
+                readerCancellationPromise = Promise.resolve()
+                    .then(() => reader.cancel(reason))
+                    .catch((error) => {
+                        debugLog('[AI Meta Viewer] metadata reader cancel failed:', error);
+                    });
+                await readerCancellationPromise;
+            };
+            const releaseReader = () => {
+                if (readerReleased) return;
+                readerReleased = true;
+                try { reader.releaseLock(); } catch (e) { debugLog('[AI Meta Viewer] metadata reader release failed:', e.message); }
+            };
+            if (signal) {
+                abortListener = () => {
+                    const abortError = createAnalysisAbortError();
+                    rememberReaderTermination(abortError);
+                    void cancelReader(abortError);
+                };
+                signal.addEventListener('abort', abortListener, { once: true });
+                if (signal.aborted) abortListener();
+            }
+            const readWithStallTimeout = async () => {
+                let timer = null;
+                const timeoutPromise = new Promise((resolve, reject) => {
+                    timer = setTimeout(() => {
+                        const timeoutError = new Error('Metadata response stream stalled.');
+                        timeoutError.name = 'TimeoutError';
+                        rememberReaderTermination(timeoutError);
+                        void cancelReader(timeoutError);
+                        reject(timeoutError);
+                    }, PNG_STREAM_STALL_TIMEOUT_MS);
+                });
+                try {
+                    const record = await Promise.race([reader.read(), timeoutPromise]);
+                    assertReaderActive();
+                    return record;
+                } finally {
+                    if (timer !== null) clearTimeout(timer);
+                }
+            };
+
+            try {
+                while (true) {
+                    const record = await readWithStallTimeout();
+                    // cancel後のpending readがdoneで解決しても、終了理由をEOFへ変換しない。
+                    assertReaderActive();
+                    if (record.done) break;
+                    const chunk = record.value instanceof Uint8Array
+                        ? record.value
+                        : new Uint8Array(record.value);
+
+                    if (prefixLength < prefix.length) {
+                        const amount = Math.min(prefix.length - prefixLength, chunk.byteLength);
+                        prefix.set(chunk.subarray(0, amount), prefixLength);
+                        prefixLength += amount;
+                    }
+                    if (pngPrefix === PNG_PREFIX_UNDETERMINED) {
+                        pngPrefix = classifyPngPrefix(prefix.subarray(0, prefixLength));
+                    }
+                    if (pngPrefix === PNG_PREFIX_PNG) {
+                        assertReaderActive();
+                        if (!allowPngStream) {
+                            await cancelReader();
+                            throw createRepresentationMismatchError(prefix.subarray(0, prefixLength));
+                        }
+                        chunks.push(chunk);
+                        totalLength += chunk.byteLength;
+                        handedOverToScanner = true;
+                        return {
+                            kind: 'png-stream',
+                            stream: createReplayStream(chunks, reader),
+                            charge,
+                        };
+                    }
+
+                    if (!format && prefixLength >= 3) {
+                        format = detectImageFormatDetailed(prefix.subarray(0, prefixLength)).format;
+                    }
+                    if (format === 'webp' && declaredFormatSize === null) {
+                        declaredFormatSize = getDeclaredWebpSize(prefix.subarray(0, prefixLength));
+                    }
+                    const budget = getMetadataHeadBudget(format);
+                    const remaining = budget - totalLength;
+                    if (remaining <= 0) {
+                        await cancelReader();
+                        throw createMetadataHeadBudgetError(totalLength, budget, format || 'unknown');
+                    }
+                    const accepted = chunk.byteLength > remaining
+                        // budgetを跨ぐchunkは必要prefixだけを独立保持し、
+                        // 元chunkの超過領域をbacking store経由で保持しない。
+                        ? chunk.slice(0, remaining)
+                        : chunk;
+                    chunks.push(accepted);
+                    totalLength += accepted.byteLength;
+
+                    if (format) {
+                        if (nextParseAt === 0) {
+                            nextParseAt = Math.min(budget, Math.max(formatPrefixLimit, 4096));
+                        }
+                        // chunkごとのmaterializeを避け、解析点を指数的に増やす。
+                        // これにより大きな非PNG streamでも累積O(n²)にならない。
+                        const shouldParse = totalLength >= nextParseAt || totalLength >= budget;
+                        if (shouldParse) {
+                            const partialBuffer = materialize();
+                            const partialMetadata = extractMetadata(partialBuffer, {
+                                format,
+                                inputComplete: false,
+                            });
+                            boundedMetadata = partialMetadata;
+                            const state = getMetadataState(partialMetadata);
+                            if (state === 'resolved' || state === 'empty-confirmed') {
+                                await cancelReader();
+                                assertReaderActive();
+                                return { kind: 'buffer', buffer: partialBuffer };
+                            }
+                            nextParseAt = Math.min(
+                                budget,
+                                Math.max(nextParseAt * 2, nextParseAt + 4096),
+                            );
+                        }
+                    }
+
+                    if (chunk.byteLength > accepted.byteLength || totalLength >= budget) {
+                        await cancelReader();
+                        if (format === 'webp' &&
+                            boundedMetadata?.requiresTailFetch &&
+                            (Number.isSafeInteger(declaredLength) && declaredLength > totalLength ||
+                                Number.isSafeInteger(declaredFormatSize) && declaredFormatSize > totalLength)) {
+                            const completeSize = Number.isSafeInteger(declaredLength) && declaredLength > totalLength
+                                ? declaredLength
+                                : declaredFormatSize;
+                            return {
+                                kind: 'buffer',
+                                buffer: materialize(),
+                                inputComplete: false,
+                                requiresTailFetch: true,
+                                totalFileSize: completeSize,
+                                totalFileSizeKnown: true,
+                            };
+                        }
+                        throw createMetadataHeadBudgetError(totalLength, budget, format || 'unknown');
+                    }
+                }
+            } finally {
+                if (signal && abortListener) {
+                    signal.removeEventListener('abort', abortListener);
+                }
+                if (!handedOverToScanner) {
+                    await cancelReader();
+                    releaseReader();
+                }
+            }
+
+            if (pngPrefix === PNG_PREFIX_UNDETERMINED) pngPrefix = PNG_PREFIX_NOT_PNG;
+            assertReaderActive();
+            const buffer = materialize();
+            if (!format && prefixLength >= 3) {
+                format = detectImageFormat(buffer);
+            }
+            if (pngPrefix === PNG_PREFIX_PNG) {
+                if (!allowPngStream) {
+                    throw createRepresentationMismatchError(
+                        new Uint8Array(buffer).subarray(0, PNG_SIGNATURE.length)
+                    );
+                }
+                return { kind: 'png-buffer', buffer };
+            }
+            if (format) {
+                const finalMetadata = extractMetadata(buffer, {
+                    format,
+                    inputComplete: true,
+                });
+                if (getMetadataState(finalMetadata) === 'unresolved' &&
+                    isBoundedMetadataFormat(format) && totalLength >= getMetadataHeadBudget(format)) {
+                    throw createMetadataHeadBudgetError(totalLength, getMetadataHeadBudget(format), format);
+                }
+            } else if (totalLength > FULL_FETCH_SIZE_LIMIT) {
+                throw createMetadataSizeLimitError(totalLength, FULL_FETCH_SIZE_LIMIT);
+            }
+            assertReaderActive();
+            return { kind: 'buffer', buffer };
+        };
+
+
+        /**
+         * 初期取得用の全取得 Fetch。PNGはstreamで受け取れる。
+         * @param {string} url - 取得URL
+         * @returns {Promise<Object>} - readResponseForMetadata の結果
+         */
+        const safeFetchFullInput = async (url, signal = null) => {
+            const response = await fetch(url, { redirect: 'follow', signal });
+            if (response.status !== HTTP_OK_STATUS) throw new Error(`HTTP ${response.status}`);
+            return readResponseForMetadata(response, { allowPngStream: true, signal });
+        };
+
+        /**
+         * 非PNG経路の再試行用の全取得 Fetch。buffer だけを返す。
+         * この経路は既に非PNGと判定された画像にだけ使われるため、
+         * PNG が返った場合は representation drift として失敗させる。
+         * @param {string} url - 取得URL
+         * @returns {Promise<ArrayBuffer>}
+         */
+        const safeFetchFull = async (url, signal = null) => {
+            const response = await fetch(url, { redirect: 'follow', signal });
+            if (response.status !== HTTP_OK_STATUS) throw new Error(`HTTP ${response.status}`);
+            const input = await readResponseForMetadata(response, { allowPngStream: false, signal });
+            if (input.kind === 'png-buffer') {
+                throw createRepresentationMismatchError(
+                    new Uint8Array(input.buffer).subarray(0, PNG_SIGNATURE.length)
+                );
+            }
+            return input.buffer;
+        };
+
+        if (isFileScheme) {
+            let fileController = new AbortController();
+            const analysisContext = getAnalysisContext(imageUrl);
+            const parentSignal = analysisContext?.signal;
+            const abortFromParent = () => fileController?.abort();
+            let parentListenerAttached = false;
+            try {
+                if (parentSignal) {
+                    if (parentSignal.aborted) throw createAnalysisAbortError();
+                    parentSignal.addEventListener('abort', abortFromParent, { once: true });
+                    parentListenerAttached = true;
+                }
+                const response = await fetch(imageUrl, {
+                    redirect: 'follow',
+                    signal: fileController.signal,
+                });
+                fileResponseStatus = response?.status;
+                fileBodyPresent = Boolean(response?.body);
+                if (!response || response.status !== HTTP_OK_STATUS) {
+                    const statusError = new Error(
+                        `File fetch failed with HTTP ${response?.status ?? 'unknown'}.`
+                    );
+                    statusError.name = 'ResponseStatusError';
+                    throw statusError;
+                }
+                const input = await readResponseForMetadata(response, {
+                    allowPngStream: true,
+                    allowBodylessFileFallback: true,
+                    signal: fileController.signal,
+                });
+                if (input.kind === 'png-stream') {
+                    pngStreamInput = input;
+                    rangeRepresentationComplete = true;
+                } else {
+                    buffer = input.buffer;
+                    pngBufferRequiresGate = input.gateRequired === true;
+                    pngBufferCharge = input.charge || PNG_FULL_STREAM_UNKNOWN_SIZE_CHARGE_BYTES;
+                    totalFileSizeKnown = input.totalFileSizeKnown !== false;
+                    totalFileSize = totalFileSizeKnown
+                        ? (input.totalFileSize || buffer.byteLength)
+                        : buffer.byteLength;
+                    rangeRepresentationComplete = input.inputComplete !== false;
+                }
+            } catch (error) {
+                if (pngStreamInput?.stream?.cleanup) {
+                    try { await pngStreamInput.stream.cleanup(error); } catch (cleanupError) { }
+                    pngStreamInput = null;
+                }
+                return createFileFailureResult(error);
+            } finally {
+                if (parentSignal && parentListenerAttached) {
+                    parentSignal.removeEventListener('abort', abortFromParent);
+                }
+                fileController = null;
+            }
         } else {
             // URLフェッチ: Range Request 試行
             const shouldUseRange = !rangeRequestBlockList.has(domain);
@@ -1089,7 +2619,11 @@ async function handleFetchImageMetadata(imageUrl, base64Data = null) {
                     if (isCivitaiApiUrl || isCloudflareCDN) {
                         debugLog('[AI Meta Viewer] Resolving final URL for Range request:', imageUrl.substring(0, 80));
                         try {
-                            const headResp = await fetch(imageUrl, { method: 'HEAD', redirect: 'follow' });
+                            const headResp = await fetch(imageUrl, {
+                                method: 'HEAD',
+                                redirect: 'follow',
+                                signal: analysisSignal,
+                            });
                             if (headResp.ok) {
                                 activeUrl = headResp.url;
                                 debugLog('[AI Meta Viewer] ✓ Final URL resolved:', activeUrl.substring(0, 80));
@@ -1107,6 +2641,11 @@ async function handleFetchImageMetadata(imageUrl, base64Data = null) {
                     });
 
                     const controller = new AbortController();
+                    const abortFromAnalysis = () => controller.abort();
+                    if (analysisSignal) {
+                        if (analysisSignal.aborted) controller.abort();
+                        else analysisSignal.addEventListener('abort', abortFromAnalysis, { once: true });
+                    }
                     const timeoutId = setTimeout(
                         () => controller.abort(),
                         RANGE_REQUEST_TIMEOUT_MS
@@ -1126,36 +2665,73 @@ async function handleFetchImageMetadata(imageUrl, base64Data = null) {
                             range: rangeHeader
                         });
 
-                        if (response.status === 206) {
-                            isRangeRequest = true;
-                            buffer = await response.arrayBuffer(); // 通常の最初のバッファをパース用に割り当て
-
-                            // Content-Range からファイルの総サイズを取得
-                            const contentRange = response.headers.get('Content-Range');
-                            if (contentRange) {
-                                const match = contentRange.match(/\/(\d+)/);
-                                if (match) {
-                                    totalFileSize = parseInt(match[1], 10);
-                                    debugLog(`[AI Meta Viewer] Content total size: ${totalFileSize} bytes`);
+                        if (response.status === HTTP_PARTIAL_CONTENT_STATUS) {
+                            const contentRange = parseContentRangeHeader(response.headers.get('Content-Range'));
+                            if (!contentRange || contentRange.start !== 0) {
+                                throw new Error('Invalid Content-Range for initial PNG representation.');
+                            }
+                            // 要求範囲より広い応答を受理すると、上限を迂回した保持量になる。
+                            // Content-Range は body より先に届くため、body を materialize
+                            // する前に判定してキャンセルできる。
+                            if (contentRange.end > rangeSize) {
+                                if (response.body && typeof response.body.cancel === 'function') {
+                                    // 過剰配送された payload を読み込まずに破棄する
+                                    Promise.resolve(response.body.cancel()).catch(() => { });
                                 }
+                                throw createRangeOverDeliveryError(contentRange.end, rangeSize);
                             }
-                        } else if (response.status === 200) {
-                            // サーバーがRangeを無視した場合
-                            const contentLength = parseInt(response.headers.get('Content-Length') || '0', 10);
-                            if (contentLength > FULL_FETCH_SIZE_LIMIT) {
-                                if (response.body) response.body.cancel();
-                                throw new Error(`Full content returned but exceeds limit: ${contentLength} bytes`);
-                            }
+                            isRangeRequest = true;
                             buffer = await response.arrayBuffer();
-                            totalFileSize = buffer.byteLength;
+                            if (analysisSignal?.aborted) throw createAnalysisAbortError();
+                            if (buffer.byteLength !== contentRange.length) {
+                                throw new Error('Content-Range length does not match response body length.');
+                            }
+                            // total が `*` のときは表現全体か判定できないため partial として扱う
+                            totalFileSizeKnown = contentRange.total !== null;
+                            totalFileSize = totalFileSizeKnown ? contentRange.total : 0;
+                            rangeRepresentationComplete = totalFileSizeKnown &&
+                                contentRange.length === contentRange.total;
+                            debugLog(`[AI Meta Viewer] Content-Range validated: ${contentRange.start}-${contentRange.end}/${contentRange.total ?? '*'}`);
+                        } else if (response.status === HTTP_OK_STATUS) {
+                            // サーバーがRangeを無視した場合。PNGだけは2MB上限を適用せず、
+                            // 全body を保持せず stream で scanner へ渡す。
+                            const input = await readResponseForMetadata(response, {
+                                signal: analysisSignal,
+                            });
+                            if (input.kind === 'png-stream') {
+                                pngStreamInput = input;
+                            } else {
+                                buffer = input.buffer;
+                                pngBufferRequiresGate = input.gateRequired === true;
+                                pngBufferCharge = input.charge || PNG_FULL_STREAM_UNKNOWN_SIZE_CHARGE_BYTES;
+                                totalFileSizeKnown = input.totalFileSizeKnown !== false;
+                                totalFileSize = totalFileSizeKnown
+                                    ? (input.totalFileSize || buffer.byteLength)
+                                    : buffer.byteLength;
+                                // WebPのhead＋tail入力だけは、既存tail Rangeへ接続する。
+                                isRangeRequest = input.requiresTailFetch === true && totalFileSizeKnown;
+                                rangeRepresentationComplete = input.inputComplete !== false;
+                            }
+                            if (input.kind === 'png-stream') {
+                                rangeRepresentationComplete = true;
+                            }
                         } else {
                             throw new Error(`Range request failed with status ${response.status}`);
                         }
                     } finally {
                         clearTimeout(timeoutId);
+                        if (analysisSignal) {
+                            analysisSignal.removeEventListener('abort', abortFromAnalysis);
+                        }
                     }
 
                 } catch (e) {
+                    // 容量上限超過は同じ応答を取り直しても結果が変わらない。
+                    // full fetch へ fallback せず、二重ダウンロードを避ける。
+                    if (e.name === METADATA_SIZE_LIMIT_ERROR_NAME ||
+                        e.name === METADATA_HEAD_BUDGET_ERROR_NAME) throw e;
+                    if (analysisSignal?.aborted) throw createAnalysisAbortError();
+
                     const rangeFailure = {
                         phase: 'initial',
                         domain,
@@ -1176,6 +2752,15 @@ async function handleFetchImageMetadata(imageUrl, base64Data = null) {
                             status: response?.status ?? null,
                             error: e.message
                         });
+                    } else if (domain && !isStructuralRangeFailure(e, response?.status)) {
+                        // timeout・abort・一過性ネットワークエラーでは domain を無効化しない。
+                        // 1枚の失敗で domain 全体が full fetch へ退行すると容量上限に直撃する。
+                        debugLog('[AI Meta Viewer] Range Request failure treated as transient, keeping domain enabled:', {
+                            domain,
+                            reason: e.message,
+                            errorName: e.name ?? null,
+                            status: response?.status ?? null
+                        });
                     } else if (domain) {
                         debugLog('[AI Meta Viewer] Adding domain to rangeRequestBlockList:', {
                             domain,
@@ -1194,37 +2779,271 @@ async function handleFetchImageMetadata(imageUrl, base64Data = null) {
                         domain: domain || '(unknown)',
                         url: imageUrl
                     });
-                    buffer = await safeFetchFull(imageUrl);
+                    const fallbackInput = await safeFetchFullInput(activeUrl, getAnalysisContext(imageUrl)?.signal);
+                    isRangeRequest = false;
+                    rangeRepresentationComplete = true;
+                    if (fallbackInput.kind === 'png-stream') {
+                        pngStreamInput = fallbackInput;
+                    } else {
+                        buffer = fallbackInput.buffer;
+                        pngBufferRequiresGate = fallbackInput.gateRequired === true;
+                        pngBufferCharge = fallbackInput.charge || PNG_FULL_STREAM_UNKNOWN_SIZE_CHARGE_BYTES;
+                        totalFileSizeKnown = fallbackInput.totalFileSizeKnown !== false;
+                        totalFileSize = totalFileSizeKnown
+                            ? (fallbackInput.totalFileSize || buffer.byteLength)
+                            : buffer.byteLength;
+                        isRangeRequest = fallbackInput.requiresTailFetch === true && totalFileSizeKnown;
+                        rangeRepresentationComplete = fallbackInput.inputComplete !== false;
+                    }
+                    if (fallbackInput.kind === 'png-stream') {
+                        rangeRepresentationComplete = true;
+                    }
                 }
             } else {
                 debugLog('[AI Meta Viewer] Range Request skipped for blocked domain:', {
                     domain: domain || '(unknown)',
                     reason: 'domain is already in rangeRequestBlockList'
                 });
-                buffer = await safeFetchFull(imageUrl);
+                const blockedInput = await safeFetchFullInput(imageUrl, getAnalysisContext(imageUrl)?.signal);
+                rangeRepresentationComplete = true;
+                if (blockedInput.kind === 'png-stream') {
+                    pngStreamInput = blockedInput;
+                } else {
+                    buffer = blockedInput.buffer;
+                    pngBufferRequiresGate = blockedInput.gateRequired === true;
+                    pngBufferCharge = blockedInput.charge || PNG_FULL_STREAM_UNKNOWN_SIZE_CHARGE_BYTES;
+                    totalFileSizeKnown = blockedInput.totalFileSizeKnown !== false;
+                    totalFileSize = totalFileSizeKnown
+                        ? (blockedInput.totalFileSize || buffer.byteLength)
+                        : buffer.byteLength;
+                    isRangeRequest = blockedInput.requiresTailFetch === true && totalFileSizeKnown;
+                    rangeRepresentationComplete = blockedInput.inputComplete !== false;
+                }
+                if (blockedInput.kind === 'png-stream') {
+                    rangeRepresentationComplete = true;
+                }
             }
         }
 
-        // --- メタデータ解析 ---
+        const detectedFormat = pngStreamInput ? 'png' : detectImageFormat(buffer);
+        if (detectedFormat === 'png') {
+            if (isFileScheme) filePhase = 'scanner';
+            const analysisContext = getAnalysisContext(imageUrl);
+
+            /**
+             * byte 0 から取り直した全body stream を解析する。
+             * ゲート枠を取得してから fetch するため、枠待ちの間に転送を始めない。
+             * @param {string} url - 取得URL
+             * @returns {Promise<Object>} - scanner結果
+             */
+            const scanPngFromByteZero = async (url) => {
+                // 集約予算。total が不明な場合は仮計上する。
+                const charge = totalFileSizeKnown && totalFileSize > 0
+                    ? totalFileSize
+                    : PNG_FULL_STREAM_UNKNOWN_SIZE_CHARGE_BYTES;
+                let bufferedFallback = null;
+                const streamed = await runGatedPngStreamScan({
+                    charge,
+                    context: analysisContext,
+                    openStream: async (signal) => {
+                        const response = await fetch(url, { redirect: 'follow', signal });
+                        if (!response.ok) throw new Error(`PNG fetch failed with HTTP ${response.status}`);
+
+                        if (response.body && typeof response.body.getReader === 'function') {
+                            const reader = response.body.getReader();
+                            const prefixChunks = [];
+                            const prefix = new Uint8Array(PNG_SIGNATURE.length);
+                            let prefixLength = 0;
+                            try {
+                                while (prefixLength < PNG_SIGNATURE.length) {
+                                    if (signal?.aborted) throw createAnalysisAbortError();
+                                    const record = await reader.read();
+                                    if (signal?.aborted) throw createAnalysisAbortError();
+                                    if (record.done) break;
+                                    const chunk = record.value instanceof Uint8Array
+                                        ? record.value
+                                        : new Uint8Array(record.value);
+                                    prefixChunks.push(chunk);
+                                    const amount = Math.min(
+                                        PNG_SIGNATURE.length - prefixLength,
+                                        chunk.byteLength,
+                                    );
+                                    prefix.set(chunk.subarray(0, amount), prefixLength);
+                                    prefixLength += amount;
+                                    if (classifyPngPrefix(prefix.subarray(0, prefixLength)) === PNG_PREFIX_NOT_PNG) {
+                                        throw createRepresentationMismatchError(prefix.subarray(0, prefixLength));
+                                    }
+                                }
+                                if (classifyPngPrefix(prefix.subarray(0, prefixLength)) !== PNG_PREFIX_PNG) {
+                                    throw createRepresentationMismatchError(prefix.subarray(0, prefixLength));
+                                }
+                                if (signal?.aborted) throw createAnalysisAbortError();
+                                return createReplayStream(prefixChunks, reader);
+                            } catch (error) {
+                                try { await reader.cancel(); } catch (cancelError) {
+                                    debugLog('[AI Meta Viewer] byte-0 mismatch reader cancel failed:', cancelError.message);
+                                }
+                                try { reader.releaseLock(); } catch (releaseError) {
+                                    debugLog('[AI Meta Viewer] byte-0 mismatch reader release failed:', releaseError.message);
+                                }
+                                throw error;
+                            }
+                        }
+
+                        bufferedFallback = await response.arrayBuffer();
+                        if (signal?.aborted) throw createAnalysisAbortError();
+                        const prefix = new Uint8Array(bufferedFallback).subarray(0, PNG_SIGNATURE.length);
+                        if (classifyPngPrefix(prefix) !== PNG_PREFIX_PNG) {
+                            throw createRepresentationMismatchError(prefix);
+                        }
+                        return null;
+                    },
+                });
+                if (streamed) return streamed;
+                return runGatedPngBufferScan({
+                    buffer: bufferedFallback,
+                    charge,
+                    context: analysisContext,
+                });
+            };
+
+            const completeRepresentation = !isRangeRequest || rangeRepresentationComplete;
+            if (analysisSignal?.aborted) throw createAnalysisAbortError();
+            let scanResult;
+            if (pngStreamInput) {
+                // Rangeを無視されたHTTP 200など、全body を保持せず stream で受け取った入力。
+                // 追加取得せず、そのまま同一scannerへ渡す。
+                const streamInput = pngStreamInput;
+                pngStreamInput = null;
+                try {
+                    scanResult = await runGatedPngStreamScan({
+                        charge: streamInput.charge,
+                        context: analysisContext,
+                        openStream: async () => streamInput.stream,
+                    });
+                } finally {
+                    try { await streamInput?.stream?.cleanup?.(); } catch (cleanupError) { }
+                }
+            } else if (pngBufferRequiresGate) {
+                // Response.bodyが無い実装では全body bufferを取得済みでも、
+                // PNGの展開・検証は全body gateの集約予算内で実行する。
+                scanResult = await runGatedPngBufferScan({
+                    buffer,
+                    charge: pngBufferCharge,
+                    context: analysisContext,
+                });
+            } else if (completeRepresentation) {
+                // 初期206は要求Range上限で有界化されているため、保持済みbytesをbufferで渡す。
+                scanResult = scanPngMetadataBuffer(buffer, { signal: analysisSignal });
+            } else {
+                // partial headは後続断片へ接続せず、byte 0からのstreamだけを解析する。
+                buffer = null;
+                scanResult = await scanPngFromByteZero(activeUrl);
+            }
+
+            if (analysisSignal?.aborted) throw createAnalysisAbortError();
+            if (scanResult.status === 'normal' || scanResult.status === 'stealth') {
+                if (analysisSignal?.aborted) throw createAnalysisAbortError();
+                const cacheResult = await metadataCache.set(
+                    imageUrl,
+                    scanResult.metadata,
+                    { scannerVersion: PNG_SCANNER_CACHE_VERSION },
+                );
+                if (cacheResult && cacheResult.reason === 'size-limit') {
+                    scanResult.diagnostics = [
+                        ...(scanResult.diagnostics || []),
+                        {
+                            category: 'cache-skip',
+                            detail: 'Valid PNG metadata exceeded the persistent cache item limit.',
+                            limit: cacheResult.limit,
+                            observed: cacheResult.observed,
+                        },
+                    ];
+                }
+                return {
+                    success: true,
+                    metadata: scanResult.metadata,
+                    ...(isFileScheme ? { scannerStatus: scanResult.status } : {}),
+                    diagnostics: scanResult.diagnostics
+                };
+            }
+            if (scanResult.status === 'not-found') {
+                // 有効IENDまで確認済みのnot-foundだけを、版数付きnegative cacheへ保存する。
+                // invalid/resource-limit/取得失敗はこの分岐へ到達しないため保存しない。
+                if (analysisSignal?.aborted) throw createAnalysisAbortError();
+                await metadataCache.set(imageUrl, {}, {
+                    scannerVersion: PNG_SCANNER_CACHE_VERSION,
+                    parserState: 'empty-confirmed',
+                });
+                return {
+                    success: true,
+                    metadata: {},
+                    ...(isFileScheme ? { scannerStatus: scanResult.status } : {}),
+                    diagnostics: scanResult.diagnostics
+                };
+            }
+
+            const reason = scanResult.reason || scanResult.limit || scanResult.status;
+            if (isFileScheme) {
+                const category = scanResult.status === 'invalid-png'
+                    ? 'invalid-png'
+                    : scanResult.status === 'resource-limit'
+                        ? 'resource-limit'
+                        : 'scanner-failure';
+                const scannerDiagnostics = sanitizeScannerDiagnostics(scanResult.diagnostics);
+                const diagnostics = {
+                    category,
+                    scheme: 'file',
+                    phase: 'scanner',
+                    status: typeof fileResponseStatus === 'number' ? fileResponseStatus : undefined,
+                    bodyPresent: fileBodyPresent === true,
+                    errorName: 'PngScannerError',
+                    message: `PNG scanner failed (${category}).`,
+                    scannerStatus: scanResult.status,
+                    ...(scanResult.reason ? { scannerReason: scanResult.reason } : {}),
+                    ...(scannerDiagnostics ? { scannerDiagnostics } : {}),
+                };
+                return {
+                    success: false,
+                    error: diagnostics.message,
+                    scannerStatus: scanResult.status,
+                    ...(scanResult.reason ? { scannerReason: scanResult.reason } : {}),
+                    diagnostics,
+                };
+            }
+            return {
+                success: false,
+                error: `PNG scan failed: ${reason}`,
+                diagnostics: scanResult.diagnostics,
+            };
+        }
+
         let metadata = {};
         try {
-            metadata = extractMetadata(buffer);
+            metadata = extractMetadata(buffer, {
+                format: detectedFormat,
+                inputComplete: rangeRepresentationComplete,
+            });
 
             // メタデータ不足時の再試行ロジック
-            if (metadata.isIncomplete) {
+            if (getMetadataState(metadata) === 'unresolved' && !isFileScheme) {
 
                 if (!isRangeRequest) {
                     // file:// URL 等で Range が暗黙的に効いてバッファが切り詰められたケース
                     // safeFetchFull で全ファイルを取得して再解析
                     debugLog('[AI Meta Viewer] ⚠ Metadata incomplete but not a Range request. Attempting full fetch fallback.');
                     try {
-                        const fullBuffer = await safeFetchFull(activeUrl);
+                        const fullBuffer = await safeFetchFull(activeUrl, getAnalysisContext(imageUrl)?.signal);
                         buffer = fullBuffer;
                         totalFileSize = buffer.byteLength; // totalFileSize を更新
-                        metadata = extractMetadata(buffer);
+                        totalFileSizeKnown = true;
+                        metadata = extractMetadata(buffer, {
+                            format: detectedFormat,
+                            inputComplete: true,
+                        });
 
                         // full fetch 成功後、完全なメタデータが取得できた場合は以降の再試行をスキップ
-                        if (!metadata.isIncomplete) {
+                        if (getMetadataState(metadata) !== 'unresolved') {
                             debugLog('[AI Meta Viewer] ✅ Full fetch successful, metadata complete.');
                             // isRangeRequest は false のまま（Stealth PNG チェックでの重複ダウンロードを防ぐ）
                         } else {
@@ -1238,10 +3057,11 @@ async function handleFetchImageMetadata(imageUrl, base64Data = null) {
 
                 // full fetch 後も metadata.isIncomplete を再チェック
                 // 完全なメタデータが取得できた場合は以降の再試行をスキップ
-                if (metadata.isIncomplete) {
+                if (getMetadataState(metadata) === 'unresolved') {
                     // ComfyUI (PNGの末尾にメタデータがあるパターン)
                     // W2: totalFileSize が異常に小さい場合（W1の問題発生時）は tail fetch をスキップ
-                    if (metadata.requiresTailFetch && totalFileSize > 65535 && isRangeRequest) {
+                    // tail 開始位置は総サイズから逆算するため、総サイズが既知であることを必須条件とする
+                    if (metadata.requiresTailFetch && totalFileSizeKnown && totalFileSize > 65535 && isRangeRequest) {
                         const tailSize = 131072; // 末尾 128KB 取得
                         let tailStart = totalFileSize - tailSize;
                         if (tailStart < 65536) tailStart = 65536; // 既取得分と被らないように
@@ -1249,6 +3069,11 @@ async function handleFetchImageMetadata(imageUrl, base64Data = null) {
                         debugLog(`[AI Meta Viewer] ⚠ ComfyUI signature detected. Fetching tail for metadata: bytes=${tailStart}-`);
                         try {
                             const controller = new AbortController();
+                            const abortFromAnalysis = () => controller.abort();
+                            if (analysisSignal) {
+                                if (analysisSignal.aborted) controller.abort();
+                                else analysisSignal.addEventListener('abort', abortFromAnalysis, { once: true });
+                            }
                             const timeoutId = setTimeout(
                                 () => controller.abort(),
                                 RANGE_REQUEST_TIMEOUT_MS
@@ -1263,13 +3088,11 @@ async function handleFetchImageMetadata(imageUrl, base64Data = null) {
                                 if (tailResponse.status === 206 || tailResponse.status === 200) {
                                     const tailBuffer = await tailResponse.arrayBuffer();
 
-                                    // 画像形式に応じて適切な末尾解析器を呼び出す
+                                    // WebPの既存tail経路だけを維持する。
                                     const format = detectImageFormat(buffer);
                                     let tailMetadata = {};
 
-                                    if (format === 'png') {
-                                        tailMetadata = extractPngTailMetadata(tailBuffer);
-                                    } else if (format === 'webp') {
+                                    if (format === 'webp') {
                                         tailMetadata = extractWebpTailMetadata(tailBuffer);
                                     }
 
@@ -1297,6 +3120,9 @@ async function handleFetchImageMetadata(imageUrl, base64Data = null) {
                                 }
                             } finally {
                                 clearTimeout(timeoutId);
+                                if (analysisSignal) {
+                                    analysisSignal.removeEventListener('abort', abortFromAnalysis);
+                                }
                             }
                             isRangeRequest = false; // これ以上のフェッチを防ぐ
                         } catch (tailError) {
@@ -1325,6 +3151,11 @@ async function handleFetchImageMetadata(imageUrl, base64Data = null) {
                             });
 
                             const controller = new AbortController();
+                            const abortFromAnalysis = () => controller.abort();
+                            if (analysisSignal) {
+                                if (analysisSignal.aborted) controller.abort();
+                                else analysisSignal.addEventListener('abort', abortFromAnalysis, { once: true });
+                            }
                             const timeoutId = setTimeout(
                                 () => controller.abort(),
                                 RANGE_REQUEST_TIMEOUT_MS
@@ -1345,16 +3176,32 @@ async function handleFetchImageMetadata(imageUrl, base64Data = null) {
 
                                 if (retryResponse.status === 206) {
                                     const newBuffer = await retryResponse.arrayBuffer();
-                                    const nextMetadata = extractMetadata(newBuffer);
-                                    if (nextMetadata.isIncomplete) {
+                                    const retryRange = parseContentRangeHeader(
+                                        retryResponse.headers?.get?.('Content-Range')
+                                    );
+                                    const retryComplete = retryRange?.total !== null &&
+                                        retryRange?.total !== undefined &&
+                                        retryRange.length === retryRange.total;
+                                    const nextMetadata = extractMetadata(newBuffer, {
+                                        format: detectedFormat,
+                                        inputComplete: retryComplete,
+                                    });
+                                    const retryState = getMetadataState(nextMetadata);
+                                    const budgetReached = isBoundedMetadataFormat(detectedFormat) &&
+                                        newBuffer.byteLength >= getMetadataHeadBudget(detectedFormat);
+                                    if (retryState === 'unresolved' && !budgetReached) {
                                         debugLog('[AI Meta Viewer] ⚠ Still incomplete. Falling back to safe full fetch.');
-                                        const fullBuffer = await safeFetchFull(activeUrl);
+                                        const fullBuffer = await safeFetchFull(activeUrl, getAnalysisContext(imageUrl)?.signal);
                                         buffer = fullBuffer;
                                         totalFileSize = buffer.byteLength; // totalFileSize を更新
-                                        metadata = extractMetadata(fullBuffer);
+                                        totalFileSizeKnown = true;
+                                        metadata = extractMetadata(fullBuffer, {
+                                            format: detectedFormat,
+                                            inputComplete: true,
+                                        });
                                     } else {
-                                        metadata = nextMetadata;
                                         buffer = newBuffer;
+                                        metadata = nextMetadata;
                                     }
                                 } else {
                                     const retryFailure = new Error(`HTTP ${retryResponse.status}`);
@@ -1369,13 +3216,19 @@ async function handleFetchImageMetadata(imageUrl, base64Data = null) {
                                         domain: domain || '(unknown)',
                                         status: retryResponse.status
                                     });
-                                    const fullBuffer = await safeFetchFull(activeUrl);
+                                    const fullBuffer = await safeFetchFull(activeUrl, getAnalysisContext(imageUrl)?.signal);
                                     buffer = fullBuffer;
                                     totalFileSize = buffer.byteLength; // totalFileSize を更新
-                                    metadata = extractMetadata(fullBuffer);
+                                    metadata = extractMetadata(fullBuffer, {
+                                        format: detectedFormat,
+                                        inputComplete: true,
+                                    });
                                 }
                             } finally {
                                 clearTimeout(timeoutId);
+                                if (analysisSignal) {
+                                    analysisSignal.removeEventListener('abort', abortFromAnalysis);
+                                }
                             }
                             isRangeRequest = false;
                         } catch (retryError) {
@@ -1387,10 +3240,13 @@ async function handleFetchImageMetadata(imageUrl, base64Data = null) {
                                 error: retryError
                             });
                             debugLog('[AI Meta Viewer] ⚠ Range retry failed, final attempt with safe full fetch:', retryError.message);
-                            const fullBuffer = await safeFetchFull(activeUrl);
+                            const fullBuffer = await safeFetchFull(activeUrl, getAnalysisContext(imageUrl)?.signal);
                             buffer = fullBuffer;
                             totalFileSize = buffer.byteLength; // totalFileSize を更新
-                            metadata = extractMetadata(fullBuffer);
+                            metadata = extractMetadata(fullBuffer, {
+                                format: detectedFormat,
+                                inputComplete: true,
+                            });
                             isRangeRequest = false;
                         }
                     }
@@ -1399,95 +3255,50 @@ async function handleFetchImageMetadata(imageUrl, base64Data = null) {
         } catch (e) {
             debugLog('[AI Meta Viewer] Parse failed, trying safe full fetch fallback:', e.message);
             if (isRangeRequest) {
-                const fullBuffer = await safeFetchFull(activeUrl);
+                const fullBuffer = await safeFetchFull(activeUrl, getAnalysisContext(imageUrl)?.signal);
                 buffer = fullBuffer;
-                metadata = extractMetadata(buffer);
+                metadata = extractMetadata(buffer, {
+                    format: detectedFormat,
+                    inputComplete: true,
+                });
                 isRangeRequest = false;
             } else {
                 throw e;
             }
         }
 
-        // Stealth PNG Info チェック
-        if (Object.keys(metadata).length === 0) {
-            const format = detectImageFormat(buffer);
-            if (format === 'png') {
-                if (isRangeRequest) {
-                    buffer = await safeFetchFull(activeUrl);
-                }
-                const hasAlpha = checkPngIHDRHasAlpha(buffer);
-                if (hasAlpha) {
-                    const stealthData = await extractStealthPNGInfoAsync(imageUrl, buffer);
-                    if (stealthData) Object.assign(metadata, stealthData);
-                }
-            }
+        const metadataState = getMetadataState(metadata);
+        if (metadataState === 'resource-limit') {
+            const error = new Error('Metadata parsing exceeded the resource limit.');
+            error.name = 'MetadataResourceLimitError';
+            error.diagnostics = [{
+                category: 'resource-limit',
+                phase: 'parser',
+                reason: metadata.parserReason || 'resource-limit',
+            }];
+            throw error;
         }
-
-        await metadataCache.set(imageUrl, metadata);
+        if (metadataState === 'unresolved') {
+            throw new Error('Metadata parsing did not produce a complete representation.');
+        }
+        if (metadataState === 'empty-confirmed' || metadataState === 'unsupported-format') {
+            await metadataCache.set(imageUrl, {}, {
+                parserVersion: PARSER_CACHE_VERSION,
+                parserState: metadataState,
+            });
+        } else if (Object.keys(metadata).length > 0) {
+            await metadataCache.set(imageUrl, metadata, {
+                parserVersion: PARSER_CACHE_VERSION,
+            });
+        }
         return { success: true, metadata: metadata };
 
     } catch (error) {
+        if (isFileScheme) return createFileFailureResult(error);
         debugLog('[AI Meta Viewer] handleFetchImageMetadata error:', error.message);
-        return { success: false, error: error.message };
-    }
-}
-
-/**
- * Stealth PNG Info を非同期で抽出
- */
-async function extractStealthPNGInfoAsync(imageUrl, buffer) {
-    try {
-        const blob = new Blob([buffer], { type: 'image/png' });
-        // createImageBitmap は壊れた（部分的な）PNGデータだと失敗する可能性がある
-        const imageBitmap = await createImageBitmap(blob);
-        const width = imageBitmap.width;
-        const height = imageBitmap.height;
-
-        if (width * height < 250000) {
-            imageBitmap.close();
-            return null;
-        }
-
-        const canvas = new OffscreenCanvas(width, height);
-        const ctx = canvas.getContext('2d');
-        ctx.drawImage(imageBitmap, 0, 0);
-
-        const imageData = ctx.getImageData(0, 0, width, height);
-        const data = imageData.data;
-        imageBitmap.close();
-
-        // Alphaチャンネルのシグネチャチェック
-        const sigLength = 15; // "stealth_pnginfo".length
-        const sigBitsNeeded = sigLength * 8;
-        let alphaSig = "";
-        for (let i = 0; i < sigBitsNeeded; i++) {
-            alphaSig += (data[i * 4 + 3] & 1);
-        }
-
-        const targetSig = "011100110111010001100101011000010110110001110100011010000101111101110000011011100110011101101001011011100110011001101111";
-
-        if (alphaSig === targetSig) {
-            debugLog('[AI Meta Viewer] Alpha signature match! Extracting full data...');
-            const totalPixels = width * height;
-            const alphaBits = new Uint8Array(totalPixels);
-
-            for (let i = 0; i < totalPixels; i++) {
-                alphaBits[i] = data[i * 4 + 3] & 1;
-            }
-
-            const bitStreamAlpha = Array.from(alphaBits).join('');
-            const resultAlpha = processStealthStream(bitStreamAlpha, 'Alpha');
-            if (resultAlpha && resultAlpha.data) {
-                return { 'Stealth PNG Info (Alpha)': resultAlpha.data };
-            }
-        }
-
-        // RGBチェック (省略または必要なら実装、今回はAlphaのみで高速化重視)
-        return null;
-
-    } catch (error) {
-        // console.error('Stealth PNG Info extraction error:', error);
-        return null;
+        const result = { success: false, error: error.message };
+        if (Array.isArray(error.diagnostics)) result.diagnostics = error.diagnostics;
+        return result;
     }
 }
 
@@ -1526,7 +3337,7 @@ chrome.runtime.onSuspend.addListener(async () => {
             [metadataCache.metaKey]: Array.from(metadataCache.index.entries())
         });
     } catch (e) {
-        console.error('[AI Meta Viewer] Failed to save cache index on suspend:', e);
+        debugLog('[AI Meta Viewer] Failed to save cache index on suspend', e);
     }
 });
 

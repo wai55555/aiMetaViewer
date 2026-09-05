@@ -1,5 +1,14 @@
 // adapters.js - Site-specific image URL resolvers
 
+/**
+ * Pixivで解析対象外とするGIF URLを判定する。
+ * @param {string} value - URL文字列
+ * @returns {boolean} - GIFならtrue
+ */
+function isPixivGifUrl(value) {
+    return /\.gif(?:[?#]|$)/i.test(String(value || ''));
+}
+
 // --- サイト別アダプター ---
 window.SiteAdapters = [
     // Discord
@@ -89,10 +98,16 @@ window.SiteAdapters = [
     // Pixiv
     {
         match: () => window.location.hostname.includes('pixiv.net'),
+        isAnalysisExcluded: (img) => {
+            const parentLink = img.closest('a');
+            return isPixivGifUrl(img.src || img.currentSrc) ||
+                isPixivGifUrl(parentLink?.href);
+        },
         resolve: (img) => {
             // 1. 既存の img-original リンクチェック
             const parentLink = img.closest('a');
-            if (parentLink && parentLink.href && parentLink.href.includes('img-original')) {
+            if (parentLink && parentLink.href && parentLink.href.includes('img-original') &&
+                !isPixivGifUrl(parentLink.href)) {
                 return parentLink.href;
             }
 
@@ -105,7 +120,7 @@ window.SiteAdapters = [
                     pathname = pathname.replace(/^\/c\/[^/]+\//, '/');
                     pathname = pathname.replace(/\/(img-master|custom-thumb)\//, '/img-original/');
 
-                    const match = pathname.match(/^(.+\/)(\d+(?:-[a-f0-9]+)?_p\d+).*\.(jpg|png|webp|gif)$/);
+                    const match = pathname.match(/^(.+\/)(\d+(?:-[a-f0-9]+)?_p\d+).*\.(jpg|png|webp)$/);
                     if (match) {
                         const basePath = match[1];
                         const fileBase = match[2];
@@ -135,7 +150,7 @@ window.SiteAdapters = [
                 if (state.illust) {
                     for (const id in state.illust) {
                         const illust = state.illust[id];
-                        if (illust.urls && illust.urls.original) {
+                        if (illust.urls && illust.urls.original && !isPixivGifUrl(illust.urls.original)) {
                             const ext = illust.urls.original.split('.').pop();
                             candidates.push({
                                 type: 'image',
@@ -179,7 +194,7 @@ window.SiteAdapters = [
                 // 検索結果 (Hydration)
                 if (state.search && state.search.illust && state.search.illust.data) {
                     state.search.illust.data.forEach(work => {
-                        if (work.url) {
+                        if (work.url && !isPixivGifUrl(work.url)) {
                             const originalUrl = work.url.replace(/\/c\/[^/]+\//, '/').replace(/\/img-master\//, '/img-original/').replace(/_(square|master)1200/, '');
                             candidates.push({
                                 type: 'image',

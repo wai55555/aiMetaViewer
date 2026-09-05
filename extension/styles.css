@@ -416,3 +416,100 @@
   height: 10px;
   cursor: sw-resize;
 }
+
+/* 再設計モーダルの折りたたみ・NovelAI 子ブロック・Generation Grid */
+.ai-meta-section-header {
+  cursor: pointer;
+  gap: 8px;
+  transition: background-color 0.15s ease;
+}
+
+.ai-meta-section-header:hover {
+  background-color: #38383a;
+}
+
+.ai-meta-chevron {
+  display: inline-block;
+  flex: 0 0 14px;
+  width: 14px;
+  height: 14px;
+  color: #aaa;
+  transition: transform 0.18s ease;
+  transform-origin: center;
+  overflow: visible;
+}
+
+.ai-meta-section.collapsed .ai-meta-chevron {
+  transform: rotate(-90deg);
+}
+
+.ai-meta-section-body {
+  display: block;
+}
+
+.ai-meta-section.collapsed .ai-meta-section-body {
+  display: none;
+}
+
+.ai-meta-section-label {
+  flex: 1;
+}
+
+.ai-meta-section-tally {
+  min-width: 1.4em;
+  padding: 1px 6px;
+  border-radius: 99px;
+  background: #3e3e42;
+  color: #bbb;
+  font-size: 10px;
+  line-height: 1.4;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+
+.ai-meta-char-block {
+  margin: 10px 12px;
+  border-left: 2px solid #4a9eff;
+}
+
+.ai-meta-char-label {
+  padding: 2px 10px 4px;
+  color: #aaa;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.ai-meta-char-block .ai-meta-text-area {
+  margin-left: 8px;
+}
+
+.ai-meta-grid-body {
+  padding: 6px 10px;
+}
+
+.ai-meta-grid-row {
+  display: grid;
+  grid-template-columns: 120px minmax(0, 1fr);
+  gap: 8px;
+  padding: 3px 0;
+  border-bottom: 1px solid #333;
+  line-height: 1.25;
+}
+
+.ai-meta-grid-row:last-child {
+  border-bottom: 0;
+}
+
+.ai-meta-grid-key {
+  color: #999;
+  font-size: 11px;
+  font-weight: 400;
+}
+
+.ai-meta-grid-val {
+  min-width: 0;
+  color: #e0e0e0;
+  font-size: 13px;
+  overflow-wrap: anywhere;
+  user-select: text;
+}

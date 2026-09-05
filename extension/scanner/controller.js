@@ -65,6 +65,15 @@ async function executeScan(settings, isCancelledFn = () => false, onInternalProg
             return { success: false, error: 'Scan cancelled by user', candidates: [] };
         }
 
+        if (batchResult.retryableFailure) {
+            return {
+                success: false,
+                retryable: true,
+                error: 'Scan interrupted because the extension context was disconnected.',
+                candidates: [],
+            };
+        }
+
         // Merge results
         for (const [url, metadata] of batchResult.fetchResults) {
             fetchResults.set(url, metadata);

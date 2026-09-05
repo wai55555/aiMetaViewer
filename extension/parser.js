@@ -6,59 +6,144 @@
 // const TARGET_KEYWORDS = [ ... ];
 
 /**
- * 画像形式を判定
- * @param {ArrayBuffer} buffer - 画像バイナリデータ
- * @returns {string|null} - 'png', 'jpeg', 'webp', 'avif', または null
+ * PNGシグネチャ (89 50 4E 47 0D 0A 1A 0A)
+ * 先頭4 bytesだけの一致でPNGと判定してはならない。
  */
-function detectImageFormat(buffer) {
-  const view = new Uint8Array(buffer);
+const PNG_SIGNATURE = Object.freeze([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]);
 
-  // PNG: 89 50 4E 47 0D 0A 1A 0A
-  if (view[0] === 0x89 && view[1] === 0x50 && view[2] === 0x4E && view[3] === 0x47) {
-    return 'png';
+/** ISOBMFFのFileTypeBoxマーカー 'ftyp' */
+const FTYP_MARKER = Object.freeze([0x66, 0x74, 0x79, 0x70]);
+
+/**
+ * 形式判定に必要な最小prefix長。
+ * これ未満のprefixでは当該形式を確定できず「判定不能」として扱う。
+ * avifは size(4) + 'ftyp'(4) + major_brand(4) = 12 bytes が必要。
+ */
+const FORMAT_MIN_PREFIX_BYTES = Object.freeze({
+  png: 8,
+  jpeg: 3,
+  webp: 12,
+  avif: 12,
+  safetensors: 12,
+});
+
+/** 全形式を否定するために必要な最大prefix長 */
+const MAX_FORMAT_MIN_PREFIX_BYTES = Math.max(...Object.values(FORMAT_MIN_PREFIX_BYTES));
+
+/**
+ * ftyp探索の上限バイト数。
+ * ISOBMFFのFileTypeBoxは先頭box (offset 4) に置かれる。
+ * バッファ全体を線形走査すると入力長に比例したコストが発生するため有界化する。
+ * offset 4限定にせず余裕を持たせるのは、非厳密なファイルの取りこぼしを避けるため。
+ */
+const FTYP_SEARCH_LIMIT_BYTES = 256;
+
+/** Safetensorsのlength prefixのbyte数 */
+const SAFETENSORS_HEADER_LENGTH_BYTES = 8;
+/** Safetensors先頭length prefixを含むmetadata head予算 */
+const SAFETENSORS_METADATA_HEAD_BUDGET_BYTES = 16 * 1024 * 1024;
+/** Safetensors header本体へ割り当てられる最大byte数 */
+const SAFETENSORS_MAX_HEADER_BYTES = SAFETENSORS_METADATA_HEAD_BUDGET_BYTES - SAFETENSORS_HEADER_LENGTH_BYTES;
+
+/** 非PNG parserの内部状態 */
+const PARSER_STATE_RESOLVED = 'resolved';
+const PARSER_STATE_EMPTY_CONFIRMED = 'empty-confirmed';
+const PARSER_STATE_RESOURCE_LIMIT = 'resource-limit';
+const PARSER_STATE_UNRESOLVED = 'unresolved';
+const PARSER_STATE_UNSUPPORTED_FORMAT = 'unsupported-format';
+
+/** 形式別metadata head budget */
+const JPEG_METADATA_HEAD_BUDGET_BYTES = 256 * 1024;
+const AVIF_METADATA_HEAD_BUDGET_BYTES = 256 * 1024;
+
+/** JSON開始文字 '{' */
+const JSON_OBJECT_START_BYTE = 0x7B;
+
+/** PNG／非PNGの二値判定結果 */
+const PNG_PREFIX_PNG = 'png';
+const PNG_PREFIX_NOT_PNG = 'not-png';
+const PNG_PREFIX_UNDETERMINED = 'undetermined';
+
+/**
+ * 先頭バイト列がPNGかどうかだけを三値で判定する。
+ * 取得層が上限適用の可否を決めるための二値判定に使用し、形式確定には使わない。
+ * @param {ArrayBuffer|Uint8Array} buffer - 先頭バイト列
+ * @returns {string} - 'png' | 'not-png' | 'undetermined'
+ */
+function classifyPngPrefix(buffer) {
+  const view = buffer instanceof Uint8Array ? buffer : new Uint8Array(buffer);
+  const available = Math.min(view.length, PNG_SIGNATURE.length);
+
+  for (let i = 0; i < available; i++) {
+    if (view[i] !== PNG_SIGNATURE[i]) return PNG_PREFIX_NOT_PNG;
+  }
+  // ここまで一致。全8 bytesを確認できていなければ確定できない。
+  return view.length >= PNG_SIGNATURE.length ? PNG_PREFIX_PNG : PNG_PREFIX_UNDETERMINED;
+}
+
+/**
+ * 画像形式を判定し、判定不能かどうかも返す。
+ * 「非対応形式」と「prefix不足で未判定」を呼び出し側が区別できるようにする。
+ * @param {ArrayBuffer|Uint8Array} buffer - 画像バイナリデータ
+ * @returns {{format: string|null, undetermined: boolean}}
+ */
+function detectImageFormatDetailed(buffer) {
+  const view = buffer instanceof Uint8Array ? buffer : new Uint8Array(buffer);
+
+  // PNG: 8 bytes完全一致のみを認める
+  const pngPrefix = classifyPngPrefix(view);
+  if (pngPrefix === PNG_PREFIX_PNG) {
+    return { format: 'png', undetermined: false };
   }
 
   // JPEG: FF D8 FF
-  if (view[0] === 0xFF && view[1] === 0xD8 && view[2] === 0xFF) {
-    return 'jpeg';
+  if (view.length >= FORMAT_MIN_PREFIX_BYTES.jpeg &&
+    view[0] === 0xFF && view[1] === 0xD8 && view[2] === 0xFF) {
+    return { format: 'jpeg', undetermined: false };
   }
 
   // WebP: RIFF ... WEBP
-  if (view[0] === 0x52 && view[1] === 0x49 && view[2] === 0x46 && view[3] === 0x46 &&
+  if (view.length >= FORMAT_MIN_PREFIX_BYTES.webp &&
+    view[0] === 0x52 && view[1] === 0x49 && view[2] === 0x46 && view[3] === 0x46 &&
     view[8] === 0x57 && view[9] === 0x45 && view[10] === 0x42 && view[11] === 0x50) {
-    return 'webp';
+    return { format: 'webp', undetermined: false };
   }
 
-  // AVIF: ... ftyp ... avif
-  const ftypIndex = findSequence(view, [0x66, 0x74, 0x79, 0x70]); // 'ftyp'
-  if (ftypIndex !== -1 && ftypIndex + 8 < view.length) {
-    const brand = view.slice(ftypIndex + 4, ftypIndex + 8);
-    const brandStr = String.fromCharCode(...brand);
-    if (brandStr === 'avif' || brandStr === 'avis') {
-      return 'avif';
+  // AVIF: 先頭box内の ftyp と brand を有界探索する
+  if (view.length >= FORMAT_MIN_PREFIX_BYTES.avif) {
+    const window = view.subarray(0, Math.min(view.length, FTYP_SEARCH_LIMIT_BYTES));
+    const ftypIndex = findSequence(window, FTYP_MARKER);
+    if (ftypIndex !== -1 && ftypIndex + 8 <= view.length) {
+      const brand = view.subarray(ftypIndex + 4, ftypIndex + 8);
+      const brandStr = String.fromCharCode(...brand);
+      if (brandStr === 'avif' || brandStr === 'avis') {
+        return { format: 'avif', undetermined: false };
+      }
     }
   }
 
-  // Safetensors: First 8 bytes is a little-endian Uint64 for header size
-  if (view.length >= 8) {
+  // Safetensors: 先頭8 bytesがheaderサイズのLE Uint64で、直後がJSONの '{'
+  if (view.length >= FORMAT_MIN_PREFIX_BYTES.safetensors) {
     const headerSize = getUint64LE(view, 0);
-    // 数字として妥当な範囲か (0より大きく、100MB以下程度)
-    if (headerSize > 0 && headerSize < 100 * 1024 * 1024) {
-      // 最初の8バイトの直後、または数バイトのパディングの後に '{' (JSONの開始) があれば Safetensors
-      // 通常は 8バイト目(index 8)にあるが、念のため 12バイト目まで確認
-      for (let i = 8; i < Math.min(view.length, 12); i++) {
-        if (view[i] === 0x7B) { // '{' character
-          return 'safetensors';
-        }
-      }
-      // バッファが不足（8バイト〜）していても、数値的に妥当なら一旦 Safetensors とみなして再取得を促す
-      if (view.length < 12) {
-        return 'safetensors';
-      }
+    if (Number.isSafeInteger(headerSize) && headerSize > 0 &&
+      view[8] === JSON_OBJECT_START_BYTE) {
+      return { format: 'safetensors', undetermined: false };
     }
   }
 
-  return null;
+  // 未一致。prefixが不足していれば否定も確定できない。
+  const undetermined = pngPrefix === PNG_PREFIX_UNDETERMINED ||
+    view.length < MAX_FORMAT_MIN_PREFIX_BYTES;
+  return { format: null, undetermined };
+}
+
+/**
+ * 画像形式を判定
+ * @param {ArrayBuffer|Uint8Array} buffer - 画像バイナリデータ
+ * @returns {string|null} - 'png', 'jpeg', 'webp', 'avif', 'safetensors', または null
+ */
+function detectImageFormat(buffer) {
+  return detectImageFormatDetailed(buffer).format;
 }
 
 /**
@@ -274,7 +359,69 @@ function extractPngTailMetadata(buffer) {
  * @param {ArrayBuffer} buffer - 画像バイナリデータ
  * @returns {Object} - 抽出されたメタデータ
  */
-function extractJpegMetadata(buffer) {
+function setParserState(metadata, state, details = {}) {
+  Object.defineProperty(metadata, 'parserState', {
+    value: state,
+    enumerable: false,
+    configurable: true,
+  });
+
+  for (const [key, value] of Object.entries(details)) {
+    Object.defineProperty(metadata, key, {
+      value,
+      enumerable: false,
+      configurable: true,
+    });
+  }
+  return metadata;
+}
+
+function scanJpegMarkers(view) {
+  if (view.length < 3 || view[0] !== 0xFF || view[1] !== 0xD8) {
+    return { reachedSos: false, complete: false };
+  }
+
+  let offset = 2;
+  while (offset < view.length) {
+    if (view[offset] !== 0xFF) {
+      offset++;
+      continue;
+    }
+    while (offset < view.length && view[offset] === 0xFF) offset++;
+    if (offset >= view.length) return { reachedSos: false, complete: false };
+
+    const marker = view[offset++];
+    if (marker === 0xDA) return { reachedSos: true, complete: true };
+    if (marker === 0xD8 || marker === 0xD9 || marker === 0x01 ||
+      (marker >= 0xD0 && marker <= 0xD7)) continue;
+
+    if (offset + 2 > view.length) return { reachedSos: false, complete: false };
+    const segmentLength = (view[offset] << 8) | view[offset + 1];
+    if (segmentLength < 2 || offset + segmentLength > view.length) {
+      return { reachedSos: false, complete: false };
+    }
+    offset += segmentLength;
+  }
+  return { reachedSos: false, complete: false };
+}
+
+function extractJpegMetadata(buffer, options = {}) {
+  const metadata = extractJpegMetadataLegacy(buffer);
+  const inputComplete = options.inputComplete !== false;
+  const markerResult = scanJpegMarkers(new Uint8Array(buffer));
+  if (Object.keys(metadata).length > 0) {
+    return setParserState(metadata, PARSER_STATE_RESOLVED);
+  }
+  if (inputComplete || markerResult.reachedSos) {
+    return setParserState(metadata, PARSER_STATE_EMPTY_CONFIRMED);
+  }
+  return setParserState(metadata, PARSER_STATE_UNRESOLVED, {
+    isIncomplete: true,
+    suggestedSize: JPEG_METADATA_HEAD_BUDGET_BYTES - 1,
+  });
+}
+
+function extractJpegMetadataLegacy(buffer) {
   const view = new Uint8Array(buffer);
   const metadata = {};
 
@@ -503,9 +650,64 @@ function extractWebpTailMetadata(buffer) {
  * @param {ArrayBuffer} buffer - 画像バイナリデータ
  * @returns {Object} - 抽出されたメタデータ
  */
-function extractAvifMetadata(buffer) {
-  // AVIFはJPEGと同様のExif処理
-  return extractJpegMetadata(buffer);
+function readUint32BE(view, offset) {
+  return view[offset] * 16777216 + view[offset + 1] * 65536 +
+    view[offset + 2] * 256 + view[offset + 3];
+}
+
+function scanAvifMetaBox(view) {
+  let offset = 0;
+  let foundMeta = false;
+  while (offset + 8 <= view.length) {
+    const boxSize = readUint32BE(view, offset);
+    const boxType = String.fromCharCode(
+      view[offset + 4], view[offset + 5], view[offset + 6], view[offset + 7]
+    );
+    let headerSize = 8;
+    let size = boxSize;
+    if (boxSize === 1) {
+      if (offset + 16 > view.length) return { complete: false, foundMeta };
+      const high = readUint32BE(view, offset + 8);
+      const low = readUint32BE(view, offset + 12);
+      if (high !== 0 || low > Number.MAX_SAFE_INTEGER) {
+        return { complete: false, foundMeta };
+      }
+      size = low;
+      headerSize = 16;
+    } else if (boxSize === 0) {
+      return { complete: true, foundMeta, metaEnd: view.length };
+    }
+    if (size < headerSize || offset + size > view.length) {
+      return { complete: false, foundMeta };
+    }
+    if (boxType === 'meta') {
+      foundMeta = true;
+      return { complete: true, foundMeta, metaStart: offset, metaEnd: offset + size };
+    }
+    offset += size;
+  }
+  return { complete: offset === view.length, foundMeta };
+}
+
+function extractAvifMetadata(buffer, options = {}) {
+  const view = new Uint8Array(buffer);
+  const scan = scanAvifMetaBox(view);
+  const metadata = extractJpegMetadata(buffer, { inputComplete: true });
+  const cleanMetadata = {};
+  for (const key of Object.keys(metadata)) cleanMetadata[key] = metadata[key];
+  if (Object.keys(cleanMetadata).length > 0) {
+    return setParserState(cleanMetadata, PARSER_STATE_RESOLVED);
+  }
+  if (scan.foundMeta && scan.complete) {
+    return setParserState(cleanMetadata, PARSER_STATE_EMPTY_CONFIRMED);
+  }
+  if (options.inputComplete === true && scan.complete) {
+    return setParserState(cleanMetadata, PARSER_STATE_EMPTY_CONFIRMED);
+  }
+  return setParserState(cleanMetadata, PARSER_STATE_UNRESOLVED, {
+    isIncomplete: true,
+    suggestedSize: AVIF_METADATA_HEAD_BUDGET_BYTES - 1,
+  });
 }
 
 /**
@@ -513,17 +715,75 @@ function extractAvifMetadata(buffer) {
  * @param {ArrayBuffer} buffer - データ
  * @returns {Object} - 抽出されたメタデータ
  */
-function extractSafetensorsMetadata(buffer) {
+function extractSafetensorsMetadata(buffer, options = {}) {
+  const view = new Uint8Array(buffer);
+  const inputComplete = options.inputComplete === true;
+  if (view.length < SAFETENSORS_HEADER_LENGTH_BYTES) {
+    if (inputComplete) {
+      return setParserState({}, PARSER_STATE_EMPTY_CONFIRMED, {
+        parserReason: 'truncated',
+      });
+    }
+    return setParserState({}, PARSER_STATE_UNRESOLVED, {
+      isIncomplete: true,
+      // suggestedSizeはRangeのinclusive endとして返す。
+      suggestedSize: SAFETENSORS_HEADER_LENGTH_BYTES - 1,
+    });
+  }
+
+  const headerSize = getUint64LE(view, 0);
+  if (!Number.isSafeInteger(headerSize) || headerSize > SAFETENSORS_MAX_HEADER_BYTES) {
+    if (inputComplete) {
+      return setParserState({}, PARSER_STATE_RESOURCE_LIMIT, {
+        parserReason: 'resource-limit',
+      });
+    }
+    return setParserState({}, PARSER_STATE_UNRESOLVED, {
+      isIncomplete: true,
+      parserReason: 'resource-limit',
+      suggestedSize: SAFETENSORS_METADATA_HEAD_BUDGET_BYTES - 1,
+    });
+  }
+  if (headerSize > view.length - SAFETENSORS_HEADER_LENGTH_BYTES) {
+    if (inputComplete) {
+      return setParserState({}, PARSER_STATE_EMPTY_CONFIRMED, {
+        parserReason: 'truncated',
+      });
+    }
+    return setParserState({}, PARSER_STATE_UNRESOLVED, {
+      isIncomplete: true,
+      // length prefixとheader本体を合わせた必要byte数をinclusive endへ変換する。
+      suggestedSize: Math.min(
+        SAFETENSORS_METADATA_HEAD_BUDGET_BYTES - 1,
+        headerSize + SAFETENSORS_HEADER_LENGTH_BYTES - 1,
+      ),
+    });
+  }
+
+  const metadata = extractSafetensorsMetadataLegacy(buffer);
+  const cleanMetadata = {};
+  for (const key of Object.keys(metadata)) {
+    if (key !== 'isIncomplete' && key !== 'suggestedSize') cleanMetadata[key] = metadata[key];
+  }
+  return setParserState(
+    cleanMetadata,
+    Object.keys(cleanMetadata).length > 0
+      ? PARSER_STATE_RESOLVED
+      : PARSER_STATE_EMPTY_CONFIRMED,
+  );
+}
+
+function extractSafetensorsMetadataLegacy(buffer) {
   const view = new Uint8Array(buffer);
 
-  if (view.length < 8) {
+  if (view.length < SAFETENSORS_HEADER_LENGTH_BYTES) {
     return { isIncomplete: true, suggestedSize: 65536 };
   }
 
   const headerSize = getUint64LE(view, 0);
 
   // ヘッダーサイズが現在のバッファを超えている場合
-  if (headerSize > view.length - 8) {
+  if (headerSize > view.length - SAFETENSORS_HEADER_LENGTH_BYTES) {
     // 巨大すぎるヘッダー（100MB超）は異常とみなす
     if (headerSize > 100 * 1024 * 1024) return {};
 
@@ -724,10 +984,11 @@ function parseXmpMetadata(xmpText) {
  * @param {ArrayBuffer} buffer - 画像バイナリデータ
  * @returns {Object} - 抽出されたメタデータ
  */
-function extractMetadata(buffer) {
-  const format = detectImageFormat(buffer);
+function extractMetadata(buffer, options = {}) {
+  const detectedFormat = options.format || detectImageFormat(buffer);
+  const inputComplete = options.inputComplete !== false;
 
-  if (!format) {
+  if (!detectedFormat) {
     // 診断ログ: 最初の16バイトをヘキサ表示
     const view = new Uint8Array(buffer.slice(0, 16));
     const hex = Array.from(view).map(b => b.toString(16).padStart(2, '0')).join(' ');
@@ -736,28 +997,28 @@ function extractMetadata(buffer) {
     } else {
       console.log(`[AI Meta Viewer] extractMetadata: format not detected. Buffer size: ${buffer.byteLength}, header hex: ${hex}`);
     }
-    return {};
+    return setParserState({}, PARSER_STATE_UNSUPPORTED_FORMAT);
   }
 
   if (typeof debugLog === 'function') {
-    debugLog(`[AI Meta Viewer] extractMetadata: format detected: ${format}, buffer size: ${buffer.byteLength}`);
+    debugLog(`[AI Meta Viewer] extractMetadata: format detected: ${detectedFormat}, buffer size: ${buffer.byteLength}`);
   } else {
-    console.log(`[AI Meta Viewer] extractMetadata: format detected: ${format}, buffer size: ${buffer.byteLength}`);
+    console.log(`[AI Meta Viewer] extractMetadata: format detected: ${detectedFormat}, buffer size: ${buffer.byteLength}`);
   }
 
-  switch (format) {
+  switch (detectedFormat) {
     case 'png':
       return extractPngMetadata(buffer);
     case 'jpeg':
-      return extractJpegMetadata(buffer);
+      return extractJpegMetadata(buffer, { inputComplete });
     case 'webp':
       return extractWebpMetadata(buffer);
     case 'avif':
-      return extractAvifMetadata(buffer);
+      return extractAvifMetadata(buffer, { inputComplete });
     case 'safetensors':
-      return extractSafetensorsMetadata(buffer);
+      return extractSafetensorsMetadata(buffer, { inputComplete });
     default:
-      return {};
+      return setParserState({}, PARSER_STATE_UNSUPPORTED_FORMAT);
   }
 }
 
@@ -978,26 +1239,45 @@ function createPngTextChunk(keyword, text) {
   return bytes;
 }
 
-// CRC32 implementation
-function computeCrc32(data) {
-  let crc = 0xFFFFFFFF;
+// CRC32逐次処理API
+function getCrc32Table() {
   const globalObj = typeof self !== 'undefined' ? self : window;
-  const table = globalObj._crcTable || (globalObj._crcTable = (() => {
-    const t = new Uint32Array(256);
-    for (let i = 0; i < 256; i++) {
-      let c = i;
-      for (let j = 0; j < 8; j++) {
-        c = ((c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1));
+  return globalObj._crcTable || (globalObj._crcTable = (() => {
+    const table = new Uint32Array(256);
+    for (let i = 0; i < table.length; i++) {
+      let value = i;
+      for (let bit = 0; bit < 8; bit++) {
+        value = (value & 1) ? (0xEDB88320 ^ (value >>> 1)) : (value >>> 1);
       }
-      t[i] = c;
+      table[i] = value;
     }
-    return t;
+    return table;
   })());
+}
 
+function createCrc32State() {
+  return 0xFFFFFFFF;
+}
+
+function updateCrc32(state, data) {
+  if (!data || typeof data.length !== 'number') {
+    throw new TypeError('CRC32 update data must be an array-like byte sequence.');
+  }
+
+  const table = getCrc32Table();
+  let crc = state >>> 0;
   for (let i = 0; i < data.length; i++) {
     crc = table[(crc ^ data[i]) & 0xFF] ^ (crc >>> 8);
   }
-  return (crc ^ 0xFFFFFFFF) >>> 0;
+  return crc >>> 0;
+}
+
+function finalizeCrc32(state) {
+  return ((state >>> 0) ^ 0xFFFFFFFF) >>> 0;
+}
+
+function computeCrc32(data) {
+  return finalizeCrc32(updateCrc32(createCrc32State(), data));
 }
 
 /**

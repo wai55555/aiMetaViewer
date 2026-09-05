@@ -69,7 +69,11 @@ async function handleScanRequest(request, sendResponse) {
             sendResponse({ success: true, count: result.candidates.length });
         } else {
             showNotification(result.error || 'No media found');
-            sendResponse({ success: false, error: result.error });
+            sendResponse({
+                success: false,
+                error: result.error,
+                ...(result.retryable === true ? { retryable: true } : {}),
+            });
         }
     } catch (error) {
         console.error('[AI Meta Viewer] Scan error:', error);

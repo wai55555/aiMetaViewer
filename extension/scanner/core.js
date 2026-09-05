@@ -182,11 +182,13 @@ async function fetchMetadataBatch(urlsToFetch, urlToImagesMap, onProgress, isCan
     let processedCount = 0;
     let foundCount = 0;
     let uniqueFetchCount = 0;
+    let transientMessageFailure = false;
+    const verifiedNotFoundUrls = new Set();
 
     const queue = [...urlsToFetch];
 
     async function worker() {
-        while (queue.length > 0 && !isCancelled()) {
+        while (queue.length > 0 && !isCancelled() && !transientMessageFailure) {
             const url = queue.shift();
             uniqueFetchCount++;
 
@@ -196,16 +198,32 @@ async function fetchMetadataBatch(urlsToFetch, urlToImagesMap, onProgress, isCan
                     imageUrl: url
                 });
 
-                if (response && response.success && response.metadata && Object.keys(response.metadata).length > 0) {
+                const hasMetadata = response && response.success === true &&
+                    response.metadata && Object.keys(response.metadata).length > 0;
+                const verifiedNotFound = response && response.success === true &&
+                    response.metadata && Object.keys(response.metadata).length === 0;
+
+                if (hasMetadata) {
                     localMetadataCache.set(url, response.metadata);
                     fetchResults.set(url, response.metadata);
+                } else if (verifiedNotFound) {
+                    verifiedNotFoundUrls.add(url);
+                    fetchResults.set(url, null);
                 } else {
-                    noMetadataCache.add(url);
+                    // 取得・解析失敗はsession negative cacheへ保存しない。
                     fetchResults.set(url, null);
                 }
             } catch (e) {
-                console.error('[AI Meta Viewer] Error fetching URL:', url, e);
-                noMetadataCache.add(url);
+                const isTransientMessageFailure = typeof isTransientExtensionContextError === 'function' &&
+                    isTransientExtensionContextError(e);
+                if (isTransientMessageFailure) {
+                    transientMessageFailure = true;
+                    // 切断中のURLをemptyへ変換せず、未処理URLとともに上位へ再試行可能性を伝える。
+                    return;
+                } else if (typeof debugLog === 'function') {
+                    debugLog({ category: 'message', phase: 'scanner', errorType: 'unknown', retryable: true });
+                }
+                // 取得・解析例外は再試行可能性を残すためnegative cacheへ入れない。
                 fetchResults.set(url, null);
             }
 
@@ -228,7 +246,19 @@ async function fetchMetadataBatch(urlsToFetch, urlToImagesMap, onProgress, isCan
 
     await Promise.all(workers);
 
-    return { fetchResults, processedCount, foundCount, uniqueFetchCount };
+    if (!transientMessageFailure) {
+        for (const url of verifiedNotFoundUrls) {
+            noMetadataCache.add(url);
+        }
+    }
+
+    return {
+        fetchResults,
+        processedCount,
+        foundCount,
+        uniqueFetchCount,
+        retryableFailure: transientMessageFailure,
+    };
 }
 
 /**
