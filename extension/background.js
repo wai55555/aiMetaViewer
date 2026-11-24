@@ -1578,7 +1578,7 @@ const DEFAULT_SETTINGS = {
     downloaderFolderMode: 'id_pageTitle', // 'id_pageTitle', 'pageTitle', 'domain', 'none'
     downloaderBaseFolder: 'AI_Meta_Viewer',
     downloaderUseRoot: false,
-    version: '1.6.0',
+    version: chrome.runtime.getManifest().version,
     // 共有設定の追加
     modalWidth: 800,
     modalHeight: 600,
