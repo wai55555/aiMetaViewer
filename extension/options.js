@@ -30,7 +30,7 @@ const DEFAULT_SETTINGS = {
     sectionDefaultOpenRawComment: false,
     sectionDefaultOpenWorkflow: false,
     sectionDefaultOpenOther: false,
-    version: '1.6.0'
+    version: chrome.runtime.getManifest().version
 };
 
 // DOM Elements

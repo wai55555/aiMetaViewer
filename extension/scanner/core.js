@@ -29,8 +29,17 @@ const localMetadataCache = new Map();
 function collectAndFilterImages(settings) {
     const allImages = Array.from(document.querySelectorAll('img'));
     let filteredCount = 0;
+    let adapterExcludedCount = 0;
+    const matchingAdapter = typeof SiteAdapters !== 'undefined' && Array.isArray(SiteAdapters)
+        ? SiteAdapters.find(adapter => typeof adapter.match === 'function' && adapter.match())
+        : null;
 
     const images = allImages.filter(img => {
+        if (matchingAdapter?.isAnalysisExcluded?.(img)) {
+            adapterExcludedCount++;
+            return false;
+        }
+
         // アダプターで解決を試みる
         const resolved = typeof resolveOriginalUrls === 'function' ? resolveOriginalUrls(img) : null;
         const resolvedUrls = Array.isArray(resolved) ? resolved : (resolved ? [resolved] : []);
@@ -65,7 +74,7 @@ function collectAndFilterImages(settings) {
         return true;
     });
 
-    debugLog(`[AI Meta Viewer] Found ${allImages.length} images, ${images.length} kept, ${filteredCount} filtered out by size settings.`);
+    debugLog(`[AI Meta Viewer] Found ${allImages.length} images, ${images.length} kept, ${filteredCount} filtered out by size settings, ${adapterExcludedCount} excluded by site adapter.`);
 
     return images;
 }
