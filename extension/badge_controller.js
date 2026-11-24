@@ -421,7 +421,7 @@ function addBadgeToImage(img, metadata, originalUrl) {
 
     const imgRect = img.getBoundingClientRect();
     debugLog('[AI Meta Viewer] Badge created for image:', {
-        src: img.src.substring(0, 80),
+        src: (img.currentSrc || img.src).substring(0, 80),
         naturalWidth: img.naturalWidth,
         naturalHeight: img.naturalHeight,
         displayWidth: img.width,

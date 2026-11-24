@@ -498,7 +498,8 @@ function clearActiveAnalysis(img) {
  */
 async function checkImageMetadata(img, requestOptions = {}) {
     const fetchAction = requestOptions.action || 'fetchImageMetadata';
-    debugLog('[AI Meta Viewer] checkImageMetadata() called for:', img.src);
+    const getImageSource = () => img.currentSrc || img.src;
+    debugLog('[AI Meta Viewer] checkImageMetadata() called for:', getImageSource());
 
     // 拡張機能のコンテキストが無効化されている場合は処理を停止
     if (!isExtensionContextValid()) {
@@ -513,13 +514,13 @@ async function checkImageMetadata(img, requestOptions = {}) {
     // 重複チェック
     if (processedImages.has(img)) {
         logImageDiagnostic('check-skipped', img, { reason: 'processed-marker', processed: true });
-        debugLog(`[AI Meta Viewer] Image already processed, skipping: ${img.src.substring(0, 60)}...`);
+        debugLog(`[AI Meta Viewer] Image already processed, skipping: ${getImageSource().substring(0, 60)}...`);
         return;
     }
 
-    debugLog(`[AI Meta Viewer] checkImageMetadata called for: ${img.src.substring(0, 60)}...`);
+    debugLog(`[AI Meta Viewer] checkImageMetadata called for: ${getImageSource().substring(0, 60)}...`);
 
-    const src = img.src;
+    const src = getImageSource();
     if (!src) {
         logImageDiagnostic('analysis-skip', img, { reason: 'no-src' });
         debugLog('[AI Meta Viewer] No src, skipping');
@@ -527,11 +528,9 @@ async function checkImageMetadata(img, requestOptions = {}) {
     }
     const srcAttributeAtStart = img.getAttribute('src');
     const srcsetAttributeAtStart = img.getAttribute('srcset');
-    const currentSrcAtStart = img.currentSrc || src;
-    const hasSourceChanged = () => img.src !== src ||
+    const hasSourceChanged = () => getImageSource() !== src ||
         img.getAttribute('src') !== srcAttributeAtStart ||
-        img.getAttribute('srcset') !== srcsetAttributeAtStart ||
-        (img.currentSrc || img.src) !== currentSrcAtStart;
+        img.getAttribute('srcset') !== srcsetAttributeAtStart;
 
     // ターゲットURLの解決
     let targetUrl = src;
@@ -542,7 +541,7 @@ async function checkImageMetadata(img, requestOptions = {}) {
         if (adapter.match()) {
             if (adapter.isAnalysisExcluded?.(img)) {
                 logImageDiagnostic('analysis-skip', img, { reason: 'site-excluded' });
-                debugLog('[AI Meta Viewer] Image is excluded by site adapter:', img.src.substring(0, 80));
+                debugLog('[AI Meta Viewer] Image is excluded by site adapter:', src.substring(0, 80));
                 return;
             }
             const resolvedUrl = adapter.resolve(img);
@@ -550,7 +549,7 @@ async function checkImageMetadata(img, requestOptions = {}) {
                 targetUrl = resolvedUrl;
                 isLinkedImage = true;
                 debugLog('[AI Meta Viewer] Adapter resolved URL:', {
-                    originalSrc: img.src.substring(0, 80),
+                    originalSrc: src.substring(0, 80),
                     resolvedUrl: Array.isArray(resolvedUrl) ? resolvedUrl.map(u => u.substring(0, 80)) : resolvedUrl.substring(0, 80)
                 });
                 break; // 最初に見つかったものを採用
@@ -559,7 +558,7 @@ async function checkImageMetadata(img, requestOptions = {}) {
     }
 
     if (!isLinkedImage) {
-        debugLog('[AI Meta Viewer] No adapter resolved URL for:', img.src.substring(0, 80));
+        debugLog('[AI Meta Viewer] No adapter resolved URL for:', src.substring(0, 80));
     }
 
     // サイズチェック
@@ -605,7 +604,7 @@ async function checkImageMetadata(img, requestOptions = {}) {
     if (isTooSmall) {
         logImageDiagnostic('analysis-skip', img, { reason: 'too-small' });
         debugLog('[AI Meta Viewer] Image too small, skipping:', {
-            src: img.src.substring(0, 80),
+            src: src.substring(0, 80),
             actualWidth,
             actualHeight,
             pixelCount,
@@ -862,11 +861,11 @@ async function checkImageMetadata(img, requestOptions = {}) {
             }
 
             // バッジを追加
-            addBadgeToImage(img, metadata, successUrl || img.src);
+            addBadgeToImage(img, metadata, successUrl || src);
         } else {
             // confirmed-emptyだけを通常のメタデータなし経路へ渡す。
             debugLog('[AI Meta Viewer] No metadata found, removing badge if exists:', {
-                src: img.src.substring(0, 80),
+                src: src.substring(0, 80),
                 targetUrl: Array.isArray(targetUrl) ? targetUrl.map(u => u.substring(0, 80)) : targetUrl.substring(0, 80),
                 urlsToTry: urlsToTry.length
             });
@@ -1483,7 +1482,7 @@ const viewportAnalysisQueue = {
                 processed: processedImages.has(img),
                 running: false,
             });
-            debugLog('[AI Meta Viewer] Analysis cancelled before start:', (img.src || '').substring(0, 80));
+            debugLog('[AI Meta Viewer] Analysis cancelled before start:', (img.currentSrc || img.src || '').substring(0, 80));
             return;
         }
         if (!this.running.has(img)) return;
@@ -1802,7 +1801,7 @@ function handleDirectImageView() {
         return;
     }
 
-    debugLog('[AI Meta Viewer] Found img element:', img.src);
+    debugLog('[AI Meta Viewer] Found img element:', img.currentSrc || img.src);
 
     // スタイル調整
     document.body.style.backgroundColor = '#0e0e0e';
