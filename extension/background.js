@@ -2741,6 +2741,9 @@ async function handleFetchImageMetadata(imageUrl) {
             let format = null;
             let declaredFormatSize = null;
             let handedOverToScanner = false;
+            // WebPでMETADATA_WEBP_HEAD_BUDGET_BYTES到達後、repartitionHead/parseHeadの
+            // 再実行を1回に限定するための完了フラグ。tail蓄積(appendTail)は対象外。
+            let webpHeadFinalized = false;
             let readerCancellationPromise = null;
             const prefixChunks = [];
             let readerReleased = false;
@@ -2930,7 +2933,7 @@ async function handleFetchImageMetadata(imageUrl) {
                     if (format === 'webp') {
                         const overflow = appendHead(chunk, storageLimit);
                         appendTail(overflow);
-                        repartitionHead();
+                        if (!webpHeadFinalized) repartitionHead();
                     } else {
                         const overflow = appendHead(chunk, storageLimit);
                         if (overflow.byteLength > 0) {
@@ -2956,16 +2959,19 @@ async function handleFetchImageMetadata(imageUrl) {
                             };
                         }
                     } else if (format === 'webp' && headLength >= METADATA_WEBP_HEAD_BUDGET_BYTES) {
-                        const partial = parseHead(false);
-                        if (getMetadataState(partial) === 'resolved') {
-                            await cancelReader();
-                            return {
-                                kind: 'buffer',
-                                buffer: materialize(headChunks, headLength).buffer,
-                                inputComplete: false,
-                                totalFileSize: hasDeclaredLength ? declaredLength : totalLength,
-                                totalFileSizeKnown: hasDeclaredLength,
-                            };
+                        if (!webpHeadFinalized) {
+                            webpHeadFinalized = true;
+                            const partial = parseHead(false);
+                            if (getMetadataState(partial) === 'resolved') {
+                                await cancelReader();
+                                return {
+                                    kind: 'buffer',
+                                    buffer: materialize(headChunks, headLength).buffer,
+                                    inputComplete: false,
+                                    totalFileSize: hasDeclaredLength ? declaredLength : totalLength,
+                                    totalFileSizeKnown: hasDeclaredLength,
+                                };
+                            }
                         }
                     }
                     if (!format && headLength >= METADATA_SAFETENSORS_HEAD_BUDGET_BYTES) {

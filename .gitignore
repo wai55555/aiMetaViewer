@@ -72,3 +72,4 @@ build*.js
 package_firefox.js
 generate_manifest.js
 syntax_check.*
+.aider*
