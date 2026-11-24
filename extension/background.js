@@ -1452,6 +1452,21 @@ const MAX_WEBP_TAIL_DECLARED_SIZE = 256 * 1024 * 1024;
 const METADATA_SAFETENSORS_HEAD_BUDGET_BYTES = 16 * 1024 * 1024;
 
 /**
+ * Content-Length がない応答を長さ0として扱わない。
+ * Headers#get は未設定時に null を返すため、Number(null) の0化を避ける。
+ * @param {Headers|Object|null} headers - response headers
+ * @returns {number|null} 有効な宣言長。欠落または不正なら null
+ */
+function getDeclaredContentLength(headers) {
+    const headerValue = headers?.get?.('content-length');
+    if (headerValue === null || headerValue === undefined || String(headerValue).trim() === '') {
+        return null;
+    }
+    const contentLength = Number(headerValue);
+    return Number.isSafeInteger(contentLength) && contentLength >= 0 ? contentLength : null;
+}
+
+/**
  * parserの内部状態をbackground側の互換入力から解決する。
  * @param {Object} metadata - parser結果
  * @returns {string} - resolved / empty-confirmed / resource-limit / unresolved / unsupported-format
@@ -2445,8 +2460,8 @@ async function handleFetchImageMetadata(imageUrl) {
             allowBodylessFileFallback = false,
             signal = null,
         } = {}) => {
-            const declaredLength = Number(response.headers?.get?.('content-length'));
-            const charge = Number.isSafeInteger(declaredLength) && declaredLength > 0
+            const declaredLength = getDeclaredContentLength(response.headers);
+            const charge = declaredLength !== null && declaredLength > 0
                 ? declaredLength
                 : PNG_FULL_STREAM_UNKNOWN_SIZE_CHARGE_BYTES;
             const formatPrefixLimit = 12;
@@ -2457,7 +2472,7 @@ async function handleFetchImageMetadata(imageUrl) {
                 const bodylessLimit = allowBodylessFileFallback
                     ? FILE_BODYLESS_FALLBACK_LIMIT
                     : bodylessPng ? BODYLESS_PNG_FALLBACK_LIMIT : FULL_FETCH_SIZE_LIMIT;
-                const hasDeclaredLength = Number.isSafeInteger(declaredLength) && declaredLength >= 0;
+                const hasDeclaredLength = declaredLength !== null;
                 if (!hasDeclaredLength || declaredLength > bodylessLimit) {
                     throw createMetadataSizeLimitError(
                         hasDeclaredLength ? declaredLength : bodylessLimit + 1,
@@ -2753,8 +2768,8 @@ async function handleFetchImageMetadata(imageUrl) {
             imageUrl: localImageUrl,
             signal = null,
         } = {}) => {
-            const declaredLength = Number(response.headers?.get?.('content-length'));
-            const hasDeclaredLength = Number.isSafeInteger(declaredLength) && declaredLength >= 0;
+            const declaredLength = getDeclaredContentLength(response.headers);
+            const hasDeclaredLength = declaredLength !== null;
             const contentType = String(response.headers?.get?.('content-type') || '').toLowerCase();
             const urlLower = String(localImageUrl || '').toLowerCase();
             const formatHint = contentType.includes('png') || urlLower.endsWith('.png')

@@ -9,6 +9,87 @@ function isPixivGifUrl(value) {
     return /\.gif(?:[?#]|$)/i.test(String(value || ''));
 }
 
+const pixivAdImageUrlCache = new WeakMap();
+
+function normalizePixivImageUrl(value, baseUrl) {
+    if (!value) return null;
+    try {
+        const url = new URL(value, baseUrl);
+        url.search = '';
+        url.hash = '';
+        url.pathname = url.pathname.replace(/^\/c\/[^/]+\//, '/');
+        return `${url.origin}${url.pathname}`;
+    } catch (e) {
+        return null;
+    }
+}
+
+/**
+ * Pixivの検索データに含まれる広告枠の画像URLを取得する。
+ * @param {Document} document - PixivページのDocument
+ * @returns {Set<string>} 正規化済みの広告画像URL
+ */
+function getPixivAdImageUrls(document) {
+    const nextData = document?.getElementById('__NEXT_DATA__');
+    if (!nextData) return new Set();
+
+    const serializedData = nextData.textContent;
+    const cached = pixivAdImageUrlCache.get(nextData);
+    if (cached?.serializedData === serializedData) return cached.urls;
+
+    const urls = new Set();
+    try {
+        const data = JSON.parse(serializedData);
+        const preloadedStateStr = data.props?.pageProps?.serverSerializedPreloadedState;
+        if (preloadedStateStr) {
+            const state = JSON.parse(preloadedStateStr);
+            const searchResults = state.search?.illust?.data;
+            if (Array.isArray(searchResults)) {
+                for (const work of searchResults) {
+                    if (work?.isAdContainer !== true) continue;
+                    const imageUrls = [work.url, work.thumbnailUrl, ...Object.values(work.urls || {})];
+                    for (const imageUrl of imageUrls) {
+                        const normalizedUrl = normalizePixivImageUrl(imageUrl, document.location?.href);
+                        if (normalizedUrl) urls.add(normalizedUrl);
+                    }
+                }
+            }
+        }
+    } catch (e) {
+        // ページのデータ形式が変わった場合も、他の広告判定は続ける。
+    }
+
+    pixivAdImageUrlCache.set(nextData, { serializedData, urls });
+    return urls;
+}
+
+function isPixivAdUrl(value) {
+    if (!value) return false;
+    try {
+        const url = new URL(value, window.location.href);
+        return url.hostname === 'ads-pixiv.net' || url.hostname.endsWith('.ads-pixiv.net') ||
+            /^\/ads(?:\/|$)/i.test(url.pathname);
+    } catch (e) {
+        return false;
+    }
+}
+
+function isPixivAdImage(img) {
+    const parentLink = img.closest('a');
+    const imageUrls = [img.currentSrc, img.src];
+    if (imageUrls.some(isPixivAdUrl) || isPixivAdUrl(parentLink?.href)) return true;
+
+    if (img.closest('[data-ad-container], [data-ad-slot], [data-gtm-recommend-ad], .ad-container, .pixiv-ad, .advertisement')) {
+        return true;
+    }
+
+    const adImageUrls = getPixivAdImageUrls(img.ownerDocument || document);
+    return imageUrls.some(url => {
+        const normalizedUrl = normalizePixivImageUrl(url, window.location.href);
+        return normalizedUrl && adImageUrls.has(normalizedUrl);
+    });
+}
+
 // --- サイト別アダプター ---
 window.SiteAdapters = [
     // Discord
@@ -101,7 +182,8 @@ window.SiteAdapters = [
         isAnalysisExcluded: (img) => {
             const parentLink = img.closest('a');
             return isPixivGifUrl(img.currentSrc || img.src) ||
-                isPixivGifUrl(parentLink?.href);
+                isPixivGifUrl(parentLink?.href) ||
+                isPixivAdImage(img);
         },
         resolve: (img) => {
             // 1. 既存の img-original リンクチェック
@@ -150,7 +232,7 @@ window.SiteAdapters = [
                 if (state.illust) {
                     for (const id in state.illust) {
                         const illust = state.illust[id];
-                        if (illust.urls && illust.urls.original && !isPixivGifUrl(illust.urls.original)) {
+                        if (illust.isAdContainer !== true && illust.urls && illust.urls.original && !isPixivGifUrl(illust.urls.original)) {
                             const ext = illust.urls.original.split('.').pop();
                             candidates.push({
                                 type: 'image',
@@ -192,9 +274,9 @@ window.SiteAdapters = [
                 }
 
                 // 検索結果 (Hydration)
-                if (state.search && state.search.illust && state.search.illust.data) {
+                if (Array.isArray(state.search?.illust?.data)) {
                     state.search.illust.data.forEach(work => {
-                        if (work.url && !isPixivGifUrl(work.url)) {
+                        if (work.isAdContainer !== true && work.url && !isPixivGifUrl(work.url)) {
                             const originalUrl = work.url.replace(/\/c\/[^/]+\//, '/').replace(/\/img-master\//, '/img-original/').replace(/_(square|master)1200/, '');
                             candidates.push({
                                 type: 'image',
