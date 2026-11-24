@@ -1462,7 +1462,11 @@ function getDeclaredContentLength(headers) {
     if (headerValue === null || headerValue === undefined || String(headerValue).trim() === '') {
         return null;
     }
-    const contentLength = Number(headerValue);
+    const normalizedHeaderValue = String(headerValue).trim();
+    if (!/^\d+$/.test(normalizedHeaderValue)) {
+        return null;
+    }
+    const contentLength = Number(normalizedHeaderValue);
     return Number.isSafeInteger(contentLength) && contentLength >= 0 ? contentLength : null;
 }
 
