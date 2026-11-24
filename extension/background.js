@@ -22,10 +22,30 @@ const SAFE_SCANNER_STATUSES = Object.freeze([
     'partial', 'unresolved', 'unsupported-format', 'resource-limit',
     'scanner-failure', 'cancelled', 'unknown',
 ]);
+const SAFE_DEBUG_EVENTS = Object.freeze([
+    'request-start', 'cache-lookup', 'parse-result', 'request-failure',
+    'check-skipped', 'analysis-skip', 'analysis-start', 'cache-hit', 'cache-miss', 'response',
+    'analysis-complete', 'badge-show', 'cancel', 'queue-skip', 'queue-enqueue',
+    'queue-cancel-pending', 'queue-finish', 'dom-remove', 'src-mutation',
+]);
+const SAFE_CACHE_STATES = Object.freeze([
+    'miss', 'hit-positive', 'hit-empty', 'hit-legacy-empty', 'legacy-empty-reparse',
+]);
+const SAFE_ANALYSIS_OUTCOMES = Object.freeze([
+    'resolved', 'confirmed-empty', 'unresolved', 'resource-limit', 'failure', 'cancelled',
+]);
+const SAFE_DEBUG_REASONS = Object.freeze([
+    'processed-marker', 'viewport-exit', 'dom-removed', 'src-change',
+    'request-active', 'request-inactive', 'already-running', 'already-pending', 'queue-overflow',
+    'context-invalid', 'no-src', 'site-excluded', 'too-small',
+]);
 
 let initializationState = INITIALIZATION_STATES.PENDING;
 let fatalInitializationSignalEmitted = false;
 let settings = { debugMode: false };
+let settingsLoaded = false;
+const pendingContentDiagnosticLogs = [];
+const MAX_PENDING_CONTENT_DIAGNOSTIC_LOGS = 256;
 
 function getSafeEnum(value, allowedValues) {
     return allowedValues.includes(value) ? value : 'unknown';
@@ -74,6 +94,18 @@ function getSafeScheme(value) {
     }
 }
 
+function getSafeUrlId(url) {
+    if (typeof url !== 'string' || url.length === 0) return undefined;
+    let hashA = 2166136261;
+    let hashB = 0x9e3779b9;
+    for (let i = 0; i < url.length; i += 1) {
+        const code = url.charCodeAt(i);
+        hashA = Math.imul(hashA ^ code, 16777619);
+        hashB = Math.imul(hashB ^ code, 2246822519);
+    }
+    return `${(hashA >>> 0).toString(16).padStart(8, '0')}${(hashB >>> 0).toString(16).padStart(8, '0')}`;
+}
+
 function applySafeDiagnosticObject(diagnostic, value) {
     if (value === null || typeof value !== 'object') return;
 
@@ -81,7 +113,12 @@ function applySafeDiagnosticObject(diagnostic, value) {
         if (value instanceof Error || typeof value.name === 'string') {
             diagnostic.errorType = inferSafeErrorType(value.name);
         }
-        const safeKeys = ['category', 'phase', 'status', 'bodyPresent', 'scannerStatus', 'retryable'];
+        const safeKeys = [
+            'category', 'phase', 'status', 'bodyPresent', 'scannerStatus', 'retryable',
+            'event', 'cacheState', 'analysisOutcome', 'urlId', 'reason', 'imageId',
+            'runId', 'imageIndex', 'candidateIndex', 'width', 'height',
+            'processed', 'activeRequest', 'sameSrc', 'running', 'cancelled',
+        ];
         for (const key of safeKeys) {
             if (!Object.prototype.hasOwnProperty.call(value, key)) continue;
             const entry = value[key];
@@ -94,6 +131,20 @@ function applySafeDiagnosticObject(diagnostic, value) {
             if (key === 'retryable' && typeof entry === 'boolean') diagnostic.retryable = entry;
             if (key === 'scannerStatus') {
                 diagnostic.scannerStatus = getSafeEnum(entry, SAFE_SCANNER_STATUSES);
+            }
+            if (key === 'event' && SAFE_DEBUG_EVENTS.includes(entry)) diagnostic.event = entry;
+            if (key === 'cacheState' && SAFE_CACHE_STATES.includes(entry)) diagnostic.cacheState = entry;
+            if (key === 'analysisOutcome' && SAFE_ANALYSIS_OUTCOMES.includes(entry)) diagnostic.analysisOutcome = entry;
+            if (key === 'urlId' && typeof entry === 'string' && /^[a-f0-9]{16}$/.test(entry)) {
+                diagnostic.urlId = entry;
+            }
+            if (key === 'reason' && SAFE_DEBUG_REASONS.includes(entry)) diagnostic.reason = entry;
+            if (['imageId', 'runId', 'imageIndex', 'candidateIndex', 'width', 'height'].includes(key) &&
+                Number.isSafeInteger(entry) && entry >= 0) {
+                diagnostic[key] = entry;
+            }
+            if (['processed', 'activeRequest', 'sameSrc', 'running', 'cancelled'].includes(key) && typeof entry === 'boolean') {
+                diagnostic[key] = entry;
             }
         }
         const scheme = getSafeScheme(value.url || value);
@@ -152,6 +203,22 @@ function formatSafeDiagnostic(diagnostic) {
         ['scannerStatus', getSafeEnum(diagnostic?.scannerStatus, SAFE_SCANNER_STATUSES)],
         ['retryable', typeof diagnostic?.retryable === 'boolean' ? diagnostic.retryable : undefined],
         ['scheme', getSafeEnum(diagnostic?.scheme, SAFE_SCHEMES)],
+        ['event', SAFE_DEBUG_EVENTS.includes(diagnostic?.event) ? diagnostic.event : undefined],
+        ['urlId', typeof diagnostic?.urlId === 'string' && /^[a-f0-9]{16}$/.test(diagnostic.urlId) ? diagnostic.urlId : undefined],
+        ['cacheState', SAFE_CACHE_STATES.includes(diagnostic?.cacheState) ? diagnostic.cacheState : undefined],
+        ['analysisOutcome', SAFE_ANALYSIS_OUTCOMES.includes(diagnostic?.analysisOutcome) ? diagnostic.analysisOutcome : undefined],
+        ['imageId', Number.isSafeInteger(diagnostic?.imageId) ? diagnostic.imageId : undefined],
+        ['runId', Number.isSafeInteger(diagnostic?.runId) ? diagnostic.runId : undefined],
+        ['imageIndex', Number.isSafeInteger(diagnostic?.imageIndex) ? diagnostic.imageIndex : undefined],
+        ['candidateIndex', Number.isSafeInteger(diagnostic?.candidateIndex) ? diagnostic.candidateIndex : undefined],
+        ['reason', SAFE_DEBUG_REASONS.includes(diagnostic?.reason) ? diagnostic.reason : undefined],
+        ['activeRequest', typeof diagnostic?.activeRequest === 'boolean' ? diagnostic.activeRequest : undefined],
+        ['processed', typeof diagnostic?.processed === 'boolean' ? diagnostic.processed : undefined],
+        ['running', typeof diagnostic?.running === 'boolean' ? diagnostic.running : undefined],
+        ['sameSrc', typeof diagnostic?.sameSrc === 'boolean' ? diagnostic.sameSrc : undefined],
+        ['cancelled', typeof diagnostic?.cancelled === 'boolean' ? diagnostic.cancelled : undefined],
+        ['width', Number.isSafeInteger(diagnostic?.width) ? diagnostic.width : undefined],
+        ['height', Number.isSafeInteger(diagnostic?.height) ? diagnostic.height : undefined],
         ['redacted', true],
     ];
     return fields
@@ -1526,7 +1593,15 @@ function logRangeRequestFailure(details) {
 async function loadSettings() {
     const stored = await chrome.storage.sync.get(DEFAULT_SETTINGS);
     settings = stored;
+    settingsLoaded = true;
     debugLog('[AI Meta Viewer] Settings loaded:', settings);
+    if (settings.debugMode === true) {
+        for (const diagnostic of pendingContentDiagnosticLogs.splice(0)) {
+            debugLog(diagnostic);
+        }
+    } else {
+        pendingContentDiagnosticLogs.length = 0;
+    }
 }
 
 // 初期化時に設定を読み込む
@@ -1567,6 +1642,25 @@ chrome.runtime.onInstalled.addListener(async (details) => {
  * Content Scriptからのメッセージを処理
  */
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
+    // Content Script の画像診断ログを Service Worker の DevTools に集約する。
+    // background 側で再度 allowlist を通すため、任意文字列や URL は出力されない。
+    if (request.action === 'contentDiagnostic') {
+        if (sender?.id === chrome.runtime.id && request.diagnostic && typeof request.diagnostic === 'object') {
+            const diagnostic = toSafeDiagnostic({
+                ...request.diagnostic,
+                category: 'scanner',
+                phase: 'content',
+            });
+            if (settingsLoaded) {
+                if (settings.debugMode === true) debugLog(diagnostic);
+            } else if (pendingContentDiagnosticLogs.length < MAX_PENDING_CONTENT_DIAGNOSTIC_LOGS) {
+                pendingContentDiagnosticLogs.push(diagnostic);
+            }
+        }
+        sendResponse({ success: true });
+        return true;
+    }
+
     // Brave 診断用テスト
     if (request.action === 'brave_diagnostic_test') {
         debugLog('[AI Meta Viewer] Brave diagnostic test message received');
@@ -1625,6 +1719,13 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     // 画面外へ出た画像などの解析取り消し
     if (request.action === 'cancelImageMetadata') {
         const cancelled = cancelImageMetadata(request.imageUrl);
+        debugLog({
+            category: 'cancelled',
+            phase: 'background',
+            event: 'cancel',
+            urlId: getSafeUrlId(request.imageUrl),
+            cancelled,
+        });
         sendResponse({ success: true, cancelled });
         return true;
     }
@@ -2055,8 +2156,10 @@ async function handleFetchImageMetadata(imageUrl) {
         // 後続の既存取得経路で従来どおり失敗分類するため、schemeは空のままにする。
     }
     const isFileScheme = imageScheme === 'file:';
+    const urlId = getSafeUrlId(imageUrl);
 
     debugLog('[AI Meta Viewer] Fetching metadata for:', imageUrl);
+    debugLog({ category: 'acquisition', phase: 'background', event: 'request-start', urlId });
 
     // blob: URL は Service Worker からアクセス不可のためスキップ
     if (imageUrl.startsWith('blob:')) {
@@ -2067,6 +2170,15 @@ async function handleFetchImageMetadata(imageUrl) {
     // 1. キャッシュチェック (Async)
     const cachedMetadata = await metadataCache.get(imageUrl);
     const isSafetensorsUrl = imageUrl.toLowerCase().includes('.safetensors') || imageUrl.toLowerCase().includes('format=safetensor');
+    const cachedParserState = cachedMetadata?.cacheEntryState;
+    const cacheState = cachedMetadata === undefined
+        ? 'miss'
+        : cachedParserState === 'empty-confirmed' || cachedParserState === 'unsupported-format'
+            ? 'hit-empty'
+            : cachedMetadata && typeof cachedMetadata === 'object' && Object.keys(cachedMetadata).length > 0
+                ? 'hit-positive'
+                : 'legacy-empty-reparse';
+    debugLog({ category: 'cache', phase: 'background', event: 'cache-lookup', cacheState, urlId });
 
     if (cachedMetadata !== undefined) {
         debugLog('[AI Meta Viewer] Cache lookup result:', {
@@ -3820,6 +3932,14 @@ async function handleFetchImageMetadata(imageUrl) {
         }
 
         const metadataState = getMetadataState(metadata);
+        const analysisOutcome = metadataState === 'resolved'
+            ? 'resolved'
+            : metadataState === 'empty-confirmed' || metadataState === 'unsupported-format'
+                ? 'confirmed-empty'
+                : metadataState === 'resource-limit'
+                    ? 'resource-limit'
+                    : metadataState === 'unresolved' ? 'unresolved' : 'failure';
+        debugLog({ category: 'parser', phase: 'background', event: 'parse-result', analysisOutcome, urlId });
         if (isFileScheme) {
             filePhase = 'parser';
             fileFormat = detectedFormat;
@@ -3911,6 +4031,15 @@ async function handleFetchImageMetadata(imageUrl) {
         return { success: true, metadata: metadata };
 
     } catch (error) {
+        const status = Number.isInteger(error?.status) ? error.status : undefined;
+        debugLog({
+            category: 'acquisition',
+            phase: 'background',
+            event: 'request-failure',
+            errorType: status ? 'invalid-response' : inferSafeErrorType(error?.name || error?.message),
+            status,
+            urlId,
+        });
         if (isFileScheme) return createFileFailureResult(error);
         debugLog('[AI Meta Viewer] handleFetchImageMetadata error:', error.message);
         const result = { success: false, error: error.message };
