@@ -262,7 +262,7 @@ function createInitializationUnavailableResult() {
 }
 
 try {
-    importScripts('pako.js', 'jszip.min.js', 'parser.js', 'png_metadata_scanner.js');
+    importScripts('pako.js', 'jszip.min.js', 'parser.js', 'video_parser.js', 'video_range_reader.js', 'png_metadata_scanner.js');
     initializationState = INITIALIZATION_STATES.READY;
 } catch (error) {
     emitFatalInitializationFailure();
@@ -1327,6 +1327,7 @@ const pngFullStreamGate = new ConcurrencyGate({
  * ゲート用contextを内部から参照するための仕組みでもある。
  */
 const inFlightAnalyses = new Map();
+const inFlightVideoAnalyses = new Map();
 
 /**
  * 現在進行中の解析contextを取得する
@@ -1399,6 +1400,67 @@ function requestImageMetadata(imageUrl, { tabId = null, priority = ANALYSIS_PRIO
         }
     })();
     return entry.promise;
+}
+
+function requestVideoMetadata(videoUrl, { tabId = null } = {}) {
+    const cacheUrl = `video-metadata-v1:${videoUrl}`;
+    const existing = inFlightVideoAnalyses.get(cacheUrl);
+    if (existing && !existing.settled && !existing.signal?.aborted) {
+        existing.activeRefs += 1;
+        return existing.promise;
+    }
+
+    const controller = new AbortController();
+    const entry = {
+        controller,
+        signal: controller.signal,
+        activeRefs: 1,
+        settled: false,
+        tabId,
+        promise: null,
+    };
+    inFlightVideoAnalyses.set(cacheUrl, entry);
+    entry.promise = (async () => {
+        let release = null;
+        try {
+            release = await metadataHeadGate.acquire({
+                priority: ANALYSIS_PRIORITY_VIEWPORT,
+                tabId: entry.tabId,
+                order: ANALYSIS_ORDER_LIFO,
+                signal: entry.signal,
+            });
+            return await handleFetchVideoMetadata(videoUrl, entry.signal, cacheUrl);
+        } catch (error) {
+            return {
+                success: false,
+                analysisState: error?.name === 'AbortError' ? 'failure' : 'unresolved',
+                diagnostics: {
+                    category: error?.name === 'AbortError' ? 'cancelled' : 'acquisition',
+                    phase: 'background',
+                    errorType: error?.name === 'AbortError' ? 'abort' : 'unknown',
+                    retryable: true,
+                },
+            };
+        } finally {
+            if (release) release();
+            entry.settled = true;
+            entry.activeRefs = 0;
+            if (inFlightVideoAnalyses.get(cacheUrl) === entry) inFlightVideoAnalyses.delete(cacheUrl);
+            entry.controller = null;
+            entry.signal = null;
+        }
+    })();
+    return entry.promise;
+}
+
+function cancelVideoMetadata(videoUrl) {
+    const entry = inFlightVideoAnalyses.get(`video-metadata-v1:${videoUrl}`);
+    if (!entry || entry.settled || entry.activeRefs <= 0) return false;
+    entry.activeRefs -= 1;
+    if (entry.activeRefs > 0 || !entry.controller) return false;
+    if (entry.controller.signal.aborted) return true;
+    entry.controller.abort();
+    return true;
 }
 
 /**
@@ -1706,6 +1768,21 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         return true;
     }
 
+    if (request.action === 'fetchVideoMetadata') {
+        if (typeof request.videoUrl !== 'string' || request.videoUrl.length === 0) {
+            sendResponse({ success: false, analysisState: 'failure', diagnostics: { category: 'message', phase: 'background', errorType: 'invalid-response' } });
+            return false;
+        }
+        requestVideoMetadata(request.videoUrl, { tabId: sender?.tab?.id ?? null })
+            .then(sendResponse)
+            .catch(() => sendResponse({
+                success: false,
+                analysisState: 'unresolved',
+                diagnostics: { category: 'acquisition', phase: 'background', errorType: 'unknown', retryable: true },
+            }));
+        return true;
+    }
+
     // viewport 由来の解析。待機列は LIFO とし、スクロール中は最新の可視領域を優先する。
     if (request.action === 'fetchImageMetadataForViewport') {
         requestImageMetadata(request.imageUrl, {
@@ -1744,6 +1821,19 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
             phase: 'background',
             event: 'cancel',
             urlId: getSafeUrlId(request.imageUrl),
+            cancelled,
+        });
+        sendResponse({ success: true, cancelled });
+        return true;
+    }
+
+    if (request.action === 'cancelVideoMetadata') {
+        const cancelled = cancelVideoMetadata(request.videoUrl);
+        debugLog({
+            category: 'cancelled',
+            phase: 'background',
+            event: 'cancel',
+            urlId: getSafeUrlId(request.videoUrl),
             cancelled,
         });
         sendResponse({ success: true, cancelled });
@@ -2154,6 +2244,282 @@ async function handleCivitaiZipDownload(images, context) {
     return downloadedCount;
 }
 
+
+/**
+ * Video metadata専用の取得。HTTP Rangeとfile://の両方で全body保持を避ける。
+ * @param {string} videoUrl
+ * @param {AbortSignal|null} signal
+ * @param {string} cacheUrl
+ */
+async function handleFetchVideoMetadata(videoUrl, signal, cacheUrl) {
+    if (typeof initializationState !== 'undefined' &&
+        typeof INITIALIZATION_STATES !== 'undefined' &&
+        initializationState === INITIALIZATION_STATES.FATAL) {
+        return createInitializationUnavailableResult();
+    }
+    let parsedUrl;
+    try { parsedUrl = new URL(videoUrl); } catch (_) {
+        return { success: false, analysisState: 'failure', diagnostics: { category: 'acquisition', phase: 'background', errorType: 'invalid-response' } };
+    }
+    const urlId = getSafeUrlId(videoUrl);
+    if (parsedUrl.protocol === 'blob:') {
+        return { success: true, analysisState: 'confirmed-empty', metadata: {}, parserState: 'unsupported-format' };
+    }
+    if (!['http:', 'https:', 'file:'].includes(parsedUrl.protocol)) {
+        return { success: false, analysisState: 'failure', diagnostics: { category: 'acquisition', phase: 'background', errorType: 'invalid-response', retryable: false } };
+    }
+
+    const cached = await metadataCache.get(cacheUrl);
+    const cachedState = cached?.cacheEntryState;
+    if (cachedState === 'empty-confirmed' || cachedState === 'unsupported-format') {
+        return { success: true, analysisState: 'confirmed-empty', metadata: {}, cached: true, parserState: cachedState };
+    }
+    if (cached && typeof cached === 'object' && Object.keys(cached).length > 0) {
+        return { success: true, analysisState: 'resolved', metadata: cached, cached: true };
+    }
+
+    debugLog({ category: 'acquisition', phase: 'background', event: 'request-start', urlId });
+    const isFile = parsedUrl.protocol === 'file:';
+    let totalSize = null;
+    let totalFetched = 0;
+    let rangeIgnoredBody = null;
+    let rangeIgnoredComplete = false;
+    let rangeIgnoredOverLimit = false;
+    let fetchBudgetBlocked = false;
+    let responseStatus = null;
+    const fetchedRanges = [];
+    const aborted = () => signal?.aborted === true;
+    const cancelResponseBody = async response => {
+        try { await response?.body?.cancel?.(); } catch (_) { }
+    };
+
+    const fetchBytes = async (offset, length) => {
+        if (aborted()) throw createAnalysisAbortError();
+        if (!Number.isSafeInteger(offset) || !Number.isSafeInteger(length) || offset < 0 || length < 1) return null;
+        if (length > VIDEO_METADATA_MAX_BYTES) {
+            fetchBudgetBlocked = true;
+            return null;
+        }
+        if (rangeIgnoredBody) {
+            if (offset + length <= rangeIgnoredBody.length) return rangeIgnoredBody.subarray(offset, offset + length);
+            if (rangeIgnoredOverLimit) fetchBudgetBlocked = true;
+            return null;
+        }
+        for (const cachedRange of fetchedRanges) {
+            if (offset >= cachedRange.start && offset + length <= cachedRange.end) {
+                return cachedRange.bytes.subarray(offset - cachedRange.start, offset - cachedRange.start + length);
+            }
+        }
+        if (totalFetched + length > VIDEO_METADATA_MAX_BYTES) {
+            fetchBudgetBlocked = true;
+            return null;
+        }
+
+        const controller = new AbortController();
+        const abortFromParent = () => controller.abort();
+        if (signal) {
+            if (signal.aborted) controller.abort();
+            else signal.addEventListener('abort', abortFromParent, { once: true });
+        }
+        let timedOut = false;
+        const timeoutId = setTimeout(() => {
+            timedOut = true;
+            controller.abort();
+        }, RANGE_REQUEST_TIMEOUT_MS);
+        try {
+            const headers = isFile ? undefined : { Range: `bytes=${offset}-${offset + length - 1}` };
+            const response = await fetch(videoUrl, {
+                headers,
+                redirect: 'follow',
+                signal: controller.signal,
+            });
+            responseStatus = response.status;
+            if (response.status === HTTP_PARTIAL_CONTENT_STATUS && !isFile) {
+                const range = parseContentRangeHeader(response.headers.get('content-range'));
+                if (!range || range.start !== offset || range.end > offset + length - 1 || range.length > length) {
+                    await cancelResponseBody(response);
+                    return null;
+                }
+                if (range.total !== null) totalSize = range.total;
+                const body = await readVideoResponsePrefix(response, range.length, controller.signal);
+                if (controller.signal.aborted) throw createAnalysisAbortError();
+                if (!body.complete || body.overLimit || body.bytes.length !== range.length) return null;
+                totalFetched += body.bytes.length;
+                fetchedRanges.push({ start: offset, end: offset + body.bytes.length, bytes: body.bytes });
+                return body.bytes;
+            }
+            if (response.status !== HTTP_OK_STATUS) {
+                await cancelResponseBody(response);
+                return null;
+            }
+            const contentLength = response.headers.get('content-length');
+            if (typeof contentLength === 'string' && /^\d+$/.test(contentLength)) {
+                const parsedLength = Number(contentLength);
+                if (Number.isSafeInteger(parsedLength)) totalSize = parsedLength;
+            }
+            // A server can ignore a later Range request after earlier 206 responses.
+            // Count that full-body fallback against the bytes already fetched.
+            const remainingBytes = VIDEO_METADATA_MAX_BYTES - totalFetched;
+            const body = await readVideoResponsePrefix(response, remainingBytes, controller.signal);
+            if (controller.signal.aborted) throw createAnalysisAbortError();
+            rangeIgnoredBody = body.bytes;
+            rangeIgnoredComplete = body.complete;
+            rangeIgnoredOverLimit = body.overLimit;
+            totalFetched += body.bytes.length;
+            fetchedRanges.length = 0;
+            if (totalSize === null && body.complete) totalSize = body.bytes.length;
+            if (offset + length <= body.bytes.length) return body.bytes.subarray(offset, offset + length);
+            return null;
+        } catch (error) {
+            if (timedOut && !signal?.aborted) {
+                const timeoutError = new Error('Video metadata request timed out.');
+                timeoutError.name = 'TimeoutError';
+                throw timeoutError;
+            }
+            throw error;
+        } finally {
+            clearTimeout(timeoutId);
+            signal?.removeEventListener('abort', abortFromParent);
+        }
+    };
+
+    const buildResult = async parserResult => {
+        if (aborted()) throw createAnalysisAbortError();
+        const state = parserResult?.parserState || 'unresolved';
+        const isResourceLimit = state === 'resource-limit' || fetchBudgetBlocked || rangeIgnoredOverLimit;
+        if (state === 'resolved' && Object.keys(parserResult).length > 0) {
+            const metadata = {};
+            for (const [key, value] of Object.entries(parserResult)) metadata[key] = value;
+            await metadataCache.set(cacheUrl, metadata, { parserState: 'resolved' });
+            return { success: true, analysisState: 'resolved', metadata, format: parserResult.format || 'video' };
+        }
+        if (state === 'empty-confirmed' || state === 'unsupported-format') {
+            await metadataCache.set(cacheUrl, {}, { parserState: state });
+            return { success: true, analysisState: 'confirmed-empty', metadata: {}, parserState: state, format: parserResult.format || 'video' };
+        }
+        return {
+            success: false,
+            analysisState: 'unresolved',
+            parserState: state,
+            reason: isResourceLimit
+                ? (state === 'resource-limit' ? parserResult?.parserReason || parserResult?.reason || 'resource-limit' : 'resource-limit')
+                : parserResult?.parserReason || parserResult?.reason || 'metadata-unresolved',
+            diagnostics: {
+                category: isResourceLimit ? 'resource-limit' : 'acquisition',
+                phase: 'background',
+                errorType: 'unknown',
+                retryable: true,
+                scheme: isFile ? 'file' : undefined,
+                status: responseStatus || undefined,
+                bodyPresent: totalFetched > 0,
+            },
+        };
+    };
+
+    try {
+        if (typeof extractVideoMetadata !== 'function' || typeof scanWebmVideoMetadata !== 'function' ||
+            typeof scanMp4VideoMetadata !== 'function') {
+            return { success: false, analysisState: 'failure', diagnostics: { category: 'parser', phase: 'background', errorType: 'import' } };
+        }
+
+        const head = await fetchBytes(0, VIDEO_METADATA_HEAD_BYTES);
+        const wholeResourceAvailable = rangeIgnoredComplete ||
+            (!rangeIgnoredOverLimit && head && Number.isSafeInteger(totalSize) && head.length >= totalSize);
+        if (!head || head.length < 4) {
+            if (rangeIgnoredComplete && rangeIgnoredBody) {
+                const fullFormat = detectVideoContainer(rangeIgnoredBody);
+                return buildResult(extractVideoMetadata(rangeIgnoredBody, { format: fullFormat || undefined, inputComplete: true, totalSize }));
+            }
+            if (wholeResourceAvailable && head) {
+                return buildResult(extractVideoMetadata(head, { inputComplete: true, totalSize }));
+            }
+            return buildResult({ parserState: rangeIgnoredOverLimit ? 'resource-limit' : 'unresolved', reason: 'head-unavailable' });
+        }
+        const format = detectVideoContainer(head);
+        if (!format) return buildResult({ parserState: wholeResourceAvailable ? 'unsupported-format' : 'unresolved', format: 'unknown' });
+
+        if (format === 'webm') {
+            const result = await scanWebmVideoMetadata(fetchBytes, totalSize, {
+                maxBytes: VIDEO_METADATA_MAX_BYTES,
+                maxReads: WEBM_MAX_RANGE_READS,
+                maxTagBytes: WEBM_MAX_TAG_BYTES,
+            });
+            return buildResult(result);
+        }
+
+        const headComplete = totalSize !== null && head.length >= totalSize;
+        let result = extractVideoMetadata(head, { format, inputComplete: headComplete, totalSize });
+        if (result.parserState === 'resolved') return buildResult(result);
+        if (headComplete && result.parserState === 'empty-confirmed') return buildResult(result);
+
+        // If a moov atom begins in the head but exceeds it, fetch that atom exactly.
+        if (result.moovStart !== undefined && result.moovSize > 0 && result.moovSize > VIDEO_METADATA_MAX_BYTES - totalFetched) {
+            return buildResult({ parserState: 'resource-limit', reason: 'moov-byte-budget' });
+        }
+        if (result.moovStart !== undefined && result.moovSize > 0) {
+            const moovBytes = await fetchBytes(result.moovStart, result.moovSize);
+            if (moovBytes) {
+                const moovResult = extractVideoMetadata(moovBytes, {
+                    format,
+                    startOffset: result.moovStart,
+                    inputComplete: true,
+                    totalSize,
+                    atBoxBoundary: true,
+                });
+                if (['resolved', 'empty-confirmed', 'resource-limit'].includes(moovResult.parserState)) return buildResult(moovResult);
+                result = moovResult;
+            }
+        }
+
+        if (rangeIgnoredBody) {
+            if (rangeIgnoredComplete) {
+                return buildResult(extractVideoMetadata(rangeIgnoredBody, { format, inputComplete: true, totalSize }));
+            }
+            return buildResult({ parserState: 'unresolved', reason: rangeIgnoredOverLimit ? 'resource-limit' : 'head-incomplete' });
+        }
+
+        if (Number.isSafeInteger(totalSize) && totalSize > 0) {
+            const tailStart = Math.max(0, totalSize - VIDEO_METADATA_TAIL_BYTES);
+            const tailLength = totalSize - tailStart;
+            await fetchBytes(tailStart, tailLength);
+            if (Number.isSafeInteger(result.nextBoxOffset)) {
+                const scanResult = await scanMp4VideoMetadata(fetchBytes, totalSize, {
+                    startOffset: result.nextBoxOffset,
+                    maxBytes: Math.max(0, VIDEO_METADATA_MAX_BYTES - totalFetched),
+                    maxBoxes: 64,
+                });
+                if (['resolved', 'empty-confirmed', 'resource-limit'].includes(scanResult.parserState)) return buildResult(scanResult);
+                result = scanResult;
+            }
+        }
+        return buildResult({
+            parserState: fetchBudgetBlocked || rangeIgnoredOverLimit ? 'resource-limit' : 'unresolved',
+            reason: fetchBudgetBlocked || rangeIgnoredOverLimit ? 'resource-limit' : 'metadata-not-complete',
+        });
+    } catch (error) {
+        if (error?.name === 'TimeoutError' && !signal?.aborted) {
+            debugLog({ category: 'acquisition', phase: 'background', errorType: 'timeout', urlId, retryable: true });
+            return {
+                success: false,
+                analysisState: 'unresolved',
+                diagnostics: {
+                    category: 'acquisition',
+                    phase: 'background',
+                    errorType: 'timeout',
+                    retryable: true,
+                    scheme: isFile ? 'file' : undefined,
+                    status: responseStatus || undefined,
+                    bodyPresent: totalFetched > 0,
+                },
+            };
+        }
+        if (error?.name === 'AbortError' || signal?.aborted) {
+            return { success: false, analysisState: 'failure', diagnostics: { category: 'cancelled', phase: 'background', errorType: 'abort', retryable: true } };
+        }
+        debugLog({ category: 'acquisition', phase: 'background', errorType: 'unknown', urlId, retryable: true });
+        return { success: false, analysisState: 'unresolved', diagnostics: { category: 'acquisition', phase: 'background', errorType: 'unknown', retryable: true } };
+    }
+}
 
 /**
  * 画像を取得してメタデータを抽出

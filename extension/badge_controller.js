@@ -150,12 +150,14 @@ function removeAnalyzingBadge(badgeObj) {
  * @param {string} originalUrl
  * @returns {HTMLElement}
  */
-function createBadgeElement(metadata, originalUrl) {
+function createBadgeElement(metadata, originalUrl, mediaType = 'image') {
     const badge = createBadge(); // ui.js
     updateBadge(badge, metadata); // ui.js
     badge.style.zIndex = '2147483640';
     badge._metadata = metadata;
     badge._originalUrl = originalUrl;
+    badge._mediaType = mediaType === 'video' ? 'video' : 'image';
+    if (badge._mediaType === 'video') badge.title = 'Click to view video metadata';
     return badge;
 }
 
@@ -174,7 +176,7 @@ function attachBadgeClickHandler(badge) {
 
         badge._modalCreationInFlight = true;
         try {
-            const modal = await createModal(currentMetadata, badge._originalUrl); // ui.js
+            const modal = await createModal(currentMetadata, badge._originalUrl, { mediaType: badge._mediaType }); // ui.js
             if (document.body) document.body.appendChild(modal);
         } catch (error) {
             if (typeof debugLog === 'function') {
@@ -408,7 +410,7 @@ function addBadgeToImage(img, metadata, originalUrl) {
     if (processedImages.has(img)) {
         const existing = processedImages.get(img);
         if (existing && existing.badge) {
-            if (existing.badge._originalUrl === originalUrl) return;
+            if (existing.badge._originalUrl === originalUrl && existing.badge._mediaType !== 'video') return;
             debugLog('[AI Meta Viewer] URL changed for the same element. Refreshing badge.', {
                 old: existing.badge._originalUrl,
                 new: originalUrl
@@ -449,18 +451,19 @@ function addBadgeToImage(img, metadata, originalUrl) {
  * @param {Object} metadata 
  * @param {string} originalUrl 
  */
-function addBadgeToElement(el, metadata, originalUrl) {
+function addBadgeToElement(el, metadata, originalUrl, options = {}) {
+    const mediaType = options?.mediaType === 'video' ? 'video' : 'image';
     if (processedImages.has(el)) {
         const existing = processedImages.get(el);
         if (existing && existing.badge) {
-            if (existing.badge._originalUrl === originalUrl) return;
+            if (existing.badge._originalUrl === originalUrl && existing.badge._mediaType === mediaType) return true;
             removeBadge(el);
         }
     }
 
-    if (!document.body) return;
+    if (!document.body) return false;
 
-    const badge = createBadgeElement(metadata, originalUrl);
+    const badge = createBadgeElement(metadata, originalUrl, mediaType);
     attachBadgeClickHandler(badge);
 
     badge.style.position = 'fixed';
@@ -484,6 +487,7 @@ function addBadgeToElement(el, metadata, originalUrl) {
             resizeObserver.unobserve(el);
         }
     });
+    return true;
 }
 /**
  * Background Scriptからのメッセージを処理

@@ -151,6 +151,9 @@ function detectGenerator(metadata) {
         (typeof source.parameters === 'string' && source.parameters.includes('ComfyUI'))) {
         return 'ComfyUI';
     }
+    if (window.ComfyUIParser?.normalizeGraph(source.prompt)) {
+        return 'ComfyUI';
+    }
 
     // Civitai
     // parameters内に「Civitai metadata」がある、または Version: v... がある場合
@@ -559,8 +562,7 @@ function buildSectionsInternal(metadata) {
         return buildA1111Sections(source);
     }
 
-    const isComfyMetadata = generatorName === 'ComfyUI' ||
-        Boolean(source.workflow || source.generation_data);
+    const isComfyMetadata = generatorName === 'ComfyUI';
     const isDescriptionFallback = generatorName.startsWith('Midjourney') ||
         generatorName === 'Tensor.art' ||
         (!source.Comment && !isComfyMetadata &&
@@ -572,39 +574,81 @@ function buildSectionsInternal(metadata) {
     if (isComfyMetadata) {
         const formatComfyJson = value => {
             if (value == null || value === '') return '';
-            if (typeof value === 'string') {
-                try {
-                    return JSON.stringify(JSON.parse(value), null, 2);
-                } catch (error) {
-                    return value;
-                }
-            }
+            // Keep string payloads unchanged; summaries are rendered above this
+            // section, which preserves the complete source metadata for inspection.
+            if (typeof value === 'string') return value;
             try {
                 return JSON.stringify(value, null, 2);
             } catch (error) {
                 return toDisplayText(value);
             }
         };
+        const summary = window.ComfyUIParser?.summarize(source) || {
+            positive: [], negative: [], models: [], loras: [], grid: []
+        };
+        const makeChildren = entries => entries.map((entry, index) => ({
+            label: entry.label || `Item ${index + 1}`,
+            text: entry.text,
+            dataFields: []
+        }));
+
+        if (summary.limited) {
+            sections.push(createSectionModel(
+                'comfySummaryNotice', 'Summary may be incomplete', 'settings', false,
+                'The workflow summary was limited for performance. The raw JSON sections below preserve the source data.',
+                { dataFields: [] }
+            ));
+        }
+
+        if (summary.positive.length > 0) {
+            sections.push(createSectionModel(
+                'comfySummaryPositive', 'Positive Prompt Summary', 'positive', true, '',
+                { children: makeChildren(summary.positive) }
+            ));
+        }
+        if (summary.negative.length > 0) {
+            sections.push(createSectionModel(
+                'comfySummaryNegative', 'Negative Prompt Summary', 'negative', false, '',
+                { children: makeChildren(summary.negative) }
+            ));
+        }
+        const modelAndLora = [
+            ...summary.models.map(item => ({ label: `Model · ${item.label}`, text: item.text })),
+            ...summary.loras.map(item => ({ label: `LoRA · ${item.label}`, text: item.text }))
+        ];
+        if (modelAndLora.length > 0) {
+            sections.push(createSectionModel(
+                'comfySummaryModels', 'Models and LoRAs', 'settings', false, '',
+                { children: makeChildren(modelAndLora) }
+            ));
+        }
 
         const promptText = formatComfyJson(source.prompt);
         if (promptText) {
             sections.push(createSectionModel(
-                'positive', 'Prompt', 'positive', true, promptText,
+                'rawApiPrompt', 'Raw API Prompt JSON', 'raw', false, promptText,
                 { dataFields: ['comfy_prompt_json'] }
             ));
         }
-
         const workflowText = formatComfyJson(source.workflow);
         if (workflowText) {
             sections.push(createSectionModel(
-                'workflow', 'workflow', 'settings', false, workflowText,
+                'workflow', 'Raw Workflow JSON', 'raw', false, workflowText,
                 { dataFields: ['comfy_workflow_json'] }
+            ));
+        }
+        const generationDataText = formatComfyJson(source.generation_data);
+        if (generationDataText) {
+            sections.push(createSectionModel(
+                'rawGenerationData', 'Raw Generation Data JSON', 'raw', false, generationDataText,
+                { dataFields: ['generation_data'] }
             ));
         }
 
         const other = { ...source };
         delete other.prompt;
         delete other.workflow;
+        delete other.generation_data;
         const otherText = formatComfyJson(other);
         if (otherText && otherText !== '{}') {
             sections.push(createSectionModel(
@@ -890,6 +934,8 @@ function buildGridInternal(metadata) {
         return parseA1111Grid(parameters);
     }
     if (generatorName === 'ComfyUI' || source.prompt || source.workflow || source.generation_data) {
+        const normalized = window.ComfyUIParser?.summarize(source);
+        if (normalized?.grid?.length) return normalized.grid;
         return buildComfyGrid(source.prompt);
     }
     if (generatorName.startsWith('Midjourney') && typeof source.Description === 'string') {
@@ -1120,7 +1166,8 @@ function setupCopyButton(button, text) {
  * @param {Object} metadata - メタデータ
  * @returns {Promise<HTMLElement>} - モーダルオーバーレイ要素
  */
-async function createModal(metadata, imageUrl = null) {
+async function createModal(metadata, imageUrl = null, options = {}) {
+    const mediaType = options?.mediaType === 'video' ? 'video' : 'image';
     let loadedSectionStates = {};
     try {
         loadedSectionStates = await sectionStateStore.load();
@@ -1163,7 +1210,7 @@ async function createModal(metadata, imageUrl = null) {
     const header = document.createElement('div');
     header.className = 'ai-meta-modal-header';
     const title = document.createElement('h2');
-    title.textContent = `Image Metadata - ${generatorName}`;
+    title.textContent = `${mediaType === 'video' ? 'Video' : 'Image'} Metadata - ${generatorName}`;
     const closeBtn = document.createElement('button');
     closeBtn.className = 'ai-meta-close-btn';
     closeBtn.textContent = '×';
@@ -1215,7 +1262,8 @@ async function createModal(metadata, imageUrl = null) {
     overlay.closeModal = closeModal;
     document.addEventListener('keydown', handleEsc);
 
-    const editingEnabled = typeof modalSettings.enableMetadataEditing === 'undefined' || modalSettings.enableMetadataEditing;
+    const editingEnabled = mediaType !== 'video' &&
+        (typeof modalSettings.enableMetadataEditing === 'undefined' || modalSettings.enableMetadataEditing);
     const sectionOpenSettings = {
         negative: modalSettings.sectionDefaultOpenNegative,
         genSettings: modalSettings.sectionDefaultOpenGenSettings,
@@ -1407,7 +1455,7 @@ async function createModal(metadata, imageUrl = null) {
     let gridInserted = false;
     const negativeIndexes = sectionModel
         .map((section, index) => ({ section, index }))
-        .filter(({ section }) => section.id === 'negative' || section.id === 'charUndesired')
+        .filter(({ section }) => section.kind === 'negative' || section.id === 'charUndesired')
         .map(({ index }) => index);
     const lastNegativeIndex = negativeIndexes.length > 0
         ? negativeIndexes[negativeIndexes.length - 1]
@@ -1430,7 +1478,7 @@ async function createModal(metadata, imageUrl = null) {
 
     const footer = document.createElement('div');
     footer.className = 'ai-meta-modal-footer';
-    if (modalSettings.advancedModeEnabled && modalSettings.enableExperimentalWriting && imageUrl) {
+    if (mediaType !== 'video' && modalSettings.advancedModeEnabled && modalSettings.enableExperimentalWriting && imageUrl) {
         const writeBtn = document.createElement('button');
         writeBtn.className = 'ai-meta-copy-all-btn';
         writeBtn.textContent = 'Update & Download';
