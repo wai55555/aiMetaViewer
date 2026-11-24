@@ -52,11 +52,12 @@ const CONTENT_SAFE_ENUMS = Object.freeze({
         'check-skipped', 'analysis-skip', 'analysis-start', 'stale-result', 'cache-hit', 'cache-miss', 'request-start',
         'response', 'analysis-complete', 'badge-show', 'cancel', 'queue-skip',
         'queue-enqueue', 'queue-cancel-pending', 'queue-finish', 'dom-remove', 'src-mutation',
+        'source-selection-change',
     ]),
     cacheState: Object.freeze(['hit-positive', 'hit-empty', 'hit-legacy-empty', 'miss']),
     analysisOutcome: Object.freeze(['resolved', 'confirmed-empty', 'unresolved', 'failure', 'cancelled', 'source-changed']),
     reason: Object.freeze([
-        'processed-marker', 'viewport-exit', 'dom-removed', 'src-change',
+        'processed-marker', 'viewport-exit', 'dom-removed', 'src-change', 'source-selection',
         'request-active', 'request-inactive', 'already-running', 'already-pending', 'queue-overflow',
         'context-invalid', 'no-src', 'site-excluded', 'too-small',
     ]),
@@ -359,6 +360,9 @@ function init() {
 const contentMetadataCache = new Map();
 const imageSourceRechecks = new WeakSet();
 const imageAnalyzingBadgeStates = new WeakMap();
+// 処理済みマーカーがどのcurrentSrcに対するものか記録する。
+const imageAnalyzedSources = new WeakMap();
+let sourceSelectionListenersRegistered = false;
 const ANALYZING_BADGE_DELAY_MS = 200;
 const imageDiagnosticIds = new WeakMap();
 const imageAnalysisRunIds = new WeakMap();
@@ -371,6 +375,10 @@ function clearImageAnalyzingBadge(img, expectedRunId = null) {
     if (state.timer !== null) clearTimeout(state.timer);
     if (state.badge) removeAnalyzingBadge(state.badge);
     imageAnalyzingBadgeStates.delete(img);
+}
+
+function getCurrentImageSource(img) {
+    return img.currentSrc || img.src;
 }
 
 function getImageDiagnosticId(img) {
@@ -472,6 +480,7 @@ function cancelActiveAnalysis(img, reason = 'viewport-exit') {
     cancelledAnalyses.add(img);
     // 取り消し直後から再度viewport判定を受けられるようmarkerを除去する。
     processedImages.delete(img);
+    imageAnalyzedSources.delete(img);
     if (!url || cancelNotificationsSent.has(img)) return;
     cancelNotificationsSent.add(img);
     debugLog('[AI Meta Viewer] Cancelling in-flight analysis:', url.substring(0, 80));
@@ -498,7 +507,7 @@ function clearActiveAnalysis(img) {
  */
 async function checkImageMetadata(img, requestOptions = {}) {
     const fetchAction = requestOptions.action || 'fetchImageMetadata';
-    const getImageSource = () => img.currentSrc || img.src;
+    const getImageSource = () => getCurrentImageSource(img);
     debugLog('[AI Meta Viewer] checkImageMetadata() called for:', getImageSource());
 
     // 拡張機能のコンテキストが無効化されている場合は処理を停止
@@ -612,12 +621,14 @@ async function checkImageMetadata(img, requestOptions = {}) {
         });
         // 処理済みフラグを削除（画像読み込み後にサイズが確定してから再試行させるため）
         processedImages.delete(img);
+        imageAnalyzedSources.delete(img);
         return;
     }
 
     // 処理済みフラグを立てる（重複チェック防止）
     // 注意: 処理中であることを示すマーカーを設定
     // 実際のバッジデータは addBadgeToImage() で設定される
+    imageAnalyzedSources.delete(img);
     processedImages.set(img, null);
     const runId = beginImageAnalysisRun(img);
     logImageDiagnostic('analysis-start', img, { runId, processed: true });
@@ -894,6 +905,9 @@ async function checkImageMetadata(img, requestOptions = {}) {
             if (analysisOutcome !== 'resolved' && analysisOutcome !== 'confirmed-empty') {
                 // failure/unresolved/cancel は成功 marker を残さず再試行可能にする。
                 processedImages.delete(img);
+                imageAnalyzedSources.delete(img);
+            } else if (processedImages.has(img)) {
+                imageAnalyzedSources.set(img, src);
             }
             clearActiveAnalysis(img);
         }
@@ -1611,6 +1625,7 @@ function cleanupRemovedImage(img) {
     if (!wasRunning) cancelActiveAnalysis(img, 'dom-removed');
     removeBadge(img);
     processedImages.delete(img);
+    imageAnalyzedSources.delete(img);
 }
 
 /**
@@ -1632,6 +1647,57 @@ function observeImages() {
         rootMargin: '50px' // 画面外50pxまで先読み
     });
     viewportAnalysisQueue.observer = intersectionObserver;
+
+    const invalidateChangedImageSource = (img) => {
+        const analyzedSource = imageAnalyzedSources.get(img);
+        const currentSource = getCurrentImageSource(img);
+        if (analyzedSource === undefined || analyzedSource === currentSource) return false;
+
+        imageAnalyzedSources.delete(img);
+        clearImageAnalyzingBadge(img);
+        removeBadge(img);
+        processedImages.delete(img);
+
+        const running = viewportAnalysisQueue.running.has(img);
+        if (running) imageSourceRechecks.add(img);
+        const activeObserver = viewportAnalysisQueue.observer;
+        activeObserver?.unobserve(img);
+        if (!running && img.isConnected) activeObserver?.observe(img);
+
+        logImageDiagnostic('source-selection-change', img, {
+            reason: 'source-selection',
+            sameSrc: false,
+            processed: processedImages.has(img),
+            activeRequest: activeImageRequests.has(img),
+            running,
+        });
+        return true;
+    };
+
+    // currentSrc は src/srcset 属性が変わらなくても、viewportやDPRに応じて
+    // 別候補へ切り替わる。load/errorとviewport変更で解析済み画像を照合する。
+    const handleImageResourceChange = (event) => {
+        if (event.target?.tagName === 'IMG') invalidateChangedImageSource(event.target);
+    };
+    if (!sourceSelectionListenersRegistered) {
+        document.addEventListener('load', handleImageResourceChange, true);
+        document.addEventListener('error', handleImageResourceChange, true);
+
+        let sourceSelectionCheckPending = false;
+        const scheduleSourceSelectionCheck = () => {
+            if (sourceSelectionCheckPending || processedImages.size === 0) return;
+            sourceSelectionCheckPending = true;
+            window.requestAnimationFrame(() => {
+                sourceSelectionCheckPending = false;
+                for (const img of processedImages.keys()) {
+                    invalidateChangedImageSource(img);
+                }
+            });
+        };
+        window.addEventListener('resize', scheduleSourceSelectionCheck, { passive: true });
+        window.addEventListener('orientationchange', scheduleSourceSelectionCheck, { passive: true });
+        sourceSelectionListenersRegistered = true;
+    }
 
     // hover された画像は待機列の先頭へ昇格させる
     document.addEventListener('mouseover', (event) => {
@@ -1701,6 +1767,7 @@ function observeImages() {
                             running: viewportAnalysisQueue.running.has(target),
                         });
                         if (!sameSrc) {
+                            imageAnalyzedSources.delete(target);
                             clearImageAnalyzingBadge(target);
                             removeBadge(target);
                             processedImages.delete(target);
@@ -1865,6 +1932,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         let processedImagesSize = 0;
         if (typeof processedImages !== 'undefined') {
             processedImagesSize = processedImages.size;
+            for (const img of processedImages.keys()) imageAnalyzedSources.delete(img);
             processedImages.clear();
         }
 

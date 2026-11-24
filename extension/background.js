@@ -26,7 +26,7 @@ const SAFE_DEBUG_EVENTS = Object.freeze([
     'request-start', 'cache-lookup', 'parse-result', 'request-failure',
     'check-skipped', 'analysis-skip', 'analysis-start', 'stale-result', 'cache-hit', 'cache-miss', 'response',
     'analysis-complete', 'badge-show', 'cancel', 'queue-skip', 'queue-enqueue',
-    'queue-cancel-pending', 'queue-finish', 'dom-remove', 'src-mutation',
+    'queue-cancel-pending', 'queue-finish', 'dom-remove', 'src-mutation', 'source-selection-change',
 ]);
 const SAFE_CACHE_STATES = Object.freeze([
     'miss', 'hit-positive', 'hit-empty', 'hit-legacy-empty', 'legacy-empty-reparse',
@@ -35,7 +35,7 @@ const SAFE_ANALYSIS_OUTCOMES = Object.freeze([
     'resolved', 'confirmed-empty', 'unresolved', 'resource-limit', 'failure', 'cancelled', 'source-changed',
 ]);
 const SAFE_DEBUG_REASONS = Object.freeze([
-    'processed-marker', 'viewport-exit', 'dom-removed', 'src-change',
+    'processed-marker', 'viewport-exit', 'dom-removed', 'src-change', 'source-selection',
     'request-active', 'request-inactive', 'already-running', 'already-pending', 'queue-overflow',
     'context-invalid', 'no-src', 'site-excluded', 'too-small',
 ]);
