@@ -24,7 +24,7 @@ const SAFE_SCANNER_STATUSES = Object.freeze([
 ]);
 const SAFE_DEBUG_EVENTS = Object.freeze([
     'request-start', 'cache-lookup', 'parse-result', 'request-failure',
-    'check-skipped', 'analysis-skip', 'analysis-start', 'cache-hit', 'cache-miss', 'response',
+    'check-skipped', 'analysis-skip', 'analysis-start', 'stale-result', 'cache-hit', 'cache-miss', 'response',
     'analysis-complete', 'badge-show', 'cancel', 'queue-skip', 'queue-enqueue',
     'queue-cancel-pending', 'queue-finish', 'dom-remove', 'src-mutation',
 ]);
@@ -32,7 +32,7 @@ const SAFE_CACHE_STATES = Object.freeze([
     'miss', 'hit-positive', 'hit-empty', 'hit-legacy-empty', 'legacy-empty-reparse',
 ]);
 const SAFE_ANALYSIS_OUTCOMES = Object.freeze([
-    'resolved', 'confirmed-empty', 'unresolved', 'resource-limit', 'failure', 'cancelled',
+    'resolved', 'confirmed-empty', 'unresolved', 'resource-limit', 'failure', 'cancelled', 'source-changed',
 ]);
 const SAFE_DEBUG_REASONS = Object.freeze([
     'processed-marker', 'viewport-exit', 'dom-removed', 'src-change',
@@ -806,6 +806,7 @@ const FULL_FETCH_SIZE_LIMIT = 2 * 1024 * 1024; // 2MiB
 const BODYLESS_PNG_FALLBACK_LIMIT = 16 * 1024 * 1024; // 16MiB
 const FILE_BODYLESS_FALLBACK_LIMIT = 16 * 1024 * 1024; // 16MiB
 const RANGE_REQUEST_TIMEOUT_MS = 10000; // Range取得の本文読み込みを含むタイムアウト
+const FULL_FETCH_HEADERS_TIMEOUT_MS = 10000; // 全取得のレスポンスヘッダー待ち上限
 const HTTP_OK_STATUS = 200;
 const HTTP_PARTIAL_CONTENT_STATUS = 206;
 
@@ -3162,15 +3163,66 @@ async function handleFetchImageMetadata(imageUrl) {
         };
 
         /**
+         * 全取得のヘッダー待ちを制限し、応答本文の読取中は親のAbortSignalを維持する。
+         * @param {string} url - 取得URL
+         * @param {AbortSignal|null} signal - 親解析のAbortSignal
+         * @param {Function} consumeResponse - responseと合成signalを受け取る本文処理
+         * @returns {Promise<*>} - 本文処理の結果
+         */
+        const withFullFetchHeadersTimeout = async (url, signal, consumeResponse) => {
+            const controller = new AbortController();
+            let timedOut = false;
+            let timeoutId = null;
+            const abortFromAnalysis = () => controller.abort();
+            const createHeadersTimeoutError = () => {
+                const error = new Error(`Full fetch response headers timed out after ${FULL_FETCH_HEADERS_TIMEOUT_MS}ms.`);
+                error.name = 'TimeoutError';
+                return error;
+            };
+
+            if (signal?.aborted) throw createAnalysisAbortError();
+            if (signal) signal.addEventListener('abort', abortFromAnalysis, { once: true });
+            timeoutId = setTimeout(() => {
+                timedOut = true;
+                controller.abort();
+            }, FULL_FETCH_HEADERS_TIMEOUT_MS);
+
+            try {
+                let response;
+                try {
+                    response = await fetch(url, { redirect: 'follow', signal: controller.signal });
+                } catch (error) {
+                    if (signal?.aborted) throw createAnalysisAbortError();
+                    if (timedOut) throw createHeadersTimeoutError();
+                    throw error;
+                }
+                if (signal?.aborted) throw createAnalysisAbortError();
+                if (timedOut) throw createHeadersTimeoutError();
+                clearTimeout(timeoutId);
+                timeoutId = null;
+                return await consumeResponse(response, controller.signal);
+            } finally {
+                if (timeoutId !== null) clearTimeout(timeoutId);
+                if (signal) signal.removeEventListener('abort', abortFromAnalysis);
+            }
+        };
+
+        /**
          * 初期取得用の全取得 Fetch。PNGはstreamで受け取れる。
          * @param {string} url - 取得URL
          * @returns {Promise<Object>} - readResponseForMetadata の結果
          */
-        const safeFetchFullInput = async (url, signal = null) => {
-            const response = await fetch(url, { redirect: 'follow', signal });
-            if (response.status !== HTTP_OK_STATUS) throw new Error(`HTTP ${response.status}`);
-            return readResponseForMetadata(response, { allowPngStream: true, signal });
-        };
+        const safeFetchFullInput = (url, signal = null) => withFullFetchHeadersTimeout(
+            url,
+            signal,
+            (response, requestSignal) => {
+                if (response.status !== HTTP_OK_STATUS) throw new Error(`HTTP ${response.status}`);
+                return readResponseForMetadata(response, {
+                    allowPngStream: true,
+                    signal: requestSignal,
+                });
+            }
+        );
 
         /**
          * 非PNG経路の再試行用の全取得 Fetch。buffer だけを返す。
@@ -3179,17 +3231,23 @@ async function handleFetchImageMetadata(imageUrl) {
          * @param {string} url - 取得URL
          * @returns {Promise<ArrayBuffer>}
          */
-        const safeFetchFull = async (url, signal = null) => {
-            const response = await fetch(url, { redirect: 'follow', signal });
-            if (response.status !== HTTP_OK_STATUS) throw new Error(`HTTP ${response.status}`);
-            const input = await readResponseForMetadata(response, { allowPngStream: false, signal });
-            if (input.kind === 'png-buffer') {
-                throw createRepresentationMismatchError(
-                    new Uint8Array(input.buffer).subarray(0, PNG_SIGNATURE.length)
-                );
+        const safeFetchFull = (url, signal = null) => withFullFetchHeadersTimeout(
+            url,
+            signal,
+            async (response, requestSignal) => {
+                if (response.status !== HTTP_OK_STATUS) throw new Error(`HTTP ${response.status}`);
+                const input = await readResponseForMetadata(response, {
+                    allowPngStream: false,
+                    signal: requestSignal,
+                });
+                if (input.kind === 'png-buffer') {
+                    throw createRepresentationMismatchError(
+                        new Uint8Array(input.buffer).subarray(0, PNG_SIGNATURE.length)
+                    );
+                }
+                return input.buffer;
             }
-            return input.buffer;
-        };
+        );
 
         if (isFileScheme) {
             let fileController = new AbortController();

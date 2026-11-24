@@ -49,12 +49,12 @@ const CONTENT_SAFE_ENUMS = Object.freeze({
         'invalid-png', 'resource-limit', 'scanner-failure', 'cancelled', 'unknown',
     ]),
     event: Object.freeze([
-        'check-skipped', 'analysis-skip', 'analysis-start', 'cache-hit', 'cache-miss', 'request-start',
+        'check-skipped', 'analysis-skip', 'analysis-start', 'stale-result', 'cache-hit', 'cache-miss', 'request-start',
         'response', 'analysis-complete', 'badge-show', 'cancel', 'queue-skip',
         'queue-enqueue', 'queue-cancel-pending', 'queue-finish', 'dom-remove', 'src-mutation',
     ]),
     cacheState: Object.freeze(['hit-positive', 'hit-empty', 'hit-legacy-empty', 'miss']),
-    analysisOutcome: Object.freeze(['resolved', 'confirmed-empty', 'unresolved', 'failure', 'cancelled']),
+    analysisOutcome: Object.freeze(['resolved', 'confirmed-empty', 'unresolved', 'failure', 'cancelled', 'source-changed']),
     reason: Object.freeze([
         'processed-marker', 'viewport-exit', 'dom-removed', 'src-change',
         'request-active', 'request-inactive', 'already-running', 'already-pending', 'queue-overflow',
@@ -357,11 +357,21 @@ function init() {
 // 注意: scanner/core.js に同名の localMetadataCache が存在するため、
 // content.js 側は contentMetadataCache として区別する
 const contentMetadataCache = new Map();
+const imageSourceRechecks = new WeakSet();
+const imageAnalyzingBadgeStates = new WeakMap();
 const ANALYZING_BADGE_DELAY_MS = 200;
 const imageDiagnosticIds = new WeakMap();
 const imageAnalysisRunIds = new WeakMap();
 let nextImageDiagnosticId = 0;
 let nextImageAnalysisRunId = 0;
+
+function clearImageAnalyzingBadge(img, expectedRunId = null) {
+    const state = imageAnalyzingBadgeStates.get(img);
+    if (!state || (expectedRunId !== null && state.runId !== expectedRunId)) return;
+    if (state.timer !== null) clearTimeout(state.timer);
+    if (state.badge) removeAnalyzingBadge(state.badge);
+    imageAnalyzingBadgeStates.delete(img);
+}
 
 function getImageDiagnosticId(img) {
     if (!imageDiagnosticIds.has(img)) {
@@ -515,6 +525,13 @@ async function checkImageMetadata(img, requestOptions = {}) {
         debugLog('[AI Meta Viewer] No src, skipping');
         return;
     }
+    const srcAttributeAtStart = img.getAttribute('src');
+    const srcsetAttributeAtStart = img.getAttribute('srcset');
+    const currentSrcAtStart = img.currentSrc || src;
+    const hasSourceChanged = () => img.src !== src ||
+        img.getAttribute('src') !== srcAttributeAtStart ||
+        img.getAttribute('srcset') !== srcsetAttributeAtStart ||
+        (img.currentSrc || img.src) !== currentSrcAtStart;
 
     // ターゲットURLの解決
     let targetUrl = src;
@@ -614,15 +631,15 @@ async function checkImageMetadata(img, requestOptions = {}) {
         shouldShowBadge = true;
     }
 
-    let analyzingBadge = null;
-    let analyzingBadgeTimer = null;
+    const analyzingBadgeState = { runId, badge: null, timer: null };
     const scheduleAnalyzingBadge = () => {
-        if (analyzingBadge || analyzingBadgeTimer !== null || !shouldShowBadge || !settings.showAnalyzingBadge) return;
-        analyzingBadgeTimer = setTimeout(() => {
-            analyzingBadgeTimer = null;
-            if (cancelledAnalyses.has(img) || imageAnalysisRunIds.get(img) !== runId) return;
+        if (analyzingBadgeState.badge || analyzingBadgeState.timer !== null || !shouldShowBadge || !settings.showAnalyzingBadge) return;
+        imageAnalyzingBadgeStates.set(img, analyzingBadgeState);
+        analyzingBadgeState.timer = setTimeout(() => {
+            analyzingBadgeState.timer = null;
+            if (cancelledAnalyses.has(img) || imageAnalysisRunIds.get(img) !== runId || hasSourceChanged()) return;
             logImageDiagnostic('badge-show', img);
-            analyzingBadge = addAnalyzingBadge(img);
+            analyzingBadgeState.badge = addAnalyzingBadge(img);
         }, ANALYZING_BADGE_DELAY_MS);
     };
 
@@ -772,6 +789,27 @@ async function checkImageMetadata(img, requestOptions = {}) {
             return;
         }
 
+        // Aの取得結果はURLキャッシュへ残し、再利用要素のBには表示しない。
+        // キュー完了後にIntersectionObserverを張り直して、現在のsourceを解析する。
+        if (hasSourceChanged()) {
+            analysisOutcome = 'source-changed';
+            const isCurrentRun = imageAnalysisRunIds.get(img) === runId;
+            if (isCurrentRun) {
+                processedImages.delete(img);
+                clearImageAnalyzingBadge(img, runId);
+                removeBadge(img);
+                if (viewportAnalysisQueue.running.has(img)) imageSourceRechecks.add(img);
+            }
+            logImageDiagnostic('stale-result', img, {
+                runId,
+                reason: 'src-change',
+                sameSrc: false,
+                processed: processedImages.has(img),
+                activeRequest: activeImageRequests.has(img),
+            });
+            return;
+        }
+
         if (analysisOutcome !== 'resolved' && failureResponse) {
             analysisOutcome = 'failure';
             if (failureResponse.transient !== true) {
@@ -852,23 +890,19 @@ async function checkImageMetadata(img, requestOptions = {}) {
             // 必要に応じてトースト通知などを実装
         }
     } finally {
-        if (analyzingBadgeTimer !== null) {
-            clearTimeout(analyzingBadgeTimer);
-            analyzingBadgeTimer = null;
-        }
-        if (analyzingBadge) {
-            removeAnalyzingBadge(analyzingBadge);
-        }
-        if (analysisOutcome !== 'resolved' && analysisOutcome !== 'confirmed-empty') {
-            // failure/unresolved/cancel は成功 marker を残さず再試行可能にする。
-            processedImages.delete(img);
+        clearImageAnalyzingBadge(img, runId);
+        if (imageAnalysisRunIds.get(img) === runId) {
+            if (analysisOutcome !== 'resolved' && analysisOutcome !== 'confirmed-empty') {
+                // failure/unresolved/cancel は成功 marker を残さず再試行可能にする。
+                processedImages.delete(img);
+            }
+            clearActiveAnalysis(img);
         }
         logImageDiagnostic('analysis-complete', img, {
             analysisOutcome: analysisOutcome || 'failure',
             processed: processedImages.has(img),
             activeRequest: activeImageRequests.has(img),
         });
-        clearActiveAnalysis(img);
     }
 }
 
@@ -1521,6 +1555,8 @@ const viewportAnalysisQueue = {
             })
             .finally(() => {
                 this.running.delete(img);
+                const sourceChangedDuringAnalysis = imageSourceRechecks.has(img);
+                imageSourceRechecks.delete(img);
                 logImageDiagnostic('queue-finish', img, {
                     processed: processedImages.has(img),
                     activeRequest: activeImageRequests.has(img),
@@ -1530,8 +1566,13 @@ const viewportAnalysisQueue = {
                 // 解析が確定した画像だけ監視を解除する。
                 // 未確定(サイズ未定などで processedImages から外れた)ものは
                 // 再度 viewport 判定を受けられるように監視を維持する。
-                if (this.observer && processedImages.has(img)) {
-                    this.observer.unobserve(img);
+                if (this.observer && img.isConnected) {
+                    if (sourceChangedDuringAnalysis) {
+                        this.observer.unobserve(img);
+                        this.observer.observe(img);
+                    } else if (processedImages.has(img)) {
+                        this.observer.unobserve(img);
+                    }
                 }
                 this.drain();
             });
@@ -1651,16 +1692,25 @@ function observeImages() {
             if (mutation.type === 'attributes') {
                 const target = mutation.target;
                 if (target.tagName === 'IMG') {
-                    if (mutation.attributeName === 'src') {
+                    if (['src', 'srcset'].includes(mutation.attributeName)) {
+                        const sameSrc = mutation.oldValue === target.getAttribute(mutation.attributeName);
                         logImageDiagnostic('src-mutation', target, {
                             reason: 'src-change',
-                            sameSrc: mutation.oldValue === target.getAttribute('src'),
+                            sameSrc,
                             processed: processedImages.has(target),
                             activeRequest: activeImageRequests.has(target),
                             running: viewportAnalysisQueue.running.has(target),
                         });
-                        removeBadge(target);
-                        pendingNodes.add(target);
+                        if (!sameSrc) {
+                            clearImageAnalyzingBadge(target);
+                            removeBadge(target);
+                            processedImages.delete(target);
+                            if (viewportAnalysisQueue.running.has(target)) {
+                                imageSourceRechecks.add(target);
+                            }
+                            intersectionObserver.unobserve(target);
+                            pendingNodes.add(target);
+                        }
                     } else if (['style', 'class', 'width', 'height', 'transform'].includes(mutation.attributeName)) {
                         const data = processedImages.get(target);
                         if (data && data.updatePosition) {
@@ -1707,7 +1757,7 @@ function observeImages() {
             subtree: true,
             attributes: true,
             attributeOldValue: true,
-            attributeFilter: ['src', 'style', 'class', 'width', 'height', 'transform']
+            attributeFilter: ['src', 'srcset', 'style', 'class', 'width', 'height', 'transform']
         });
 
         // 初期ロード時の処理
