@@ -47,7 +47,7 @@ window.SiteAdapters = [
 
             // 3. サムネイル画像からオリジナル URL への変換
             // media.discordapp.net/attachments/... -> cdn.discordapp.com/attachments/...
-            const src = img.src || img.currentSrc;
+            const src = img.currentSrc || img.src;
             if (src && src.includes('media.discordapp.net/attachments/')) {
                 try {
                     // サムネイル URL の例:
@@ -100,7 +100,7 @@ window.SiteAdapters = [
         match: () => window.location.hostname.includes('pixiv.net'),
         isAnalysisExcluded: (img) => {
             const parentLink = img.closest('a');
-            return isPixivGifUrl(img.src || img.currentSrc) ||
+            return isPixivGifUrl(img.currentSrc || img.src) ||
                 isPixivGifUrl(parentLink?.href);
         },
         resolve: (img) => {
@@ -112,7 +112,7 @@ window.SiteAdapters = [
             }
 
             // 2. サムネイルからオリジナルURLを推測
-            const src = img.src || img.currentSrc;
+            const src = img.currentSrc || img.src;
             if (src.includes('i.pximg.net') && (src.includes('img-master') || src.includes('custom-thumb'))) {
                 try {
                     const url = new URL(src);
@@ -219,7 +219,7 @@ window.SiteAdapters = [
     {
         match: () => window.location.hostname.includes('civitai.com') || document.title.includes('Civitai'),
         resolve: (img) => {
-            const src = img.src || img.currentSrc;
+            const src = img.currentSrc || img.src;
 
             // 1. image.civitai.com (プロキシ/サムネイル用ドメイン) の処理
             if (src.includes('image.civitai.com')) {

@@ -48,6 +48,19 @@ const CONTENT_SAFE_ENUMS = Object.freeze({
         'detected', 'empty', 'failed', 'skipped', 'complete', 'not-found',
         'invalid-png', 'resource-limit', 'scanner-failure', 'cancelled', 'unknown',
     ]),
+    event: Object.freeze([
+        'check-skipped', 'analysis-skip', 'analysis-start', 'stale-result', 'cache-hit', 'cache-miss', 'request-start',
+        'response', 'analysis-complete', 'badge-show', 'cancel', 'queue-skip',
+        'queue-enqueue', 'queue-cancel-pending', 'queue-finish', 'dom-remove', 'src-mutation',
+        'source-selection-change',
+    ]),
+    cacheState: Object.freeze(['hit-positive', 'hit-empty', 'hit-legacy-empty', 'miss']),
+    analysisOutcome: Object.freeze(['resolved', 'confirmed-empty', 'unresolved', 'failure', 'cancelled', 'source-changed']),
+    reason: Object.freeze([
+        'processed-marker', 'viewport-exit', 'dom-removed', 'src-change', 'source-selection',
+        'request-active', 'request-inactive', 'already-running', 'already-pending', 'queue-overflow',
+        'context-invalid', 'no-src', 'site-excluded', 'too-small',
+    ]),
     scheme: Object.freeze(['file', 'http', 'https'])
 });
 
@@ -98,7 +111,13 @@ function setSafeContentField(diagnostic, key, value) {
         diagnostic[key] = value;
     } else if (key === 'status' && Number.isInteger(value) && value >= 100 && value <= 599) {
         diagnostic.status = value;
-    } else if ((key === 'bodyPresent' || key === 'retryable') && typeof value === 'boolean') {
+    } else if (key === 'urlId' && typeof value === 'string' && /^[a-f0-9]{16}$/.test(value)) {
+        diagnostic.urlId = value;
+    } else if (['imageId', 'runId', 'candidateIndex', 'imageIndex', 'width', 'height'].includes(key) &&
+        Number.isSafeInteger(value) && value >= 0) {
+        diagnostic[key] = value;
+    } else if (['bodyPresent', 'retryable', 'processed', 'activeRequest', 'sameSrc', 'running', 'cancelled'].includes(key) &&
+        typeof value === 'boolean') {
         diagnostic[key] = value;
     }
 }
@@ -167,7 +186,11 @@ function toSafeContentDiagnostic(args) {
                 else if (protocol === 'http:') diagnostic.scheme = 'http';
                 else if (protocol === 'https:') diagnostic.scheme = 'https';
             } else {
-                for (const key of ['category', 'phase', 'errorType', 'status', 'bodyPresent', 'scannerStatus', 'retryable', 'scheme']) {
+                for (const key of [
+                    'category', 'phase', 'errorType', 'status', 'bodyPresent', 'scannerStatus', 'retryable', 'scheme',
+                    'event', 'cacheState', 'analysisOutcome', 'reason', 'urlId', 'imageId', 'runId',
+                    'candidateIndex', 'imageIndex', 'width', 'height', 'processed', 'activeRequest', 'sameSrc', 'running', 'cancelled',
+                ]) {
                     setSafeContentField(diagnostic, key, readSafeContentProperty(value, key));
                 }
             }
@@ -182,7 +205,11 @@ function toSafeContentDiagnostic(args) {
 
 function formatSafeContentDiagnostic(diagnostic) {
     const fields = [];
-    for (const key of ['category', 'phase', 'errorType', 'status', 'bodyPresent', 'scannerStatus', 'retryable', 'scheme']) {
+    for (const key of [
+        'category', 'phase', 'event', 'imageId', 'runId', 'imageIndex', 'candidateIndex', 'urlId',
+        'cacheState', 'analysisOutcome', 'reason', 'activeRequest', 'processed', 'running', 'sameSrc',
+        'width', 'height', 'cancelled', 'errorType', 'status', 'bodyPresent', 'scannerStatus', 'retryable', 'scheme',
+    ]) {
         if (diagnostic[key] !== undefined) fields.push(`${key}=${diagnostic[key]}`);
     }
     fields.push(`redacted=${diagnostic.redacted === true}`);
@@ -331,6 +358,86 @@ function init() {
 // 注意: scanner/core.js に同名の localMetadataCache が存在するため、
 // content.js 側は contentMetadataCache として区別する
 const contentMetadataCache = new Map();
+const imageSourceRechecks = new WeakSet();
+const imageAnalyzingBadgeStates = new WeakMap();
+// 処理済みマーカーがどのcurrentSrcに対するものか記録する。
+const imageAnalyzedSources = new WeakMap();
+let sourceSelectionListenersRegistered = false;
+const ANALYZING_BADGE_DELAY_MS = 200;
+const imageDiagnosticIds = new WeakMap();
+const imageAnalysisRunIds = new WeakMap();
+let nextImageDiagnosticId = 0;
+let nextImageAnalysisRunId = 0;
+
+function clearImageAnalyzingBadge(img, expectedRunId = null) {
+    const state = imageAnalyzingBadgeStates.get(img);
+    if (!state || (expectedRunId !== null && state.runId !== expectedRunId)) return;
+    if (state.timer !== null) clearTimeout(state.timer);
+    if (state.badge) removeAnalyzingBadge(state.badge);
+    imageAnalyzingBadgeStates.delete(img);
+}
+
+function getCurrentImageSource(img) {
+    return img.currentSrc || img.src;
+}
+
+function getImageDiagnosticId(img) {
+    if (!imageDiagnosticIds.has(img)) {
+        nextImageDiagnosticId += 1;
+        imageDiagnosticIds.set(img, nextImageDiagnosticId);
+    }
+    return imageDiagnosticIds.get(img);
+}
+
+function beginImageAnalysisRun(img) {
+    nextImageAnalysisRunId += 1;
+    imageAnalysisRunIds.set(img, nextImageAnalysisRunId);
+    return nextImageAnalysisRunId;
+}
+
+function getSafeUrlId(url) {
+    if (typeof url !== 'string' || url.length === 0) return undefined;
+    let hashA = 2166136261;
+    let hashB = 0x9e3779b9;
+    for (let i = 0; i < url.length; i += 1) {
+        const code = url.charCodeAt(i);
+        hashA = Math.imul(hashA ^ code, 16777619);
+        hashB = Math.imul(hashB ^ code, 2246822519);
+    }
+    return `${(hashA >>> 0).toString(16).padStart(8, '0')}${(hashB >>> 0).toString(16).padStart(8, '0')}`;
+}
+
+function logImageDiagnostic(event, img, details = {}) {
+    if (window.settings?.debugMode !== true || !img) return;
+    const imageIndex = Array.prototype.indexOf.call(document.images, img);
+    const diagnostic = {
+        category: 'scanner',
+        phase: 'content',
+        event,
+        imageId: getImageDiagnosticId(img),
+        ...(imageAnalysisRunIds.has(img) ? { runId: imageAnalysisRunIds.get(img) } : {}),
+        ...(imageIndex >= 0 ? { imageIndex } : {}),
+        urlId: getSafeUrlId(img.currentSrc || img.src),
+        ...(Number.isSafeInteger(img.naturalWidth) ? { width: img.naturalWidth } : {}),
+        ...(Number.isSafeInteger(img.naturalHeight) ? { height: img.naturalHeight } : {}),
+        ...details,
+    };
+    debugLog(diagnostic);
+
+    // Service Worker の DevTools から content script の画像処理も追えるようにする。
+    // background 側でも allowlist による再検査を行い、URLや任意文字列は転送しない。
+    try {
+        const pendingMessage = browserAPI.runtime.sendMessage({
+            action: 'contentDiagnostic',
+            diagnostic,
+        });
+        if (pendingMessage && typeof pendingMessage.catch === 'function') {
+            pendingMessage.catch(() => {});
+        }
+    } catch (_) {
+        // 診断ログの転送失敗は画像解析に影響させない。
+    }
+}
 
 // --- サイト別アダプター (互換性のためグローバルな SiteAdapters を使用) ---
 // adapters.js に分離されました。
@@ -340,6 +447,7 @@ const contentMetadataCache = new Map();
  * @type {WeakMap<HTMLImageElement, string>}
  */
 const activeAnalysisUrls = new WeakMap();
+const activeImageRequests = new WeakSet();
 
 /**
  * 取り消し済み画像。URL候補の順次試行を打ち切るために使う。
@@ -357,11 +465,22 @@ const cancelNotificationsSent = new WeakSet();
  * 実行中の解析を background へ取り消し通知する
  * @param {HTMLImageElement} img - 対象画像
  */
-function cancelActiveAnalysis(img) {
+function cancelActiveAnalysis(img, reason = 'viewport-exit') {
+    const url = activeAnalysisUrls.get(img);
+    const activeRequest = activeImageRequests.has(img);
+    logImageDiagnostic('cancel', img, {
+        reason,
+        activeRequest,
+        processed: processedImages.has(img),
+        ...(url ? { urlId: getSafeUrlId(url) } : {}),
+    });
+    // viewport退出時に応答待ちでない処理まで無効化すると、完了結果を捨てて再解析を招く。
+    // 実リクエストがない場合は状態を変えず、DOM削除時の後始末は呼び出し元に任せる。
+    if (!activeRequest || !url) return;
     cancelledAnalyses.add(img);
     // 取り消し直後から再度viewport判定を受けられるようmarkerを除去する。
     processedImages.delete(img);
-    const url = activeAnalysisUrls.get(img);
+    imageAnalyzedSources.delete(img);
     if (!url || cancelNotificationsSent.has(img)) return;
     cancelNotificationsSent.add(img);
     debugLog('[AI Meta Viewer] Cancelling in-flight analysis:', url.substring(0, 80));
@@ -388,10 +507,12 @@ function clearActiveAnalysis(img) {
  */
 async function checkImageMetadata(img, requestOptions = {}) {
     const fetchAction = requestOptions.action || 'fetchImageMetadata';
-    debugLog('[AI Meta Viewer] checkImageMetadata() called for:', img.src);
+    const getImageSource = () => getCurrentImageSource(img);
+    debugLog('[AI Meta Viewer] checkImageMetadata() called for:', getImageSource());
 
     // 拡張機能のコンテキストが無効化されている場合は処理を停止
     if (!isExtensionContextValid()) {
+        logImageDiagnostic('analysis-skip', img, { reason: 'context-invalid' });
         debugLog({ category: 'message', phase: 'content', errorType: 'unknown', retryable: false });
         return;
     }
@@ -401,17 +522,24 @@ async function checkImageMetadata(img, requestOptions = {}) {
 
     // 重複チェック
     if (processedImages.has(img)) {
-        debugLog(`[AI Meta Viewer] Image already processed, skipping: ${img.src.substring(0, 60)}...`);
+        logImageDiagnostic('check-skipped', img, { reason: 'processed-marker', processed: true });
+        debugLog(`[AI Meta Viewer] Image already processed, skipping: ${getImageSource().substring(0, 60)}...`);
         return;
     }
 
-    debugLog(`[AI Meta Viewer] checkImageMetadata called for: ${img.src.substring(0, 60)}...`);
+    debugLog(`[AI Meta Viewer] checkImageMetadata called for: ${getImageSource().substring(0, 60)}...`);
 
-    const src = img.src;
+    const src = getImageSource();
     if (!src) {
+        logImageDiagnostic('analysis-skip', img, { reason: 'no-src' });
         debugLog('[AI Meta Viewer] No src, skipping');
         return;
     }
+    const srcAttributeAtStart = img.getAttribute('src');
+    const srcsetAttributeAtStart = img.getAttribute('srcset');
+    const hasSourceChanged = () => getImageSource() !== src ||
+        img.getAttribute('src') !== srcAttributeAtStart ||
+        img.getAttribute('srcset') !== srcsetAttributeAtStart;
 
     // ターゲットURLの解決
     let targetUrl = src;
@@ -421,7 +549,8 @@ async function checkImageMetadata(img, requestOptions = {}) {
     for (const adapter of SiteAdapters) {
         if (adapter.match()) {
             if (adapter.isAnalysisExcluded?.(img)) {
-                debugLog('[AI Meta Viewer] Image is excluded by site adapter:', img.src.substring(0, 80));
+                logImageDiagnostic('analysis-skip', img, { reason: 'site-excluded' });
+                debugLog('[AI Meta Viewer] Image is excluded by site adapter:', src.substring(0, 80));
                 return;
             }
             const resolvedUrl = adapter.resolve(img);
@@ -429,7 +558,7 @@ async function checkImageMetadata(img, requestOptions = {}) {
                 targetUrl = resolvedUrl;
                 isLinkedImage = true;
                 debugLog('[AI Meta Viewer] Adapter resolved URL:', {
-                    originalSrc: img.src.substring(0, 80),
+                    originalSrc: src.substring(0, 80),
                     resolvedUrl: Array.isArray(resolvedUrl) ? resolvedUrl.map(u => u.substring(0, 80)) : resolvedUrl.substring(0, 80)
                 });
                 break; // 最初に見つかったものを採用
@@ -438,7 +567,7 @@ async function checkImageMetadata(img, requestOptions = {}) {
     }
 
     if (!isLinkedImage) {
-        debugLog('[AI Meta Viewer] No adapter resolved URL for:', img.src.substring(0, 80));
+        debugLog('[AI Meta Viewer] No adapter resolved URL for:', src.substring(0, 80));
     }
 
     // サイズチェック
@@ -482,8 +611,9 @@ async function checkImageMetadata(img, requestOptions = {}) {
     }
 
     if (isTooSmall) {
+        logImageDiagnostic('analysis-skip', img, { reason: 'too-small' });
         debugLog('[AI Meta Viewer] Image too small, skipping:', {
-            src: img.src.substring(0, 80),
+            src: src.substring(0, 80),
             actualWidth,
             actualHeight,
             pixelCount,
@@ -491,13 +621,17 @@ async function checkImageMetadata(img, requestOptions = {}) {
         });
         // 処理済みフラグを削除（画像読み込み後にサイズが確定してから再試行させるため）
         processedImages.delete(img);
+        imageAnalyzedSources.delete(img);
         return;
     }
 
     // 処理済みフラグを立てる（重複チェック防止）
     // 注意: 処理中であることを示すマーカーを設定
     // 実際のバッジデータは addBadgeToImage() で設定される
+    imageAnalyzedSources.delete(img);
     processedImages.set(img, null);
+    const runId = beginImageAnalysisRun(img);
+    logImageDiagnostic('analysis-start', img, { runId, processed: true });
 
     // Pixivまたはローカルファイル、または全サイト設定が有効な場合、解析中バッジを表示
     const isLocalFile = targetUrl && (Array.isArray(targetUrl) ? targetUrl[0] : targetUrl).startsWith('file://');
@@ -507,10 +641,17 @@ async function checkImageMetadata(img, requestOptions = {}) {
         shouldShowBadge = true;
     }
 
-    let analyzingBadge = null;
-    if (shouldShowBadge && settings.showAnalyzingBadge) {
-        analyzingBadge = addAnalyzingBadge(img);
-    }
+    const analyzingBadgeState = { runId, badge: null, timer: null };
+    const scheduleAnalyzingBadge = () => {
+        if (analyzingBadgeState.badge || analyzingBadgeState.timer !== null || !shouldShowBadge || !settings.showAnalyzingBadge) return;
+        imageAnalyzingBadgeStates.set(img, analyzingBadgeState);
+        analyzingBadgeState.timer = setTimeout(() => {
+            analyzingBadgeState.timer = null;
+            if (cancelledAnalyses.has(img) || imageAnalysisRunIds.get(img) !== runId || hasSourceChanged()) return;
+            logImageDiagnostic('badge-show', img);
+            analyzingBadgeState.badge = addAnalyzingBadge(img);
+        }, ANALYZING_BADGE_DELAY_MS);
+    };
 
     let analysisOutcome = null;
     let metadata = null;
@@ -544,10 +685,11 @@ async function checkImageMetadata(img, requestOptions = {}) {
         // targetUrl が配列の場合（Pixivのサムネイルなど）、順次試行
         const urlsToTry = Array.isArray(targetUrl) ? targetUrl : [targetUrl];
 
-        for (const url of urlsToTry) {
+        for (const [candidateIndex, url] of urlsToTry.entries()) {
             // 画面外へ出て取り消された場合は残りの候補を試行しない
             if (cancelledAnalyses.has(img)) {
                 debugLog('[AI Meta Viewer] Analysis cancelled, stopping candidate loop:', url.substring(0, 80));
+                analysisOutcome = 'cancelled';
                 failureResponse = { success: false, diagnostics: { category: 'cancelled', phase: 'content' } };
                 break;
             }
@@ -555,6 +697,13 @@ async function checkImageMetadata(img, requestOptions = {}) {
             // キャッシュチェック
             if (contentMetadataCache.has(url)) {
                 const cachedMetadata = contentMetadataCache.get(url);
+                logImageDiagnostic('cache-hit', img, {
+                    candidateIndex,
+                    urlId: getSafeUrlId(url),
+                    cacheState: cachedMetadata && Object.keys(cachedMetadata).length > 0
+                        ? 'hit-positive'
+                        : 'hit-empty',
+                });
                 if (cachedMetadata && Object.keys(cachedMetadata).length > 0) {
                     metadata = cachedMetadata;
                     successUrl = url;
@@ -563,6 +712,11 @@ async function checkImageMetadata(img, requestOptions = {}) {
                 }
                 continue;
             }
+            logImageDiagnostic('cache-miss', img, {
+                candidateIndex,
+                urlId: getSafeUrlId(url),
+                cacheState: 'miss',
+            });
 
             // メッセージペイロードの準備
             // 優先度は action で表現し、fetchImageMetadata の契約へ項目を追加しない
@@ -582,9 +736,24 @@ async function checkImageMetadata(img, requestOptions = {}) {
             try {
                 // 取り消し通知で対象URLを特定できるよう登録しておく
                 activeAnalysisUrls.set(img, url);
+                activeImageRequests.add(img);
+                // background の永続キャッシュヒットで短時間に返る場合は、Analyzingを表示しない。
+                scheduleAnalyzingBadge();
+                logImageDiagnostic('request-start', img, {
+                    candidateIndex,
+                    urlId: getSafeUrlId(url),
+                    activeRequest: true,
+                });
                 const response = await sendMessageToBrave(message);
+                activeImageRequests.delete(img);
 
                 const responseState = classifyResponse(response);
+                logImageDiagnostic('response', img, {
+                    candidateIndex,
+                    urlId: getSafeUrlId(url),
+                    analysisOutcome: responseState,
+                    activeRequest: false,
+                });
                 if (responseState === 'resolved') {
                     metadata = response.metadata;
                     contentMetadataCache.set(url, metadata);
@@ -594,6 +763,7 @@ async function checkImageMetadata(img, requestOptions = {}) {
                 }
                 if (responseState === 'confirmed-empty') {
                     // 完了確認済みの空結果だけを候補の empty として扱う。
+                    contentMetadataCache.set(url, {});
                     analysisOutcome = 'confirmed-empty';
                     continue;
                 }
@@ -607,6 +777,7 @@ async function checkImageMetadata(img, requestOptions = {}) {
                         diagnostics: { category: 'response-contract', phase: 'content' }
                     };
             } catch (e) {
+                activeImageRequests.delete(img);
                 const isTransientMessageFailure = isTransientExtensionContextError(e);
                 failureResponse = {
                     success: false,
@@ -621,6 +792,32 @@ async function checkImageMetadata(img, requestOptions = {}) {
                 // 拡張機能切断時は候補URLを続けて試行せず、失敗として終了する。
                 if (isTransientMessageFailure) break;
             }
+        }
+
+        if (cancelledAnalyses.has(img)) {
+            analysisOutcome = 'cancelled';
+            return;
+        }
+
+        // Aの取得結果はURLキャッシュへ残し、再利用要素のBには表示しない。
+        // キュー完了後にIntersectionObserverを張り直して、現在のsourceを解析する。
+        if (hasSourceChanged()) {
+            analysisOutcome = 'source-changed';
+            const isCurrentRun = imageAnalysisRunIds.get(img) === runId;
+            if (isCurrentRun) {
+                processedImages.delete(img);
+                clearImageAnalyzingBadge(img, runId);
+                removeBadge(img);
+                if (viewportAnalysisQueue.running.has(img)) imageSourceRechecks.add(img);
+            }
+            logImageDiagnostic('stale-result', img, {
+                runId,
+                reason: 'src-change',
+                sameSrc: false,
+                processed: processedImages.has(img),
+                activeRequest: activeImageRequests.has(img),
+            });
+            return;
         }
 
         if (analysisOutcome !== 'resolved' && failureResponse) {
@@ -638,7 +835,7 @@ async function checkImageMetadata(img, requestOptions = {}) {
         // 取り消し後に到着した応答を結果として確定させない。
         // cancelActiveAnalysis() がmarkerを削除しているため、再表示時に再解析できる。
         if (cancelledAnalyses.has(img)) {
-            analysisOutcome = 'failure';
+            analysisOutcome = 'cancelled';
             return;
         }
 
@@ -675,11 +872,11 @@ async function checkImageMetadata(img, requestOptions = {}) {
             }
 
             // バッジを追加
-            addBadgeToImage(img, metadata, successUrl || img.src);
+            addBadgeToImage(img, metadata, successUrl || src);
         } else {
             // confirmed-emptyだけを通常のメタデータなし経路へ渡す。
             debugLog('[AI Meta Viewer] No metadata found, removing badge if exists:', {
-                src: img.src.substring(0, 80),
+                src: src.substring(0, 80),
                 targetUrl: Array.isArray(targetUrl) ? targetUrl.map(u => u.substring(0, 80)) : targetUrl.substring(0, 80),
                 urlsToTry: urlsToTry.length
             });
@@ -703,14 +900,22 @@ async function checkImageMetadata(img, requestOptions = {}) {
             // 必要に応じてトースト通知などを実装
         }
     } finally {
-        if (analyzingBadge) {
-            removeAnalyzingBadge(analyzingBadge);
+        clearImageAnalyzingBadge(img, runId);
+        if (imageAnalysisRunIds.get(img) === runId) {
+            if (analysisOutcome !== 'resolved' && analysisOutcome !== 'confirmed-empty') {
+                // failure/unresolved/cancel は成功 marker を残さず再試行可能にする。
+                processedImages.delete(img);
+                imageAnalyzedSources.delete(img);
+            } else if (processedImages.has(img)) {
+                imageAnalyzedSources.set(img, src);
+            }
+            clearActiveAnalysis(img);
         }
-        if (analysisOutcome !== 'resolved' && analysisOutcome !== 'confirmed-empty') {
-            // failure/unresolved/cancel は成功 marker を残さず再試行可能にする。
-            processedImages.delete(img);
-        }
-        clearActiveAnalysis(img);
+        logImageDiagnostic('analysis-complete', img, {
+            analysisOutcome: analysisOutcome || 'failure',
+            processed: processedImages.has(img),
+            activeRequest: activeImageRequests.has(img),
+        });
     }
 }
 
@@ -1168,7 +1373,8 @@ async function checkMetadataForElement(el) {
 // --- viewport 解析キュー ---
 // IntersectionObserver から即座に解析を開始すると、pixiv のような大量サムネイル
 // ページでスクロール中に数十本の全body取得が同時発火する。
-// 停留した画像だけを LIFO で順に解析し、画面外へ出たものは取り消す。
+// 停留した画像だけを LIFO で順に解析し、開始前に画面外へ出たものは取り消す。
+// すでに始まった要求は完了させ、戻ってきたときに同じ画像を再取得しないようにする。
 // 同時実行の最終的な上限は background 側の集約ゲートが保証する。
 // ここでの上限は pending message を無制限に積まないためのものである。
 
@@ -1195,10 +1401,29 @@ const viewportAnalysisQueue = {
      * @param {HTMLImageElement} img - 対象画像
      */
     enqueue(img) {
-        if (this.running.has(img)) return;
-        if (this.pending.has(img)) return;
+        if (this.running.has(img)) {
+            logImageDiagnostic('queue-skip', img, {
+                reason: 'already-running',
+                running: true,
+                processed: processedImages.has(img),
+                activeRequest: activeImageRequests.has(img),
+            });
+            return;
+        }
+        if (this.pending.has(img)) {
+            logImageDiagnostic('queue-skip', img, {
+                reason: 'already-pending',
+                running: false,
+                processed: processedImages.has(img),
+            });
+            return;
+        }
         this.sequence += 1;
         this.pending.set(img, { sequence: this.sequence, hover: false });
+        logImageDiagnostic('queue-enqueue', img, {
+            processed: processedImages.has(img),
+            running: false,
+        });
         this.enforceQueueLimit();
         this.scheduleSettle();
     },
@@ -1238,6 +1463,11 @@ const viewportAnalysisQueue = {
             }
             if (!farthest) return;
             this.pending.delete(farthest);
+            logImageDiagnostic('queue-skip', farthest, {
+                reason: 'queue-overflow',
+                processed: processedImages.has(farthest),
+                running: false,
+            });
             debugLog('[AI Meta Viewer] Analysis queue overflow, dropped farthest image:', {
                 src: (farthest.src || '').substring(0, 80),
                 distance: farthestDistance
@@ -1256,16 +1486,30 @@ const viewportAnalysisQueue = {
 
     /**
      * 画面外へ出た画像の解析を取り消す。
-     * 待機中なら開始せず、実行中なら background へ取り消しを通知する。
+     * 待機中はキューから外し、開始済みの要求は結果をキャッシュするため完了させる。
      * @param {HTMLImageElement} img - 対象画像
      */
-    cancel(img) {
+    cancel(img, reason = 'viewport-exit') {
         if (this.pending.delete(img)) {
-            debugLog('[AI Meta Viewer] Analysis cancelled before start:', (img.src || '').substring(0, 80));
+            logImageDiagnostic('queue-cancel-pending', img, {
+                reason,
+                processed: processedImages.has(img),
+                running: false,
+            });
+            debugLog('[AI Meta Viewer] Analysis cancelled before start:', (img.currentSrc || img.src || '').substring(0, 80));
             return;
         }
         if (!this.running.has(img)) return;
-        cancelActiveAnalysis(img);
+        if (reason === 'viewport-exit') {
+            logImageDiagnostic('queue-skip', img, {
+                reason: activeImageRequests.has(img) ? 'request-active' : 'request-inactive',
+                processed: processedImages.has(img),
+                activeRequest: activeImageRequests.has(img),
+                running: true,
+            });
+            return;
+        }
+        cancelActiveAnalysis(img, reason);
     },
 
     /** 実行枠が空いている間、待機列から新しいものを取り出して開始する */
@@ -1324,12 +1568,24 @@ const viewportAnalysisQueue = {
             })
             .finally(() => {
                 this.running.delete(img);
+                const sourceChangedDuringAnalysis = imageSourceRechecks.has(img);
+                imageSourceRechecks.delete(img);
+                logImageDiagnostic('queue-finish', img, {
+                    processed: processedImages.has(img),
+                    activeRequest: activeImageRequests.has(img),
+                    running: false,
+                });
                 clearActiveAnalysis(img);
                 // 解析が確定した画像だけ監視を解除する。
                 // 未確定(サイズ未定などで processedImages から外れた)ものは
                 // 再度 viewport 判定を受けられるように監視を維持する。
-                if (this.observer && processedImages.has(img)) {
-                    this.observer.unobserve(img);
+                if (this.observer && img.isConnected) {
+                    if (sourceChangedDuringAnalysis) {
+                        this.observer.unobserve(img);
+                        this.observer.observe(img);
+                    } else if (processedImages.has(img)) {
+                        this.observer.unobserve(img);
+                    }
                 }
                 this.drain();
             });
@@ -1359,10 +1615,17 @@ function distanceFromViewportCenter(element) {
 function cleanupRemovedImage(img) {
     viewportAnalysisQueue.observer?.unobserve(img);
     const wasRunning = viewportAnalysisQueue.running.has(img);
-    viewportAnalysisQueue.cancel(img);
-    if (!wasRunning) cancelActiveAnalysis(img);
+    logImageDiagnostic('dom-remove', img, {
+        reason: 'dom-removed',
+        processed: processedImages.has(img),
+        activeRequest: activeImageRequests.has(img),
+        running: wasRunning,
+    });
+    viewportAnalysisQueue.cancel(img, 'dom-removed');
+    if (!wasRunning) cancelActiveAnalysis(img, 'dom-removed');
     removeBadge(img);
     processedImages.delete(img);
+    imageAnalyzedSources.delete(img);
 }
 
 /**
@@ -1384,6 +1647,57 @@ function observeImages() {
         rootMargin: '50px' // 画面外50pxまで先読み
     });
     viewportAnalysisQueue.observer = intersectionObserver;
+
+    const invalidateChangedImageSource = (img) => {
+        const analyzedSource = imageAnalyzedSources.get(img);
+        const currentSource = getCurrentImageSource(img);
+        if (analyzedSource === undefined || analyzedSource === currentSource) return false;
+
+        imageAnalyzedSources.delete(img);
+        clearImageAnalyzingBadge(img);
+        removeBadge(img);
+        processedImages.delete(img);
+
+        const running = viewportAnalysisQueue.running.has(img);
+        if (running) imageSourceRechecks.add(img);
+        const activeObserver = viewportAnalysisQueue.observer;
+        activeObserver?.unobserve(img);
+        if (!running && img.isConnected) activeObserver?.observe(img);
+
+        logImageDiagnostic('source-selection-change', img, {
+            reason: 'source-selection',
+            sameSrc: false,
+            processed: processedImages.has(img),
+            activeRequest: activeImageRequests.has(img),
+            running,
+        });
+        return true;
+    };
+
+    // currentSrc は src/srcset 属性が変わらなくても、viewportやDPRに応じて
+    // 別候補へ切り替わる。load/errorとviewport変更で解析済み画像を照合する。
+    const handleImageResourceChange = (event) => {
+        if (event.target?.tagName === 'IMG') invalidateChangedImageSource(event.target);
+    };
+    if (!sourceSelectionListenersRegistered) {
+        document.addEventListener('load', handleImageResourceChange, true);
+        document.addEventListener('error', handleImageResourceChange, true);
+
+        let sourceSelectionCheckPending = false;
+        const scheduleSourceSelectionCheck = () => {
+            if (sourceSelectionCheckPending || processedImages.size === 0) return;
+            sourceSelectionCheckPending = true;
+            window.requestAnimationFrame(() => {
+                sourceSelectionCheckPending = false;
+                for (const img of processedImages.keys()) {
+                    invalidateChangedImageSource(img);
+                }
+            });
+        };
+        window.addEventListener('resize', scheduleSourceSelectionCheck, { passive: true });
+        window.addEventListener('orientationchange', scheduleSourceSelectionCheck, { passive: true });
+        sourceSelectionListenersRegistered = true;
+    }
 
     // hover された画像は待機列の先頭へ昇格させる
     document.addEventListener('mouseover', (event) => {
@@ -1443,9 +1757,26 @@ function observeImages() {
             if (mutation.type === 'attributes') {
                 const target = mutation.target;
                 if (target.tagName === 'IMG') {
-                    if (mutation.attributeName === 'src') {
-                        removeBadge(target);
-                        pendingNodes.add(target);
+                    if (['src', 'srcset'].includes(mutation.attributeName)) {
+                        const sameSrc = mutation.oldValue === target.getAttribute(mutation.attributeName);
+                        logImageDiagnostic('src-mutation', target, {
+                            reason: 'src-change',
+                            sameSrc,
+                            processed: processedImages.has(target),
+                            activeRequest: activeImageRequests.has(target),
+                            running: viewportAnalysisQueue.running.has(target),
+                        });
+                        if (!sameSrc) {
+                            imageAnalyzedSources.delete(target);
+                            clearImageAnalyzingBadge(target);
+                            removeBadge(target);
+                            processedImages.delete(target);
+                            if (viewportAnalysisQueue.running.has(target)) {
+                                imageSourceRechecks.add(target);
+                            }
+                            intersectionObserver.unobserve(target);
+                            pendingNodes.add(target);
+                        }
                     } else if (['style', 'class', 'width', 'height', 'transform'].includes(mutation.attributeName)) {
                         const data = processedImages.get(target);
                         if (data && data.updatePosition) {
@@ -1491,7 +1822,8 @@ function observeImages() {
             childList: true,
             subtree: true,
             attributes: true,
-            attributeFilter: ['src', 'style', 'class', 'width', 'height', 'transform']
+            attributeOldValue: true,
+            attributeFilter: ['src', 'srcset', 'style', 'class', 'width', 'height', 'transform']
         });
 
         // 初期ロード時の処理
@@ -1536,7 +1868,7 @@ function handleDirectImageView() {
         return;
     }
 
-    debugLog('[AI Meta Viewer] Found img element:', img.src);
+    debugLog('[AI Meta Viewer] Found img element:', img.currentSrc || img.src);
 
     // スタイル調整
     document.body.style.backgroundColor = '#0e0e0e';
@@ -1600,6 +1932,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         let processedImagesSize = 0;
         if (typeof processedImages !== 'undefined') {
             processedImagesSize = processedImages.size;
+            for (const img of processedImages.keys()) imageAnalyzedSources.delete(img);
             processedImages.clear();
         }
 
