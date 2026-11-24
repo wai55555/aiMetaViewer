@@ -516,6 +516,29 @@ async function checkImageMetadata(img, requestOptions = {}) {
     let metadata = null;
     let successUrl = null;
     let failureResponse = null;
+    const classifyResponse = (response) => {
+        const explicitState = response?.analysisState;
+        if (['resolved', 'confirmed-empty', 'unresolved', 'failure'].includes(explicitState)) {
+            if (explicitState === 'resolved') {
+                const hasMetadata = response?.success === true && response.metadata &&
+                    typeof response.metadata === 'object' && Object.keys(response.metadata).length > 0;
+                return hasMetadata ? 'resolved' : 'failure';
+            }
+            if (explicitState === 'confirmed-empty') {
+                const hasUnexpectedMetadata = response?.metadata &&
+                    typeof response.metadata === 'object' && Object.keys(response.metadata).length > 0;
+                return response?.success === true && !hasUnexpectedMetadata
+                    ? 'confirmed-empty'
+                    : 'failure';
+            }
+            return response?.success === false ? explicitState : 'failure';
+        }
+        // analysisState をまだ返さない既存 HTTP 応答との後方互換分類。
+        if (response?.success === true && response.metadata && typeof response.metadata === 'object') {
+            return Object.keys(response.metadata).length > 0 ? 'resolved' : 'confirmed-empty';
+        }
+        return 'failure';
+    };
 
     try {
         // targetUrl が配列の場合（Pixivのサムネイルなど）、順次試行
@@ -535,7 +558,7 @@ async function checkImageMetadata(img, requestOptions = {}) {
                 if (cachedMetadata && Object.keys(cachedMetadata).length > 0) {
                     metadata = cachedMetadata;
                     successUrl = url;
-                    analysisOutcome = 'metadata';
+                    analysisOutcome = 'resolved';
                     break;
                 }
                 continue;
@@ -561,23 +584,28 @@ async function checkImageMetadata(img, requestOptions = {}) {
                 activeAnalysisUrls.set(img, url);
                 const response = await sendMessageToBrave(message);
 
-                if (response && response.success === true && response.metadata &&
-                    typeof response.metadata === 'object') {
-                    if (Object.keys(response.metadata).length > 0) {
-                        metadata = response.metadata;
-                        contentMetadataCache.set(url, metadata);
-                        successUrl = url;
-                        analysisOutcome = 'metadata';
-                        break; // 成功したらループを抜ける
-                    }
-                    // success:true + metadata:{} は確認済みemptyとして扱う。
+                const responseState = classifyResponse(response);
+                if (responseState === 'resolved') {
+                    metadata = response.metadata;
+                    contentMetadataCache.set(url, metadata);
+                    successUrl = url;
+                    analysisOutcome = 'resolved';
+                    break; // 成功したらループを抜ける
+                }
+                if (responseState === 'confirmed-empty') {
+                    // 完了確認済みの空結果だけを候補の empty として扱う。
+                    analysisOutcome = 'confirmed-empty';
                     continue;
                 }
 
-                // failureはemptyへ降格させず、候補が残る場合だけ次を試行する。
-                failureResponse = response && response.success === false
-                    ? response
-                    : { success: false, diagnostics: { category: 'response-contract', phase: 'content' } };
+                // unresolved/failure は empty へ降格させず、候補が残る場合だけ次を試行する。
+                failureResponse = response && typeof response === 'object'
+                    ? { ...response, success: false, analysisState: responseState }
+                    : {
+                        success: false,
+                        analysisState: responseState,
+                        diagnostics: { category: 'response-contract', phase: 'content' }
+                    };
             } catch (e) {
                 const isTransientMessageFailure = isTransientExtensionContextError(e);
                 failureResponse = {
@@ -595,8 +623,7 @@ async function checkImageMetadata(img, requestOptions = {}) {
             }
         }
 
-        // failureが一つでも残っている場合、別候補のemptyで成功確定しない。
-        if (analysisOutcome !== 'metadata' && failureResponse) {
+        if (analysisOutcome !== 'resolved' && failureResponse) {
             analysisOutcome = 'failure';
             if (failureResponse.transient !== true) {
                 logContentAnalysisFailure(failureResponse);
@@ -604,8 +631,8 @@ async function checkImageMetadata(img, requestOptions = {}) {
             return;
         }
 
-        if (analysisOutcome !== 'metadata') {
-            analysisOutcome = 'empty';
+        if (analysisOutcome !== 'resolved' && analysisOutcome !== 'confirmed-empty') {
+            analysisOutcome = 'confirmed-empty';
         }
 
         // 取り消し後に到着した応答を結果として確定させない。
@@ -617,7 +644,7 @@ async function checkImageMetadata(img, requestOptions = {}) {
 
         // --- メタデータフィルタリング (除外判定) ---
 
-        if (analysisOutcome === 'metadata') {
+        if (analysisOutcome === 'resolved') {
             // 1. キーによる除外 (Ignored Metadata Keys)
             if (settings.ignoredMetadataKeys && Array.isArray(settings.ignoredMetadataKeys) && settings.ignoredMetadataKeys.length > 0) {
                 const hasIgnoredKey = Object.keys(metadata).some(key =>
@@ -679,7 +706,8 @@ async function checkImageMetadata(img, requestOptions = {}) {
         if (analyzingBadge) {
             removeAnalyzingBadge(analyzingBadge);
         }
-        if (analysisOutcome === 'failure' || cancelledAnalyses.has(img)) {
+        if (analysisOutcome !== 'resolved' && analysisOutcome !== 'confirmed-empty') {
+            // failure/unresolved/cancel は成功 marker を残さず再試行可能にする。
             processedImages.delete(img);
         }
         clearActiveAnalysis(img);
@@ -691,6 +719,7 @@ async function checkImageMetadata(img, requestOptions = {}) {
  * 内部error、payload、bytes、署名、ローカルpathは記録しない。
  */
 function logContentAnalysisFailure(response) {
+    if (typeof window !== 'undefined' && window.settings?.debugMode !== true) return;
     if (response?.transient === true) return;
 
     const diagnostics = Array.isArray(response?.diagnostics)
@@ -1076,24 +1105,46 @@ async function checkMetadataForElement(el) {
     // 処理済みフラグを一時的に立てる
     processedImages.set(el, { processing: true });
 
+    const classifyResponse = (response) => {
+        const explicitState = response?.analysisState;
+        if (['resolved', 'confirmed-empty', 'unresolved', 'failure'].includes(explicitState)) {
+            if (explicitState === 'resolved') {
+                const hasMetadata = response?.success === true && response.metadata &&
+                    typeof response.metadata === 'object' && Object.keys(response.metadata).length > 0;
+                return hasMetadata ? 'resolved' : 'failure';
+            }
+            if (explicitState === 'confirmed-empty') {
+                const hasUnexpectedMetadata = response?.metadata &&
+                    typeof response.metadata === 'object' && Object.keys(response.metadata).length > 0;
+                return response?.success === true && !hasUnexpectedMetadata
+                    ? 'confirmed-empty'
+                    : 'failure';
+            }
+            return response?.success === false ? explicitState : 'failure';
+        }
+        if (response?.success === true && response.metadata && typeof response.metadata === 'object') {
+            return Object.keys(response.metadata).length > 0 ? 'resolved' : 'confirmed-empty';
+        }
+        return 'failure';
+    };
+
     try {
         const response = await sendMessageToBrave({
             action: 'fetchImageMetadata',
             imageUrl: url
         });
 
-        if (response && response.success === true && response.metadata &&
-            typeof response.metadata === 'object' && Object.keys(response.metadata).length > 0) {
+        const responseState = classifyResponse(response);
+        if (responseState === 'resolved') {
             addBadgeToElement(el, response.metadata, url);
-        } else if (response && response.success === true && response.metadata &&
-            typeof response.metadata === 'object') {
+        } else if (responseState === 'confirmed-empty') {
             // confirmed-emptyは既存のリンク解析契約どおりバッジを除去する。
             removeBadge(el);
         } else {
-            // failureは正常なempty処理と分離し、診断だけdebug modeへ出す。
-            logContentAnalysisFailure(response && response.success === false
-                ? response
-                : { success: false, diagnostics: { category: 'response-contract', phase: 'content' } });
+            // failure/unresolvedはempty処理へ降格させず、再解析可能にする。
+            logContentAnalysisFailure(response && typeof response === 'object'
+                ? { ...response, success: false, analysisState: responseState }
+                : { success: false, analysisState: responseState, diagnostics: { category: 'response-contract', phase: 'content' } });
             processedImages.delete(el);
         }
     } catch (e) {

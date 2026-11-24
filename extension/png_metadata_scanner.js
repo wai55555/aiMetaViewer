@@ -635,6 +635,7 @@
         }
 
         processRow(absoluteOffset) {
+            if (this.candidates.length === 0) return;
             const { width, height, pixelStride, offsets } = this.layout;
             const rgbCandidate = this.candidates.find((candidate) => candidate.mode === 'RGB' && !candidate.released);
             const alphaCandidate = this.candidates.find((candidate) => candidate.mode === 'Alpha' && !candidate.released);
@@ -909,6 +910,7 @@
             this.idatOpen = false;
             this.iendSeen = false;
             this.stealthStopped = false;
+            this.stealthSuppressedByNormalMetadata = false;
             this.validateIdatAfterStealth = false;
             this.analysisEndReason = null;
             this.candidates = [];
@@ -1052,10 +1054,13 @@
         }
 
         ensureIdatProcessor() {
-            if (this.stealthStopped) return;
             if (!this.idatInflate) {
                 this.rowAssembler = this.layout
-                    ? new RowAssembler(this.layout, this.candidates, this.collector)
+                    ? new RowAssembler(
+                        this.layout,
+                        this.stealthStopped ? [] : this.candidates,
+                        this.collector,
+                    )
                     : null;
                 this.idatStructureValidator = this.layout
                     ? null
@@ -1136,12 +1141,30 @@
         acceptChunk() {
             if (this.currentType === CHUNK_IHDR) this.acceptIhdr();
             else if (this.currentType === CHUNK_TEXT || this.currentType === CHUNK_ITXT) {
-                if (this.currentData) parseTextChunk(this.currentType, this.currentData, this.currentChunkOffset, this.collector, this.metadata);
+                if (this.currentData) {
+                    parseTextChunk(this.currentType, this.currentData, this.currentChunkOffset, this.collector, this.metadata);
+                    if (Object.keys(this.metadata).length > 0) this.suppressStealthForNormalMetadata();
+                }
             } else if (this.currentType === CHUNK_IEND) {
                 this.iendSeen = true;
                 this.analysisEndReason = END_VALID_IEND;
                 this.state = 'DONE';
             }
+        }
+
+        suppressStealthForNormalMetadata() {
+            if (this.stealthSuppressedByNormalMetadata) return;
+            this.stealthSuppressedByNormalMetadata = true;
+            this.stealthStopped = true;
+            this.stealthResult = null;
+            const diagnosticOffset = this.idatChunkOffset === null ? this.offset : this.idatChunkOffset;
+            releaseCandidates(this.candidates, diagnosticOffset);
+            for (const candidate of this.candidates) {
+                candidate.result = null;
+                candidate.releaseDiagnosticPending = false;
+                candidate.releaseDiagnosticEmitted = true;
+            }
+            if (this.rowAssembler) this.rowAssembler.candidates = [];
         }
 
         acceptIhdr() {
