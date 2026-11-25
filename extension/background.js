@@ -3355,7 +3355,9 @@ async function handleFetchImageMetadata(imageUrl) {
                     case 'png':
                         return localPngLimit;
                     default:
-                        return MAX_WEBP_BODYLESS_BUFFER_BYTES;
+                        // Bodyless応答は読み込み前にsignatureを調べられないため、
+                        // 形式不明時は対応形式の最大上限まで検出用に読む。
+                        return METADATA_SAFETENSORS_HEAD_BUDGET_BYTES;
                 }
             };
             const localHeadLimit = (format) => {
