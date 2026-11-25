@@ -591,8 +591,9 @@ function processCandidatesWithTargets(safetensorsCandidates, targets, fetchMetad
                     debugLog(`[AI Meta Viewer] ✓ Got real metadata, adding badge. Keys: ${Object.keys(realMetadata).join(', ')}`);
 
                     if (typeof addBadgeToElement === 'function') {
-                        const badge = addBadgeToElement(matchedElement, realMetadata, candidate.url);
-                        // バッジにソースURLを記録して後で比較できるようにする
+                        const added = addBadgeToElement(matchedElement, realMetadata, candidate.url);
+                        const badge = added ? processedImages.get(matchedElement)?.badge : null;
+                        // 登録済みバッジにソースURLを記録して後で比較できるようにする
                         if (badge && modelVersionId) {
                             badge.setAttribute('data-api-url', apiUrlForFetch);
                         }

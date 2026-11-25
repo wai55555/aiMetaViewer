@@ -2,10 +2,13 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { readVideoResponsePrefix } = require('../../extension/video_range_reader.js');
 
-function streamResponse(stream, contentLength = null) {
+function streamResponse(stream, contentLength = null, contentEncoding = null) {
     return {
         body: stream,
-        headers: { get: name => name === 'content-length' ? contentLength : null },
+        headers: {
+            get: name => name === 'content-length' ? contentLength :
+                name === 'content-encoding' ? contentEncoding : null,
+        },
     };
 }
 
@@ -19,6 +22,7 @@ test('bounded reader truncates at the byte cap and cancels the remaining respons
     assert.deepEqual(Array.from(result.bytes), [0, 1, 2, 3, 4, 5]);
     assert.equal(result.complete, false);
     assert.equal(result.overLimit, true);
+    assert.equal(result.observedBytes, 10);
     assert.equal(cancelled, true);
 });
 
@@ -46,6 +50,46 @@ test('bounded reader rejects a body that ends before its declared content length
     assert.equal(result.complete, false);
     assert.equal(result.overLimit, true);
     assert.equal(result.bytes.length, 6);
+});
+
+test('bounded reader detects a small Content-Length mismatch without calling it a resource limit', async () => {
+    const stream = new ReadableStream({
+        start(controller) {
+            controller.enqueue(new Uint8Array([1, 2, 3, 4]));
+            controller.close();
+        },
+    });
+    const result = await readVideoResponsePrefix(streamResponse(stream, '10'), 16);
+    assert.equal(result.complete, false);
+    assert.equal(result.overLimit, false);
+    assert.equal(result.observedBytes, 4);
+});
+
+test('bounded reader does not compare decoded bytes with a compressed Content-Length', async () => {
+    const stream = new ReadableStream({
+        start(controller) {
+            controller.enqueue(new Uint8Array([1, 2, 3, 4]));
+            controller.close();
+        },
+    });
+    const result = await readVideoResponsePrefix(streamResponse(stream, '20', 'gzip'), 16);
+    assert.equal(result.complete, true);
+    assert.equal(result.overLimit, false);
+    assert.equal(result.bytes.length, 4);
+});
+
+test('bounded reader charges the extra chunk used to probe for EOF', async () => {
+    const stream = new ReadableStream({
+        start(controller) {
+            controller.enqueue(new Uint8Array([1, 2, 3, 4]));
+            controller.enqueue(new Uint8Array([5, 6]));
+        },
+    });
+    const result = await readVideoResponsePrefix(streamResponse(stream), 4);
+    assert.equal(result.complete, false);
+    assert.equal(result.overLimit, true);
+    assert.equal(result.bytes.length, 4);
+    assert.equal(result.observedBytes, 6);
 });
 
 test('bounded reader cancels and rejects if the request is already aborted', async () => {

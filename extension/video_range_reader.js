@@ -15,22 +15,26 @@ async function readVideoResponsePrefix(response, maxBytes, signal) {
     const declaredLength = typeof lengthHeader === 'string' && /^\d+$/.test(lengthHeader)
         ? Number(lengthHeader)
         : null;
+    const contentEncoding = response?.headers?.get?.('content-encoding');
+    const hasContentEncoding = typeof contentEncoding === 'string' && contentEncoding.trim() !== '';
     if (!response?.body) {
         return {
             bytes: new Uint8Array(0),
             complete: declaredLength == null || declaredLength === 0,
             overLimit: declaredLength != null && declaredLength > 0,
+            observedBytes: 0,
         };
     }
     if (typeof response.body.getReader !== 'function') {
         // A non-streaming body cannot be bounded before allocation.
         try { await response.body.cancel?.(); } catch (_) { }
-        return { bytes: new Uint8Array(0), complete: false, overLimit: true };
+        return { bytes: new Uint8Array(0), complete: false, overLimit: true, observedBytes: 0 };
     }
 
     const reader = response.body.getReader();
     const chunks = [];
     let total = 0;
+    let observedBytes = 0;
     let complete = false;
     let overLimit = false;
     try {
@@ -42,6 +46,7 @@ async function readVideoResponsePrefix(response, maxBytes, signal) {
                 break;
             }
             const chunk = record.value instanceof Uint8Array ? record.value : new Uint8Array(record.value);
+            observedBytes += chunk.byteLength;
             const remaining = maxBytes - total;
             if (chunk.byteLength > remaining) {
                 chunks.push(chunk.subarray(0, remaining));
@@ -57,6 +62,10 @@ async function readVideoResponsePrefix(response, maxBytes, signal) {
             const next = await reader.read();
             complete = next.done === true;
             overLimit = !complete;
+            if (!complete && next.value != null) {
+                const chunk = next.value instanceof Uint8Array ? next.value : new Uint8Array(next.value);
+                observedBytes += chunk.byteLength;
+            }
         }
         if (!complete && overLimit) {
             try { await reader.cancel(); } catch (_) { }
@@ -67,7 +76,7 @@ async function readVideoResponsePrefix(response, maxBytes, signal) {
     } finally {
         try { reader.releaseLock(); } catch (_) { }
     }
-    if (complete && declaredLength !== null && declaredLength !== total) {
+    if (complete && !hasContentEncoding && declaredLength !== null && declaredLength !== total) {
         // A prematurely closed or inconsistent response must not be treated as a
         // complete resource by callers that use completeness to confirm no metadata.
         complete = false;
@@ -79,7 +88,7 @@ async function readVideoResponsePrefix(response, maxBytes, signal) {
         bytes.set(chunk, offset);
         offset += chunk.byteLength;
     }
-    return { bytes, complete, overLimit };
+    return { bytes, complete, overLimit, observedBytes };
 }
 
 if (typeof module !== 'undefined' && module.exports) {

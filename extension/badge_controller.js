@@ -157,7 +157,7 @@ function createBadgeElement(metadata, originalUrl, mediaType = 'image') {
     badge._metadata = metadata;
     badge._originalUrl = originalUrl;
     badge._mediaType = mediaType === 'video' ? 'video' : 'image';
-    if (badge._mediaType === 'video') badge.title = 'Click to view video metadata';
+    if (badge._mediaType === 'video') badge.setAttribute('aria-label', 'Click to view video metadata');
     return badge;
 }
 
@@ -403,7 +403,7 @@ function attachBadgeToWebPage(img, badge) {
  * バッジを画像に追加
  * @param {HTMLImageElement} img 
  * @param {Object} metadata 
- * @param {string} originalUrl 
+ * @param {string} originalUrl
  */
 function addBadgeToImage(img, metadata, originalUrl) {
     // 既にバッジがある場合はチェック
@@ -447,9 +447,10 @@ function addBadgeToImage(img, metadata, originalUrl) {
 
 /**
  * 汎用的な要素にバッジを追加
- * @param {HTMLElement} el 
- * @param {Object} metadata 
- * @param {string} originalUrl 
+ * @param {HTMLElement} el
+ * @param {Object} metadata
+ * @param {string} originalUrl
+ * @returns {boolean} バッジを作成または再利用できたかどうか。
  */
 function addBadgeToElement(el, metadata, originalUrl, options = {}) {
     const mediaType = options?.mediaType === 'video' ? 'video' : 'image';

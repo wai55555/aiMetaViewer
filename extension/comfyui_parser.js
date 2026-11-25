@@ -36,11 +36,12 @@
         const type = nodeType(node);
         let names = [];
         if (/^CheckpointLoaderSimple$/i.test(type)) names = ['ckpt_name'];
+        else if (/^(?:UNETLoader|DiffusionModelLoader)$/i.test(type)) names = ['unet_name'];
         else if (/LoraLoaderModelOnly/i.test(type)) names = ['lora_name', 'strength_model'];
         else if (/LoraLoader/i.test(type)) names = ['lora_name', 'strength_model', 'strength_clip'];
-        else if (/KSamplerAdvanced/i.test(type)) names = ['add_noise', 'noise_seed', 'steps', 'cfg', 'sampler_name', 'scheduler', 'start_at_step', 'end_at_step', 'return_with_leftover_noise'];
-        else if (/KSampler/i.test(type)) names = ['seed', 'steps', 'cfg', 'sampler_name', 'scheduler', 'denoise'];
-        else if (/CLIPTextEncodeSDXL/i.test(type)) names = ['text_g', 'text_l', 'width', 'height', 'crop_w', 'crop_h', 'target_width', 'target_height'];
+        else if (/KSamplerAdvanced/i.test(type)) names = ['add_noise', 'noise_seed', 'control_after_generate', 'steps', 'cfg', 'sampler_name', 'scheduler', 'start_at_step', 'end_at_step', 'return_with_leftover_noise'];
+        else if (/KSampler/i.test(type)) names = ['seed', 'control_after_generate', 'steps', 'cfg', 'sampler_name', 'scheduler', 'denoise'];
+        else if (/CLIPTextEncodeSDXL/i.test(type)) names = ['width', 'height', 'crop_w', 'crop_h', 'target_width', 'target_height', 'text_g', 'text_l'];
         else if (TEXT_TYPE.test(type)) names = ['text'];
         else if (/VHS_VideoCombine|VideoCombine/i.test(type)) names = ['frame_rate', 'loop_count', 'filename_prefix', 'format', 'pingpong', 'save_output'];
         const result = {};
@@ -212,38 +213,61 @@
         return Array.from(new Set(parts)).join('\n');
     }
 
-    function textNodesFrom(graph, startId, budget) {
+    function inboundForOutput(graph, nodeId, outputSlot) {
+        const links = graph.inbound.get(String(nodeId)) || [];
+        if (outputSlot == null || outputSlot === '') return links;
+        const slot = Number(outputSlot);
+        if (!Number.isSafeInteger(slot) || slot < 0) return links;
+
+        const node = graph.nodes.get(String(nodeId));
+        const outputs = Array.isArray(node?.raw?.outputs) ? node.raw.outputs : [];
+        const output = outputs.find((item, index) => {
+            const indexValue = Number(item?.slot_index ?? index);
+            return Number.isSafeInteger(indexValue) && indexValue === slot;
+        });
+        const outputName = String(output?.name || output?.label || '').trim().toLowerCase();
+        if (outputName) {
+            const matching = links.filter(link => link.name.trim().toLowerCase() === outputName);
+            if (matching.length > 0) return matching;
+        }
+
+        // Some conditioning nodes expose two outputs that correspond to their
+        // positive/negative inputs. Preserve that semantic pairing without
+        // depending on a particular node class name.
+        const conditioningLinks = links.filter(link => /^(?:positive|negative)$/i.test(link.name.trim()));
+        if (conditioningLinks.length > 1 && slot < conditioningLinks.length) {
+            return [conditioningLinks[slot]];
+        }
+        return links;
+    }
+
+    function textNodesFrom(graph, startId, outputSlot, budget) {
         const found = [];
         const seen = new Set();
         const foundSeen = new Set();
-        const stack = [String(startId)];
+        const promptNodeIds = new Set();
+        const stack = [{ id: String(startId), outputSlot }];
         while (stack.length && seen.size < MAX_NODES && consumeGraphWork(budget)) {
-            const id = stack.pop();
-            if (seen.has(id) || !graph.nodes.has(id)) continue;
-            seen.add(id);
+            const current = stack.pop();
+            const id = current.id;
+            const visitKey = `${id}\0${current.outputSlot == null ? '*' : String(current.outputSlot)}`;
+            if (seen.has(visitKey) || !graph.nodes.has(id)) continue;
+            seen.add(visitKey);
             const node = graph.nodes.get(id);
             if (TEXT_TYPE.test(node.type)) {
                 const text = textValue(node);
-                if (text && !addUniqueBounded(found, foundSeen, { label: node.title, text }, budget)) break;
+                if (text) {
+                    promptNodeIds.add(id);
+                    if (!addUniqueBounded(found, foundSeen, { label: node.title, text }, budget)) break;
+                }
             }
-            for (const link of graph.inbound.get(id) || []) {
+            for (const link of inboundForOutput(graph, id, current.outputSlot)) {
                 if (!consumeGraphWork(budget)) break;
-                stack.push(link.originId);
+                stack.push({ id: link.originId, outputSlot: link.originSlot });
             }
         }
         if (stack.length && seen.size >= MAX_NODES) budget.exhausted = true;
-        if (found.length) return found;
-        return [];
-    }
-
-    function uniqueEntries(items) {
-        const seen = new Set();
-        return items.filter(item => {
-            const key = `${item.label}\0${item.text}`;
-            if (!item.text || seen.has(key)) return false;
-            seen.add(key);
-            return true;
-        });
+        return { entries: found, promptNodeIds };
     }
 
     function analyzeGraph(graphValue, graphLabel) {
@@ -255,7 +279,7 @@
         if (outputs.length === 0) outputs = [{ id: '__all__', title: 'Workflow', type: 'Workflow' }];
 
         const budget = { remaining: MAX_GRAPH_WORK, exhausted: false };
-        const result = { positive: [], negative: [], models: [], loras: [], grid: [], limited: outputs.length > MAX_SUMMARY_OUTPUTS };
+        const result = { positive: [], negative: [], unconnected: [], models: [], loras: [], grid: [], limited: graph.limited || outputs.length > MAX_SUMMARY_OUTPUTS };
         const gridSeen = new Set();
         const addGrid = (key, value) => {
             const text = display(value);
@@ -269,7 +293,8 @@
             result.grid.push({ key, value: text });
         };
 
-        const resultSeen = Object.fromEntries(['positive', 'negative', 'models', 'loras'].map(key => [key, new Set()]));
+        const resultSeen = Object.fromEntries(['positive', 'negative', 'unconnected', 'models', 'loras'].map(key => [key, new Set()]));
+        const connectedPromptIds = new Set();
         for (const [outputIndex, output] of outputs.slice(0, MAX_SUMMARY_OUTPUTS).entries()) {
             if (!consumeGraphWork(budget)) break;
             const scope = output.id === '__all__' ? new Set(graph.nodes.keys()) : ancestors(graph, output.id, budget);
@@ -291,7 +316,9 @@
                     for (const link of links) {
                         if (!consumeGraphWork(budget)) break;
                         if (link.name.toLowerCase() !== port) continue;
-                        const entries = textNodesFrom(graph, link.originId, budget);
+                        const traversal = textNodesFrom(graph, link.originId, link.originSlot, budget);
+                        for (const id of traversal.promptNodeIds) connectedPromptIds.add(id);
+                        const entries = traversal.entries;
                         const destination = port === 'positive' ? positive : negative;
                         const destinationSeen = port === 'positive' ? positiveSeen : negativeSeen;
                         for (const entry of entries) {
@@ -317,20 +344,6 @@
                 if (budget.exhausted) break;
             }
 
-            // If the graph has no sampler port labels, retain reachable text instead of losing it.
-            if (positive.length === 0 && negative.length === 0) {
-                for (const id of scope) {
-                    if (!consumeGraphWork(budget)) break;
-                    const node = graph.nodes.get(id);
-                    if (!node || !TEXT_TYPE.test(node.type)) continue;
-                    const text = textValue(node);
-                    if (!text) continue;
-                    const destination = /negative|undesired|\buc\b/i.test(node.title) ? negative : positive;
-                    const destinationSeen = destination === negative ? negativeSeen : positiveSeen;
-                    addUniqueBounded(destination, destinationSeen, { label: node.title, text }, budget);
-                    if (budget.exhausted) break;
-                }
-            }
             for (const item of positive) {
                 addUniqueBounded(result.positive, resultSeen.positive, { label, text: item.text }, budget);
                 if (budget.exhausted) break;
@@ -364,6 +377,15 @@
             }
             if (budget.exhausted) break;
         }
+
+        // Keep prompt nodes that do not feed a sampler's positive/negative input
+        // visible, with an explicit unconnected classification in the UI.
+        for (const node of allNodes) {
+            if (!consumeGraphWork(budget)) break;
+            if (!TEXT_TYPE.test(node.type) || connectedPromptIds.has(node.id)) continue;
+            const text = textValue(node);
+            if (text) addUniqueBounded(result.unconnected, resultSeen.unconnected, { label: node.title, text }, budget);
+        }
         if (budget.exhausted) result.limited = true;
         return result;
     }
@@ -375,16 +397,16 @@
             ['Workflow', source.workflow],
             ['Generation Data', source.generation_data],
         ];
-        const summary = { positive: [], negative: [], models: [], loras: [], grid: [], limited: false };
+        const summary = { positive: [], negative: [], unconnected: [], models: [], loras: [], grid: [], limited: false };
         const seen = new Set();
-        const entrySeen = Object.fromEntries(['positive', 'negative', 'models', 'loras'].map(key => [key, new Set()]));
+        const entrySeen = Object.fromEntries(['positive', 'negative', 'unconnected', 'models', 'loras'].map(key => [key, new Set()]));
         for (const [label, value] of graphs) {
             if (value == null || value === '') continue;
             const parsed = parseJson(value) || value;
             const graphSummary = analyzeGraph(parsed, label);
             if (!graphSummary) continue;
             if (graphSummary.limited) summary.limited = true;
-            for (const key of ['positive', 'negative', 'models', 'loras']) {
+            for (const key of ['positive', 'negative', 'unconnected', 'models', 'loras']) {
                 for (const item of graphSummary[key]) {
                     const token = `${item.label}\0${item.text}`;
                     if (entrySeen[key].has(token)) continue;

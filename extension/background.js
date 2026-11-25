@@ -2287,6 +2287,10 @@ async function handleFetchVideoMetadata(videoUrl, signal, cacheUrl) {
     let rangeIgnoredOverLimit = false;
     let fetchBudgetBlocked = false;
     let responseStatus = null;
+    let rangeValidator = null;
+    let rangeIdentityUnavailable = false;
+    let rangeRepresentationChanged = false;
+    let rangeContentEncodingUnsupported = false;
     const fetchedRanges = [];
     const aborted = () => signal?.aborted === true;
     const cancelResponseBody = async response => {
@@ -2310,6 +2314,10 @@ async function handleFetchVideoMetadata(videoUrl, signal, cacheUrl) {
                 return cachedRange.bytes.subarray(offset - cachedRange.start, offset - cachedRange.start + length);
             }
         }
+        if (!isFile && fetchedRanges.length > 0 && !rangeValidator) {
+            rangeIdentityUnavailable = true;
+            return null;
+        }
         if (totalFetched + length > VIDEO_METADATA_MAX_BYTES) {
             fetchBudgetBlocked = true;
             return null;
@@ -2327,7 +2335,10 @@ async function handleFetchVideoMetadata(videoUrl, signal, cacheUrl) {
             controller.abort();
         }, RANGE_REQUEST_TIMEOUT_MS);
         try {
-            const headers = isFile ? undefined : { Range: `bytes=${offset}-${offset + length - 1}` };
+            const headers = isFile ? undefined : {
+                Range: `bytes=${offset}-${offset + length - 1}`,
+                ...(rangeValidator ? { 'If-Range': rangeValidator.value } : {}),
+            };
             const response = await fetch(videoUrl, {
                 headers,
                 redirect: 'follow',
@@ -2335,16 +2346,40 @@ async function handleFetchVideoMetadata(videoUrl, signal, cacheUrl) {
             });
             responseStatus = response.status;
             if (response.status === HTTP_PARTIAL_CONTENT_STATUS && !isFile) {
+                const contentEncoding = response.headers.get('content-encoding');
+                if (typeof contentEncoding === 'string' && contentEncoding.trim() !== '') {
+                    rangeContentEncodingUnsupported = true;
+                    await cancelResponseBody(response);
+                    return null;
+                }
                 const range = parseContentRangeHeader(response.headers.get('content-range'));
                 if (!range || range.start !== offset || range.end > offset + length - 1 || range.length > length) {
                     await cancelResponseBody(response);
                     return null;
                 }
+                if (fetchedRanges.length > 0 && totalSize !== null && range.total !== null && range.total !== totalSize) {
+                    rangeRepresentationChanged = true;
+                    await cancelResponseBody(response);
+                    return null;
+                }
+                if (rangeValidator) {
+                    const observedValidator = response.headers.get('etag');
+                    if (observedValidator && observedValidator !== rangeValidator.value) {
+                        rangeRepresentationChanged = true;
+                        await cancelResponseBody(response);
+                        return null;
+                    }
+                } else if (fetchedRanges.length === 0) {
+                    const etag = response.headers.get('etag');
+                    if (typeof etag === 'string' && etag.trim() && !/^W\//i.test(etag.trim())) {
+                        rangeValidator = { value: etag.trim() };
+                    }
+                }
                 if (range.total !== null) totalSize = range.total;
                 const body = await readVideoResponsePrefix(response, range.length, controller.signal);
                 if (controller.signal.aborted) throw createAnalysisAbortError();
+                totalFetched += body.observedBytes ?? body.bytes.length;
                 if (!body.complete || body.overLimit || body.bytes.length !== range.length) return null;
-                totalFetched += body.bytes.length;
                 fetchedRanges.push({ start: offset, end: offset + body.bytes.length, bytes: body.bytes });
                 return body.bytes;
             }
@@ -2353,7 +2388,9 @@ async function handleFetchVideoMetadata(videoUrl, signal, cacheUrl) {
                 return null;
             }
             const contentLength = response.headers.get('content-length');
-            if (typeof contentLength === 'string' && /^\d+$/.test(contentLength)) {
+            const contentEncoding = response.headers.get('content-encoding');
+            const hasContentEncoding = typeof contentEncoding === 'string' && contentEncoding.trim() !== '';
+            if (!hasContentEncoding && typeof contentLength === 'string' && /^\d+$/.test(contentLength)) {
                 const parsedLength = Number(contentLength);
                 if (Number.isSafeInteger(parsedLength)) totalSize = parsedLength;
             }
@@ -2365,9 +2402,10 @@ async function handleFetchVideoMetadata(videoUrl, signal, cacheUrl) {
             rangeIgnoredBody = body.bytes;
             rangeIgnoredComplete = body.complete;
             rangeIgnoredOverLimit = body.overLimit;
-            totalFetched += body.bytes.length;
+            totalFetched += body.observedBytes ?? body.bytes.length;
             fetchedRanges.length = 0;
-            if (totalSize === null && body.complete) totalSize = body.bytes.length;
+            if (body.complete && hasContentEncoding) totalSize = body.bytes.length;
+            else if (totalSize === null && body.complete) totalSize = body.bytes.length;
             if (offset + length <= body.bytes.length) return body.bytes.subarray(offset, offset + length);
             return null;
         } catch (error) {
@@ -2438,6 +2476,14 @@ async function handleFetchVideoMetadata(videoUrl, signal, cacheUrl) {
         const format = detectVideoContainer(head);
         if (!format) return buildResult({ parserState: wholeResourceAvailable ? 'unsupported-format' : 'unresolved', format: 'unknown' });
 
+        if (rangeIgnoredComplete && rangeIgnoredBody) {
+            return buildResult(extractVideoMetadata(rangeIgnoredBody, {
+                format,
+                inputComplete: true,
+                totalSize: rangeIgnoredBody.length,
+            }));
+        }
+
         if (format === 'webm') {
             const result = await scanWebmVideoMetadata(fetchBytes, totalSize, {
                 maxBytes: VIDEO_METADATA_MAX_BYTES,
@@ -2478,23 +2524,21 @@ async function handleFetchVideoMetadata(videoUrl, signal, cacheUrl) {
             return buildResult({ parserState: 'unresolved', reason: rangeIgnoredOverLimit ? 'resource-limit' : 'head-incomplete' });
         }
 
-        if (Number.isSafeInteger(totalSize) && totalSize > 0) {
-            const tailStart = Math.max(0, totalSize - VIDEO_METADATA_TAIL_BYTES);
-            const tailLength = totalSize - tailStart;
-            await fetchBytes(tailStart, tailLength);
-            if (Number.isSafeInteger(result.nextBoxOffset)) {
-                const scanResult = await scanMp4VideoMetadata(fetchBytes, totalSize, {
-                    startOffset: result.nextBoxOffset,
-                    maxBytes: Math.max(0, VIDEO_METADATA_MAX_BYTES - totalFetched),
-                    maxBoxes: 64,
-                });
-                if (['resolved', 'empty-confirmed', 'resource-limit'].includes(scanResult.parserState)) return buildResult(scanResult);
-                result = scanResult;
-            }
+        if (Number.isSafeInteger(totalSize) && totalSize > 0 && Number.isSafeInteger(result.nextBoxOffset)) {
+            const scanResult = await scanMp4VideoMetadata(fetchBytes, totalSize, {
+                startOffset: result.nextBoxOffset,
+                maxBytes: Math.max(0, VIDEO_METADATA_MAX_BYTES - totalFetched),
+                maxBoxes: 64,
+            });
+            if (['resolved', 'empty-confirmed', 'resource-limit'].includes(scanResult.parserState)) return buildResult(scanResult);
+            result = scanResult;
         }
         return buildResult({
             parserState: fetchBudgetBlocked || rangeIgnoredOverLimit ? 'resource-limit' : 'unresolved',
-            reason: fetchBudgetBlocked || rangeIgnoredOverLimit ? 'resource-limit' : 'metadata-not-complete',
+            reason: fetchBudgetBlocked || rangeIgnoredOverLimit ? 'resource-limit' :
+                rangeContentEncodingUnsupported ? 'encoded-range-unsupported' :
+                    rangeRepresentationChanged ? 'range-representation-changed' :
+                        rangeIdentityUnavailable ? 'range-representation-unverified' : 'metadata-not-complete',
         });
     } catch (error) {
         if (error?.name === 'TimeoutError' && !signal?.aborted) {
