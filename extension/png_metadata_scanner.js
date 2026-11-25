@@ -24,7 +24,9 @@
     const MAX_STEALTH_COMPRESSED_BYTES = 8 * 1024 * 1024;
     const MAX_STEALTH_METADATA_BYTES = 8 * 1024 * 1024;
     const MAX_TEXT_CHUNK_BYTES = 8 * 1024 * 1024;
+    const MAX_EXIF_CHUNK_PREFIX_BYTES = 64 * 1024;
     const MAX_STEALTH_HEADER_ROWS = 160;
+    const MAX_IDAT_INFLATE_PUSH_BYTES = 4 * 1024;
     const BITS_PER_BYTE = 8;
     const PNG_FILTER_TYPES = Object.freeze([0, 1, 2, 3, 4]);
     const PNG_CHANNEL_COUNTS = Object.freeze({
@@ -68,6 +70,7 @@
     const CHUNK_IEND = 'IEND';
     const CHUNK_TEXT = 'tEXt';
     const CHUNK_ITXT = 'iTXt';
+    const CHUNK_EXIF = 'eXIf';
     const TEXT_INFLATE_CHUNK_SIZE = 16 * 1024;
     const LAYOUTS = Object.freeze({
         '2:8': Object.freeze({ bytesPerPixel: 3, pixelStride: 3, candidates: ['RGB'], offsets: [0, 1, 2] }),
@@ -129,6 +132,9 @@
         const missingCrc = crcNames.filter((name) => typeof globalObject[name] !== 'function');
         if (missingCrc.length > 0) {
             throw new PngScannerDependencyError(`PNG scanner requires parser.js incremental CRC API: ${missingCrc.join(', ')}`);
+        }
+        if (typeof globalObject.extractExifPayload !== 'function') {
+            throw new PngScannerDependencyError('PNG scanner requires parser.js EXIF extraction API.');
         }
     }
 
@@ -574,10 +580,11 @@
     }
 
     class RowAssembler {
-        constructor(layout, candidates, collector) {
+        constructor(layout, candidates, collector, onRowComplete = null) {
             this.layout = layout;
             this.candidates = candidates;
             this.collector = collector;
+            this.onRowComplete = onRowComplete;
             this.previous = new Uint8Array(layout.rowBytes);
             this.scanline = new Uint8Array(layout.rowBytes + 1);
             this.current = new Uint8Array(layout.rowBytes);
@@ -613,6 +620,11 @@
         finishRow(absoluteOffset) {
             const filterType = this.scanline[0];
             if (!PNG_FILTER_TYPES.includes(filterType)) throw new PngStructuralError(`Unsupported PNG filter type: ${filterType}`);
+            if (this.candidates.length === 0) {
+                this.rowsCompleted += 1;
+                if (this.onRowComplete) this.onRowComplete(absoluteOffset);
+                return;
+            }
             const bpp = this.layout.bytesPerPixel;
             for (let index = 0; index < this.layout.rowBytes; index += 1) {
                 const raw = this.scanline[index + 1];
@@ -632,6 +644,7 @@
             this.current = oldPrevious;
             this.current.fill(0);
             this.rowsCompleted += 1;
+            if (this.onRowComplete) this.onRowComplete(absoluteOffset);
         }
 
         processRow(absoluteOffset) {
@@ -865,7 +878,7 @@
 
     function createInflate(rowAssembler, offsetProvider) {
         if (!hasPako()) throw new PngScannerDependencyError('PNG scanner requires pako.Inflate for IDAT.');
-        const inflator = new globalObject.pako.Inflate();
+        const inflator = new globalObject.pako.Inflate({ chunkSize: MAX_IDAT_INFLATE_PUSH_BYTES });
         inflator.onData = (chunk) => {
             if (!rowAssembler) return;
             const output = chunk instanceof Uint8Array ? chunk : new Uint8Array(chunk);
@@ -911,10 +924,11 @@
             this.iendSeen = false;
             this.stealthStopped = false;
             this.stealthSuppressedByNormalMetadata = false;
-            this.validateIdatAfterStealth = false;
             this.analysisEndReason = null;
             this.candidates = [];
             this.stealthResult = null;
+            this.metadataChunkIncomplete = false;
+            this.metadataPartial = false;
             this.fatalError = null;
         }
 
@@ -1047,10 +1061,14 @@
                     this.currentData = null;
                     addTextDiagnostic(this.collector, this.currentType, this.currentChunkOffset, 'text chunk input exceeds limit', null, 'MAX_TEXT_CHUNK_BYTES', this.currentLength);
                 }
+            } else if (this.currentType === CHUNK_EXIF) {
+                this.currentData = new Uint8Array(Math.min(this.currentLength, MAX_EXIF_CHUNK_PREFIX_BYTES));
             }
             if (this.currentType !== CHUNK_IDAT && this.idatOpen) this.finishIdat();
             this.currentCrcState = globalObject.createCrc32State();
-            this.currentCrcState = globalObject.updateCrc32(this.currentCrcState, this.currentTypeBytes);
+            if (this.currentCrcState) {
+                this.currentCrcState = globalObject.updateCrc32(this.currentCrcState, this.currentTypeBytes);
+            }
         }
 
         ensureIdatProcessor() {
@@ -1060,6 +1078,9 @@
                         this.layout,
                         this.stealthStopped ? [] : this.candidates,
                         this.collector,
+                        () => {
+                            this.checkStealthStop();
+                        },
                     )
                     : null;
                 this.idatStructureValidator = this.layout
@@ -1074,11 +1095,19 @@
 
         consumeData(bytes, cursor) {
             const remaining = this.currentLength - this.currentDataOffset;
-            const amount = Math.min(bytes.length - cursor, remaining);
+            const idatNeedsProcessing = this.currentType === CHUNK_IDAT;
+            const amount = Math.min(
+                bytes.length - cursor,
+                remaining,
+                idatNeedsProcessing ? MAX_IDAT_INFLATE_PUSH_BYTES : remaining,
+            );
             const slice = bytes.subarray(cursor, cursor + amount);
-            this.currentCrcState = globalObject.updateCrc32(this.currentCrcState, slice);
-            if (this.currentData && this.currentType !== CHUNK_IDAT) {
-                this.currentData.set(slice, this.currentDataOffset);
+            if (this.currentCrcState) {
+                this.currentCrcState = globalObject.updateCrc32(this.currentCrcState, slice);
+            }
+            if (this.currentData && this.currentType !== CHUNK_IDAT && this.currentDataOffset < this.currentData.length) {
+                const copyLength = Math.min(amount, this.currentData.length - this.currentDataOffset);
+                this.currentData.set(slice.subarray(0, copyLength), this.currentDataOffset);
             }
             if (this.currentType === CHUNK_IDAT && this.idatInflate) {
                 if (this.idatInflate.ended) {
@@ -1145,6 +1174,29 @@
                     parseTextChunk(this.currentType, this.currentData, this.currentChunkOffset, this.collector, this.metadata);
                     if (Object.keys(this.metadata).length > 0) this.suppressStealthForNormalMetadata();
                 }
+            } else if (this.currentType === CHUNK_EXIF) {
+                const parsed = globalObject.extractExifPayload(this.currentData || new Uint8Array(0), {
+                    declaredLength: this.currentLength,
+                });
+                if (parsed && Object.keys(parsed).length > 0) {
+                    Object.assign(this.metadata, parsed);
+                    if (parsed.metadataPartial === true) {
+                        this.metadataPartial = true;
+                        this.collector.add({
+                            category: 'exif-incomplete',
+                            offset: this.currentChunkOffset,
+                            parserState: 'partial',
+                        });
+                    }
+                    this.suppressStealthForNormalMetadata();
+                } else if (parsed?.parserState === 'unresolved' || parsed?.parserState === 'resource-limit') {
+                    this.metadataChunkIncomplete = true;
+                    this.collector.add({
+                        category: 'exif-incomplete',
+                        offset: this.currentChunkOffset,
+                        parserState: parsed.parserState,
+                    });
+                }
             } else if (this.currentType === CHUNK_IEND) {
                 this.iendSeen = true;
                 this.analysisEndReason = END_VALID_IEND;
@@ -1207,9 +1259,8 @@
             if (completed) {
                 this.stealthResult = completed.result;
                 this.stealthStopped = true;
-                this.validateIdatAfterStealth = true;
                 releaseCandidates(this.candidates, diagnosticOffset, completed);
-                // Stealth候補だけを停止し、zlib・row構造検証用の状態はIENDまで保持する。
+                if (this.rowAssembler) this.rowAssembler.candidates = [];
                 return;
             }
             if (allCandidatesRejected(this.candidates)) {
@@ -1217,8 +1268,7 @@
                 this.analysisEndReason = END_INTENTIONAL_STOP;
                 this.collector.add({ category: 'intentional-stealth-stop', offset: diagnosticOffset });
                 releaseCandidates(this.candidates, diagnosticOffset);
-                // 全候補reject後もPNG構造検証用のInflateとrow validatorは維持する。
-                // IENDまでzlib終端、decoded byte数、scanlineを検証する必要がある。
+                if (this.rowAssembler) this.rowAssembler.candidates = [];
             }
         }
 
@@ -1283,12 +1333,25 @@
             }
             if (!this.iendSeen) return { status: STATUS_INVALID, reason: 'truncated', diagnostics };
             if (Object.keys(this.metadata).length > 0) {
-                return { status: STATUS_NORMAL, metadata: this.metadata, diagnostics };
+                return {
+                    status: STATUS_NORMAL,
+                    metadata: this.metadata,
+                    ...(this.metadataPartial || this.metadataChunkIncomplete ? { metadataPartial: true } : {}),
+                    diagnostics,
+                };
             }
             if (this.stealthResult) {
                 const metadata = Object.create(null);
                 metadata[this.stealthResult.key] = this.stealthResult.value;
-                return { status: STATUS_STEALTH, metadata, diagnostics };
+                return {
+                    status: STATUS_STEALTH,
+                    metadata,
+                    ...(this.metadataChunkIncomplete ? { metadataPartial: true } : {}),
+                    diagnostics,
+                };
+            }
+            if (this.metadataChunkIncomplete) {
+                return { status: 'unresolved', reason: 'metadata-incomplete', diagnostics };
             }
             return { status: STATUS_NOT_FOUND, diagnostics };
         }

@@ -681,6 +681,9 @@ async function checkImageMetadata(img, requestOptions = {}) {
             if (explicitState === 'resolved') {
                 const hasMetadata = response?.success === true && response.metadata &&
                     typeof response.metadata === 'object' && Object.keys(response.metadata).length > 0;
+                if (response?.metadataPartial === true || response?.metadata?.metadataPartial === true) {
+                    return 'unresolved';
+                }
                 return hasMetadata ? 'resolved' : 'failure';
             }
             if (explicitState === 'confirmed-empty') {
@@ -694,6 +697,7 @@ async function checkImageMetadata(img, requestOptions = {}) {
         }
         // analysisState をまだ返さない既存 HTTP 応答との後方互換分類。
         if (response?.success === true && response.metadata && typeof response.metadata === 'object') {
+            if (response.metadataPartial === true || response.metadata.metadataPartial === true) return 'unresolved';
             return Object.keys(response.metadata).length > 0 ? 'resolved' : 'confirmed-empty';
         }
         return 'failure';
@@ -1348,6 +1352,9 @@ async function checkMetadataForElement(el) {
             if (explicitState === 'resolved') {
                 const hasMetadata = response?.success === true && response.metadata &&
                     typeof response.metadata === 'object' && Object.keys(response.metadata).length > 0;
+                if (response?.metadataPartial === true || response?.metadata?.metadataPartial === true) {
+                    return 'unresolved';
+                }
                 return hasMetadata ? 'resolved' : 'failure';
             }
             if (explicitState === 'confirmed-empty') {
@@ -1360,6 +1367,7 @@ async function checkMetadataForElement(el) {
             return response?.success === false ? explicitState : 'failure';
         }
         if (response?.success === true && response.metadata && typeof response.metadata === 'object') {
+            if (response.metadataPartial === true || response.metadata.metadataPartial === true) return 'unresolved';
             return Object.keys(response.metadata).length > 0 ? 'resolved' : 'confirmed-empty';
         }
         return 'failure';
@@ -1403,15 +1411,11 @@ async function checkMetadataForElement(el) {
 // バッジ生成機能(addAnalyzingBadge, addBadgeToImage)などは badge_controller.js に移動しました
 
 // --- viewport 解析キュー ---
-// IntersectionObserver から即座に解析を開始すると、pixiv のような大量サムネイル
-// ページでスクロール中に数十本の全body取得が同時発火する。
-// 停留した画像だけを LIFO で順に解析し、開始前に画面外へ出たものは取り消す。
-// すでに始まった要求は完了させ、戻ってきたときに同じ画像を再取得しないようにする。
+// IntersectionObserver からの要求はすぐに待機列へ入れ、空き枠があれば即時に解析する。
+// 同時実行数と待機列の上限で負荷を抑え、画面外へ出た待機項目だけを取り除く。
+// 開始済みの要求はキャッシュへ結果を保存できるよう完了させる。
 // 同時実行の最終的な上限は background 側の集約ゲートが保証する。
 // ここでの上限は pending message を無制限に積まないためのものである。
-
-/** viewport 停留と判定するまでの待ち時間 */
-const ANALYSIS_SETTLE_DELAY_MS = 200;
 
 /** 待機列の最大長。これを超えたら viewport から最も遠いものを捨てる */
 const MAX_PENDING_ANALYSIS_QUEUE = 32;
@@ -1425,11 +1429,11 @@ const viewportAnalysisQueue = {
     /** @type {Set<HTMLImageElement>} */
     running: new Set(),
     sequence: 0,
-    settleTimer: null,
     observer: null,
+    drainScheduled: false,
 
     /**
-     * viewport へ入った画像を待機列へ入れる。ここでは解析を開始しない。
+     * viewport へ入った画像を待機列へ入れ、実行枠があればすぐに解析する。
      * @param {HTMLImageElement} img - 対象画像
      */
     enqueue(img) {
@@ -1457,7 +1461,17 @@ const viewportAnalysisQueue = {
             running: false,
         });
         this.enforceQueueLimit();
-        this.scheduleSettle();
+        this.scheduleDrain();
+    },
+
+    /** 同一observer callbackのenqueueをまとめ、LIFO選択後すぐに解析を開始する */
+    scheduleDrain() {
+        if (this.drainScheduled) return;
+        this.drainScheduled = true;
+        Promise.resolve().then(() => {
+            this.drainScheduled = false;
+            this.drain();
+        });
     },
 
     /**
@@ -1505,15 +1519,6 @@ const viewportAnalysisQueue = {
                 distance: farthestDistance
             });
         }
-    },
-
-    /** 停留判定タイマーを張り直す */
-    scheduleSettle() {
-        if (this.settleTimer !== null) clearTimeout(this.settleTimer);
-        this.settleTimer = setTimeout(() => {
-            this.settleTimer = null;
-            this.drain();
-        }, ANALYSIS_SETTLE_DELAY_MS);
     },
 
     /**
@@ -2004,7 +2009,20 @@ function observeImages() {
     // currentSrc は src/srcset 属性が変わらなくても、viewportやDPRに応じて
     // 別候補へ切り替わる。load/errorとviewport変更で解析済み画像を照合する。
     const handleImageResourceChange = (event) => {
-        if (event.target?.tagName === 'IMG') invalidateChangedImageSource(event.target);
+        if (event.target?.tagName !== 'IMG') return;
+        const img = event.target;
+        const sourceChanged = invalidateChangedImageSource(img);
+        if (sourceChanged || event.type !== 'load' || !img.isConnected ||
+            processedImages.has(img) || viewportAnalysisQueue.running.has(img) ||
+            viewportAnalysisQueue.pending.has(img) || img.naturalWidth <= 0 || img.naturalHeight <= 0) {
+            return;
+        }
+        // A prior viewport check may have skipped an image before its intrinsic
+        // dimensions were available. Re-observe it once on load so the now-known
+        // dimensions receive a fresh size judgment.
+        const activeObserver = viewportAnalysisQueue.observer;
+        activeObserver?.unobserve(img);
+        activeObserver?.observe(img);
     };
     if (!sourceSelectionListenersRegistered) {
         document.addEventListener('load', handleImageResourceChange, true);

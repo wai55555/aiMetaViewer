@@ -318,7 +318,7 @@ const browserAPI = (() => {
 // 環境検出
 const isFirefox = typeof browser !== 'undefined';
 const isChrome = typeof chrome !== 'undefined' && !isFirefox;
-const PNG_SCANNER_CACHE_VERSION = 'png-scanner-v1';
+const PNG_SCANNER_CACHE_VERSION = 'png-scanner-v2';
 const CACHE_ENTRY_MARKER = 'aiMetaViewerCacheEntry';
 
 // 永続化LRUキャッシュクラス (browserAPI.storage.local使用)
@@ -1509,8 +1509,10 @@ const METADATA_HEAD_BUDGET_ERROR_NAME = 'MetadataHeadBudgetError';
 const METADATA_JPEG_HEAD_BUDGET_BYTES = 256 * 1024;
 const METADATA_AVIF_HEAD_BUDGET_BYTES = 256 * 1024;
 const METADATA_WEBP_HEAD_BUDGET_BYTES = 64 * 1024;
-const METADATA_WEBP_TAIL_BUDGET_BYTES = 128 * 1024;
-const MAX_WEBP_TAIL_DECLARED_SIZE = 256 * 1024 * 1024;
+const MAX_WEBP_RIFF_SIZE_BYTES = 256 * 1024 * 1024;
+const MAX_WEBP_STREAM_SCAN_BYTES = 2 * 1024 * 1024;
+const MAX_WEBP_DEEP_SCAN_BYTES = MAX_WEBP_RIFF_SIZE_BYTES;
+const MAX_WEBP_BODYLESS_BUFFER_BYTES = 2 * 1024 * 1024;
 const METADATA_SAFETENSORS_HEAD_BUDGET_BYTES = 16 * 1024 * 1024;
 
 /**
@@ -1544,6 +1546,58 @@ function getMetadataState(metadata) {
     return Object.keys(metadata).length > 0 ? 'resolved' : 'empty-confirmed';
 }
 
+function isMetadataScanComplete(metadata) {
+    const state = getMetadataState(metadata);
+    return state === 'empty-confirmed' ||
+        state === 'resolved' && metadata?.metadataPartial !== true;
+}
+
+function hasMetadataPayload(metadata) {
+    return Boolean(metadata && typeof metadata === 'object' &&
+        Object.keys(metadata).some(key => key !== 'isIncomplete' && key !== 'requiresTailFetch'));
+}
+
+function mergeWebpStreamMetadata(metadata, result) {
+    const merged = metadata && typeof metadata === 'object' ? metadata : {};
+    if (!result || typeof result !== 'object') return merged;
+    const alreadyPartial = merged.metadataPartial === true;
+    const existingMetadataKeys = Object.keys(merged)
+        .filter(key => key !== 'isIncomplete' && key !== 'requiresTailFetch');
+    const streamMetadata = result.metadata && typeof result.metadata === 'object'
+        ? result.metadata
+        : {};
+    for (const [key, value] of Object.entries(result.metadata || {})) merged[key] = value;
+    delete merged.requiresTailFetch;
+    const hasMetadata = Object.keys(merged).some(key => key !== 'isIncomplete' && key !== 'requiresTailFetch');
+    const streamState = result.state;
+    let state = 'unresolved';
+    if (streamState === 'resolved' || hasMetadata) state = 'resolved';
+    else if (streamState === 'resource-limit') state = 'resource-limit';
+    else if (result.complete === true && streamState === 'empty-confirmed') state = 'empty-confirmed';
+    else if (result.complete === true && streamState === 'invalid') state = 'invalid';
+    if (state === 'unresolved') merged.isIncomplete = true;
+    else delete merged.isIncomplete;
+    Object.defineProperty(merged, 'parserState', {
+        value: state,
+        enumerable: false,
+        configurable: true,
+    });
+    const fullStreamSupersedesExistingMetadata = result.complete === true &&
+        streamState === 'resolved' &&
+        existingMetadataKeys.every(key => Object.prototype.hasOwnProperty.call(streamMetadata, key));
+    if (result.complete !== true || result.metadataPartial === true || result.incompleteMetadataChunk === true ||
+        (alreadyPartial && !fullStreamSupersedesExistingMetadata)) {
+        Object.defineProperty(merged, 'metadataPartial', {
+            value: true,
+            enumerable: false,
+            configurable: true,
+        });
+    } else {
+        delete merged.metadataPartial;
+    }
+    return merged;
+}
+
 function getMetadataHeadBudget(format) {
     switch (format) {
         case 'jpeg': return METADATA_JPEG_HEAD_BUDGET_BYTES;
@@ -1556,7 +1610,7 @@ function getMetadataHeadBudget(format) {
 
 /**
  * WebP RIFFヘッダーに含まれる宣言サイズを安全に取得する。
- * Content-Lengthがない場合でもtail取得の上限判定にだけ利用する。
+ * Content-Lengthがない場合でもWebPストリーム上限判定に利用する。
  * @param {Uint8Array|ArrayBuffer} value - 先頭bytes
  * @returns {number|null} - RIFF全体の宣言サイズ、または不明
  */
@@ -1570,7 +1624,7 @@ function getDeclaredWebpSize(value) {
     const riffPayloadSize = view[4] + (view[5] << 8) + (view[6] << 16) + (view[7] * 0x1000000);
     const totalSize = riffPayloadSize + 8;
     return Number.isSafeInteger(totalSize) && totalSize >= 12 &&
-        totalSize <= MAX_WEBP_TAIL_DECLARED_SIZE ? totalSize : null;
+        totalSize <= MAX_WEBP_RIFF_SIZE_BYTES ? totalSize : null;
 }
 
 function isBoundedMetadataFormat(format) {
@@ -2660,13 +2714,13 @@ async function handleFetchImageMetadata(imageUrl) {
     const SAFE_RESULT_FORMATS = new Set(['jpeg', 'webp', 'avif', 'png', 'safetensors', 'unknown']);
     const SAFE_RESULT_STATES = new Set([
         'resolved', 'confirmed-empty', 'empty-confirmed', 'unresolved',
-        'resource-limit', 'failure', 'unsupported-format',
+        'resource-limit', 'invalid', 'failure', 'unsupported-format',
     ]);
     const SAFE_RESULT_REASONS = new Set([
         'access-denied', 'acquisition-failed', 'aborted', 'cancelled', 'timeout',
         'body-missing', 'status-error', 'read-error', 'representation-incomplete',
         'metadata-unresolved', 'parser-failure', 'scanner-failure', 'invalid-png',
-        'resource-limit', 'truncated', 'structural', 'not-found', 'unsupported-format',
+        'resource-limit', 'truncated', 'structural', 'invalid-exif', 'not-found', 'unsupported-format',
         'found',
     ]);
     const SAFE_ERROR_NAMES = new Set([
@@ -2743,6 +2797,7 @@ async function handleFetchImageMetadata(imageUrl) {
         parserState,
         parserReason,
         scannerStatus,
+        metadataPartial = false,
         reason,
         error,
         cached = false,
@@ -2797,6 +2852,7 @@ async function handleFetchImageMetadata(imageUrl) {
             ...(safeParserState ? { parserState: safeParserState } : {}),
             ...(parserReason ? { parserReason: normalizeSafeReason(parserReason, safeReason) } : {}),
             ...(scannerStatus ? { scannerStatus: normalizeSafeScannerStatus(scannerStatus) } : {}),
+            ...(metadataPartial ? { metadataPartial: true } : {}),
             reason: safeReason,
             ...(cached ? { cached: true } : {}),
             diagnostics: diagnostic,
@@ -2828,12 +2884,12 @@ async function handleFetchImageMetadata(imageUrl) {
         let domain = parsedImageUrl?.hostname || '';
         let totalFileSize = 0; // 追加：Rangeリクエスト時の総サイズ保持
         // Content-Range の complete-length が `*` の場合、総サイズは不明となる。
-        // tail fetch は総サイズが既知であることを前提とするため明示的に区別する。
+        // 続きのRange取得は総サイズ既知と不明を区別する。
         let totalFileSizeKnown = false;
         // PNG を全body保持せず stream で受け取った場合の入力。
         // これが設定されている間は buffer を持たない。
         let pngStreamInput = null;
-        let webpTailBuffer = null;
+        let webpStreamResult = null;
         let pngBufferRequiresGate = false;
         let pngBufferCharge = PNG_FULL_STREAM_UNKNOWN_SIZE_CHARGE_BYTES;
 
@@ -2873,12 +2929,26 @@ async function handleFetchImageMetadata(imageUrl) {
             allowPngStream = true,
             allowBodylessFileFallback = false,
             signal = null,
+            maxWebpScanBytes = MAX_WEBP_STREAM_SCAN_BYTES,
         } = {}) => {
             const declaredLength = getDeclaredContentLength(response.headers);
+            const hasDeclaredLength = declaredLength !== null;
+            const contentRange = response.status === HTTP_PARTIAL_CONTENT_STATUS
+                ? parseContentRangeHeader(response.headers?.get?.('content-range'))
+                : null;
+            const responseInputComplete = response.status !== HTTP_PARTIAL_CONTENT_STATUS ||
+                Boolean(contentRange && contentRange.start === 0 && contentRange.total !== null &&
+                    contentRange.end + 1 === contentRange.total);
             const charge = declaredLength !== null && declaredLength > 0
                 ? declaredLength
                 : PNG_FULL_STREAM_UNKNOWN_SIZE_CHARGE_BYTES;
             const formatPrefixLimit = 12;
+            const webpScanLimitBytes = Math.min(
+                Number.isSafeInteger(maxWebpScanBytes) && maxWebpScanBytes > 0
+                    ? maxWebpScanBytes
+                    : MAX_WEBP_STREAM_SCAN_BYTES,
+                MAX_WEBP_DEEP_SCAN_BYTES,
+            );
 
             if (!response.body || typeof response.body.getReader !== 'function') {
                 const contentType = String(response.headers?.get?.('content-type') || '').toLowerCase();
@@ -2886,7 +2956,6 @@ async function handleFetchImageMetadata(imageUrl) {
                 const bodylessLimit = allowBodylessFileFallback
                     ? FILE_BODYLESS_FALLBACK_LIMIT
                     : bodylessPng ? BODYLESS_PNG_FALLBACK_LIMIT : FULL_FETCH_SIZE_LIMIT;
-                const hasDeclaredLength = declaredLength !== null;
                 if (!hasDeclaredLength || declaredLength > bodylessLimit) {
                     throw createMetadataSizeLimitError(
                         hasDeclaredLength ? declaredLength : bodylessLimit + 1,
@@ -2914,6 +2983,27 @@ async function handleFetchImageMetadata(imageUrl) {
                     };
                 }
                 const format = detectImageFormat(fullBuffer);
+                if (format === 'webp' && typeof createWebpMetadataStreamScanner === 'function') {
+                    const scanner = createWebpMetadataStreamScanner({
+                        maxMetadataBytes: METADATA_WEBP_HEAD_BUDGET_BYTES,
+                        maxContainerBytes: MAX_WEBP_RIFF_SIZE_BYTES,
+                    });
+                    scanner.push(new Uint8Array(fullBuffer, 0, Math.min(fullBuffer.byteLength, webpScanLimitBytes)));
+                    let result = scanner.finish({ inputComplete: responseInputComplete });
+                    if (fullBuffer.byteLength > webpScanLimitBytes && result.complete !== true &&
+                        result.state !== 'resource-limit') {
+                        result = { ...result, state: 'resource-limit', complete: false, scanLimitReached: true };
+                    }
+                    const head = fullBuffer.slice(0, METADATA_WEBP_HEAD_BUDGET_BYTES);
+                    return {
+                        kind: 'buffer',
+                        buffer: head,
+                        webpStreamResult: result,
+                        inputComplete: result.complete === true,
+                        totalFileSize: fullBuffer.byteLength,
+                        totalFileSizeKnown: true,
+                    };
+                }
                 const budget = getMetadataHeadBudget(format);
                 if (isBoundedMetadataFormat(format) && fullBuffer.byteLength > budget) {
                     const limited = fullBuffer.slice(0, budget);
@@ -2921,19 +3011,11 @@ async function handleFetchImageMetadata(imageUrl) {
                         format,
                         inputComplete: false,
                     });
-                    const state = getMetadataState(boundedMetadata);
-                    if (state === 'resolved' || state === 'empty-confirmed') {
+                    if (isMetadataScanComplete(boundedMetadata)) {
                         return { kind: 'buffer', buffer: limited };
                     }
-                    if (format === 'webp' && boundedMetadata.requiresTailFetch) {
-                        return {
-                            kind: 'buffer',
-                            buffer: limited,
-                            inputComplete: false,
-                            requiresTailFetch: true,
-                            totalFileSize: fullBuffer.byteLength,
-                            totalFileSizeKnown: true,
-                        };
+                    if (boundedMetadata.metadataPartial === true && hasMetadataPayload(boundedMetadata)) {
+                        return { kind: 'buffer', buffer: limited, inputComplete: false };
                     }
                     throw createMetadataHeadBudgetError(fullBuffer.byteLength, budget, format);
                 }
@@ -2948,12 +3030,15 @@ async function handleFetchImageMetadata(imageUrl) {
             const prefix = new Uint8Array(formatPrefixLimit);
             let prefixLength = 0;
             let totalLength = 0;
+            let sourceBytesRead = 0;
             let pngPrefix = PNG_PREFIX_UNDETERMINED;
             let format = null;
             let handedOverToScanner = false;
             let boundedMetadata = null;
-            let declaredFormatSize = null;
             let nextParseAt = 0;
+            let webpScanner = null;
+            let webpScannerResult = null;
+            let webpBytesScanned = 0;
 
             const materialize = () => {
                 const buffer = new Uint8Array(totalLength);
@@ -3037,6 +3122,8 @@ async function handleFetchImageMetadata(imageUrl) {
                     const chunk = record.value instanceof Uint8Array
                         ? record.value
                         : new Uint8Array(record.value);
+                    const chunkStart = sourceBytesRead;
+                    sourceBytesRead += chunk.byteLength;
 
                     if (prefixLength < prefix.length) {
                         const amount = Math.min(prefix.length - prefixLength, chunk.byteLength);
@@ -3065,24 +3152,45 @@ async function handleFetchImageMetadata(imageUrl) {
                     if (!format && prefixLength >= 3) {
                         format = detectImageFormatDetailed(prefix.subarray(0, prefixLength)).format;
                     }
-                    if (format === 'webp' && declaredFormatSize === null) {
-                        declaredFormatSize = getDeclaredWebpSize(prefix.subarray(0, prefixLength));
+                    if (format === 'webp' && typeof createWebpMetadataStreamScanner === 'function') {
+                        if (!webpScanner) {
+                            webpScanner = createWebpMetadataStreamScanner({
+                                maxMetadataBytes: METADATA_WEBP_HEAD_BUDGET_BYTES,
+                                maxContainerBytes: MAX_WEBP_RIFF_SIZE_BYTES,
+                            });
+                            const priorBytes = materialize();
+                            if (priorBytes.byteLength > 0) {
+                                webpScannerResult = webpScanner.push(priorBytes);
+                                webpBytesScanned = priorBytes.byteLength;
+                            }
+                        }
+                        const alreadyScanned = Math.max(0, webpBytesScanned - chunkStart);
+                        if (alreadyScanned < chunk.byteLength && webpBytesScanned < webpScanLimitBytes) {
+                            const scanLength = Math.min(
+                                chunk.byteLength - alreadyScanned,
+                                webpScanLimitBytes - webpBytesScanned,
+                            );
+                            webpScannerResult = webpScanner.push(
+                                chunk.subarray(alreadyScanned, alreadyScanned + scanLength),
+                            );
+                            webpBytesScanned += scanLength;
+                        }
                     }
                     const budget = getMetadataHeadBudget(format);
                     const remaining = budget - totalLength;
-                    if (remaining <= 0) {
+                    if (remaining <= 0 && format !== 'webp') {
                         await cancelReader();
                         throw createMetadataHeadBudgetError(totalLength, budget, format || 'unknown');
                     }
-                    const accepted = chunk.byteLength > remaining
+                    const accepted = chunk.byteLength > Math.max(0, remaining)
                         // budgetを跨ぐchunkは必要prefixだけを独立保持し、
                         // 元chunkの超過領域をbacking store経由で保持しない。
-                        ? chunk.slice(0, remaining)
+                        ? chunk.slice(0, Math.max(0, remaining))
                         : chunk;
-                    chunks.push(accepted);
+                    if (accepted.byteLength > 0) chunks.push(accepted);
                     totalLength += accepted.byteLength;
 
-                    if (format) {
+                    if (format && format !== 'webp') {
                         if (nextParseAt === 0) {
                             nextParseAt = Math.min(budget, Math.max(formatPrefixLimit, 4096));
                         }
@@ -3096,8 +3204,7 @@ async function handleFetchImageMetadata(imageUrl) {
                                 inputComplete: false,
                             });
                             boundedMetadata = partialMetadata;
-                            const state = getMetadataState(partialMetadata);
-                            if (state === 'resolved' || state === 'empty-confirmed') {
+                            if (format !== 'webp' && isMetadataScanComplete(partialMetadata)) {
                                 await cancelReader();
                                 assertReaderActive();
                                 return { kind: 'buffer', buffer: partialBuffer };
@@ -3109,22 +3216,37 @@ async function handleFetchImageMetadata(imageUrl) {
                         }
                     }
 
-                    if (chunk.byteLength > accepted.byteLength || totalLength >= budget) {
+                    const webpScanLimitExceeded = webpBytesScanned >= webpScanLimitBytes &&
+                        (sourceBytesRead > webpBytesScanned ||
+                            (hasDeclaredLength && declaredLength > webpBytesScanned));
+                    if (format === 'webp' && webpScanner &&
+                        (webpScanLimitExceeded || webpScannerResult?.state === 'resource-limit')) {
                         await cancelReader();
-                        if (format === 'webp' &&
-                            boundedMetadata?.requiresTailFetch &&
-                            (Number.isSafeInteger(declaredLength) && declaredLength > totalLength ||
-                                Number.isSafeInteger(declaredFormatSize) && declaredFormatSize > totalLength)) {
-                            const completeSize = Number.isSafeInteger(declaredLength) && declaredLength > totalLength
-                                ? declaredLength
-                                : declaredFormatSize;
+                        assertReaderActive();
+                        const snapshot = webpScanner.finish({ inputComplete: responseInputComplete });
+                        const result = snapshot.complete === true || snapshot.state === 'resource-limit'
+                            ? snapshot
+                            : { ...snapshot, state: 'resource-limit', complete: false, scanLimitReached: true };
+                        return {
+                            kind: 'buffer',
+                            buffer: materialize(),
+                            webpStreamResult: result,
+                            inputComplete: result.complete === true,
+                            totalFileSize: hasDeclaredLength ? declaredLength : sourceBytesRead,
+                            totalFileSizeKnown: hasDeclaredLength,
+                        };
+                    }
+
+                    if (format !== 'webp' && (chunk.byteLength > accepted.byteLength || totalLength >= budget)) {
+                        await cancelReader();
+                        if (boundedMetadata?.metadataPartial === true && hasMetadataPayload(boundedMetadata)) {
+                            assertReaderActive();
                             return {
                                 kind: 'buffer',
                                 buffer: materialize(),
                                 inputComplete: false,
-                                requiresTailFetch: true,
-                                totalFileSize: completeSize,
-                                totalFileSizeKnown: true,
+                                totalFileSize: hasDeclaredLength ? declaredLength : sourceBytesRead,
+                                totalFileSizeKnown: hasDeclaredLength,
                             };
                         }
                         throw createMetadataHeadBudgetError(totalLength, budget, format || 'unknown');
@@ -3145,6 +3267,21 @@ async function handleFetchImageMetadata(imageUrl) {
             const buffer = materialize();
             if (!format && prefixLength >= 3) {
                 format = detectImageFormat(buffer);
+            }
+            if (format === 'webp') {
+                let result = webpScanner?.finish({ inputComplete: responseInputComplete }) || webpScannerResult;
+                if (webpBytesScanned >= webpScanLimitBytes && result?.complete !== true &&
+                    result?.state !== 'resource-limit') {
+                    result = { ...result, state: 'resource-limit', complete: false, scanLimitReached: true };
+                }
+                return {
+                    kind: 'buffer',
+                    buffer,
+                    webpStreamResult: result || null,
+                    inputComplete: result?.complete === true,
+                    totalFileSize: hasDeclaredLength ? declaredLength : sourceBytesRead,
+                    totalFileSizeKnown: hasDeclaredLength,
+                };
             }
             if (pngPrefix === PNG_PREFIX_PNG) {
                 if (!allowPngStream) {
@@ -3181,9 +3318,16 @@ async function handleFetchImageMetadata(imageUrl) {
         const readFileResponseForMetadata = async (response, {
             imageUrl: localImageUrl,
             signal = null,
+            maxWebpScanBytes = MAX_WEBP_STREAM_SCAN_BYTES,
         } = {}) => {
             const declaredLength = getDeclaredContentLength(response.headers);
             const hasDeclaredLength = declaredLength !== null;
+            const webpScanLimitBytes = Math.min(
+                Number.isSafeInteger(maxWebpScanBytes) && maxWebpScanBytes > 0
+                    ? maxWebpScanBytes
+                    : MAX_WEBP_STREAM_SCAN_BYTES,
+                MAX_WEBP_DEEP_SCAN_BYTES,
+            );
             const contentType = String(response.headers?.get?.('content-type') || '').toLowerCase();
             const urlLower = String(localImageUrl || '').toLowerCase();
             const formatHint = contentType.includes('png') || urlLower.endsWith('.png')
@@ -3205,12 +3349,14 @@ async function handleFetchImageMetadata(imageUrl) {
                     case 'avif':
                         return METADATA_JPEG_HEAD_BUDGET_BYTES;
                     case 'webp':
-                        return METADATA_WEBP_HEAD_BUDGET_BYTES + METADATA_WEBP_TAIL_BUDGET_BYTES;
+                        return MAX_WEBP_BODYLESS_BUFFER_BYTES;
                     case 'safetensors':
                         return METADATA_SAFETENSORS_HEAD_BUDGET_BYTES;
                     case 'png':
                         return localPngLimit;
                     default:
+                        // Bodyless応答は読み込み前にsignatureを調べられないため、
+                        // 形式不明時は対応形式の最大上限まで検出用に読む。
                         return METADATA_SAFETENSORS_HEAD_BUDGET_BYTES;
                 }
             };
@@ -3229,10 +3375,11 @@ async function handleFetchImageMetadata(imageUrl) {
             };
 
             if (!response.body || typeof response.body.getReader !== 'function') {
-                if (!hasDeclaredLength || declaredLength > getLocalLimit(formatHint)) {
+                const preReadLimit = getLocalLimit(formatHint);
+                if (!hasDeclaredLength || declaredLength > preReadLimit) {
                     throw createMetadataSizeLimitError(
-                        hasDeclaredLength ? declaredLength : getLocalLimit(formatHint) + 1,
-                        getLocalLimit(formatHint),
+                        hasDeclaredLength ? declaredLength : preReadLimit + 1,
+                        preReadLimit,
                     );
                 }
                 if (typeof response.arrayBuffer !== 'function') {
@@ -3243,11 +3390,15 @@ async function handleFetchImageMetadata(imageUrl) {
                 if (!(fullBuffer instanceof ArrayBuffer) || fullBuffer.byteLength === 0) {
                     throw new Error('File response body is empty.');
                 }
-                if (fullBuffer.byteLength > declaredLength || fullBuffer.byteLength > getLocalLimit(formatHint)) {
-                    throw createMetadataSizeLimitError(fullBuffer.byteLength, getLocalLimit(formatHint));
+                if (fullBuffer.byteLength > declaredLength || fullBuffer.byteLength > preReadLimit) {
+                    throw createMetadataSizeLimitError(fullBuffer.byteLength, preReadLimit);
                 }
                 const bytes = new Uint8Array(fullBuffer);
                 const format = detectImageFormat(bytes);
+                const detectedLimit = getLocalLimit(format || formatHint);
+                if (fullBuffer.byteLength > detectedLimit) {
+                    throw createMetadataSizeLimitError(fullBuffer.byteLength, detectedLimit);
+                }
                 if (format === 'png') {
                     return {
                         kind: 'png-buffer',
@@ -3259,8 +3410,47 @@ async function handleFetchImageMetadata(imageUrl) {
                         gateRequired: true,
                     };
                 }
+                if (format === 'webp' && typeof createWebpMetadataStreamScanner === 'function') {
+                    const scanner = createWebpMetadataStreamScanner({
+                        maxMetadataBytes: METADATA_WEBP_HEAD_BUDGET_BYTES,
+                        maxContainerBytes: MAX_WEBP_RIFF_SIZE_BYTES,
+                    });
+                    scanner.push(bytes.subarray(0, Math.min(bytes.byteLength, webpScanLimitBytes)));
+                    const result = scanner.finish();
+                    const head = bytes.slice(0, METADATA_WEBP_HEAD_BUDGET_BYTES);
+                    return {
+                        kind: 'buffer',
+                        buffer: head.buffer,
+                        webpStreamResult: result,
+                        inputComplete: result.complete === true,
+                        totalFileSize: bytes.byteLength,
+                        totalFileSizeKnown: true,
+                    };
+                }
                 const budget = localHeadLimit(format || formatHint);
                 if (bytes.byteLength > budget) {
+                    const limited = bytes.slice(0, budget);
+                    const boundedMetadata = format
+                        ? extractMetadata(limited, { format, inputComplete: false })
+                        : null;
+                    if (boundedMetadata && isMetadataScanComplete(boundedMetadata)) {
+                        return {
+                            kind: 'buffer',
+                            buffer: limited.buffer,
+                            inputComplete: false,
+                            totalFileSize: bytes.byteLength,
+                            totalFileSizeKnown: true,
+                        };
+                    }
+                    if (boundedMetadata?.metadataPartial === true && hasMetadataPayload(boundedMetadata)) {
+                        return {
+                            kind: 'buffer',
+                            buffer: limited.buffer,
+                            inputComplete: false,
+                            totalFileSize: bytes.byteLength,
+                            totalFileSizeKnown: true,
+                        };
+                    }
                     throw createMetadataHeadBudgetError(bytes.byteLength, budget, format || 'unknown');
                 }
                 return {
@@ -3274,18 +3464,16 @@ async function handleFetchImageMetadata(imageUrl) {
 
             const reader = response.body.getReader();
             const headChunks = [];
-            const tailChunks = [];
             const prefix = new Uint8Array(12);
             let prefixLength = 0;
             let headLength = 0;
-            let tailLength = 0;
             let totalLength = 0;
             let format = null;
-            let declaredFormatSize = null;
             let handedOverToScanner = false;
-            // WebPでMETADATA_WEBP_HEAD_BUDGET_BYTES到達後、repartitionHead/parseHeadの
-            // 再実行を1回に限定するための完了フラグ。tail蓄積(appendTail)は対象外。
             let webpHeadFinalized = false;
+            let webpScanner = null;
+            let webpScannerResult = null;
+            let webpBytesScanned = 0;
             let readerCancellationPromise = null;
             const prefixChunks = [];
             let readerReleased = false;
@@ -3328,22 +3516,6 @@ async function handleFetchImageMetadata(imageUrl) {
                 }
                 return result;
             };
-            const appendTail = (value) => {
-                if (value.byteLength === 0) return;
-                tailChunks.push(value.slice());
-                tailLength += value.byteLength;
-                while (tailLength > METADATA_WEBP_TAIL_BUDGET_BYTES && tailChunks.length > 0) {
-                    const excess = tailLength - METADATA_WEBP_TAIL_BUDGET_BYTES;
-                    const first = tailChunks[0];
-                    if (first.byteLength <= excess) {
-                        tailChunks.shift();
-                        tailLength -= first.byteLength;
-                    } else {
-                        tailChunks[0] = first.slice(excess);
-                        tailLength -= excess;
-                    }
-                }
-            };
             const appendHead = (value, limit) => {
                 const remaining = limit - headLength;
                 if (remaining <= 0) return value;
@@ -3366,27 +3538,24 @@ async function handleFetchImageMetadata(imageUrl) {
                     bytes[2] !== 0x46 || bytes[3] !== 0x46 || bytes[8] !== 0x57 ||
                     bytes[9] !== 0x45 || bytes[10] !== 0x42 || bytes[11] !== 0x50) return;
                 const declared = getDeclaredWebpSize(bytes);
-                if (!Number.isSafeInteger(declared) || declared > MAX_WEBP_TAIL_DECLARED_SIZE) {
+                if (!Number.isSafeInteger(declared) || declared > MAX_WEBP_RIFF_SIZE_BYTES) {
                     throw createMetadataSizeLimitError(
-                        Number.isSafeInteger(declared) ? declared : MAX_WEBP_TAIL_DECLARED_SIZE + 1,
-                        MAX_WEBP_TAIL_DECLARED_SIZE,
+                        Number.isSafeInteger(declared) ? declared : MAX_WEBP_RIFF_SIZE_BYTES + 1,
+                        MAX_WEBP_RIFF_SIZE_BYTES,
                     );
                 }
-                if (hasDeclaredLength && declared > MAX_WEBP_TAIL_DECLARED_SIZE) {
-                    throw createMetadataSizeLimitError(declaredLength, MAX_WEBP_TAIL_DECLARED_SIZE);
+                if (hasDeclaredLength && declared > MAX_WEBP_RIFF_SIZE_BYTES) {
+                    throw createMetadataSizeLimitError(declaredLength, MAX_WEBP_RIFF_SIZE_BYTES);
                 }
-                declaredFormatSize = declared;
             };
             const repartitionHead = () => {
                 const allHead = materialize(headChunks, headLength);
                 if (format === 'webp') {
                     checkWebpDeclaredSize(allHead);
                     const boundedHead = allHead.subarray(0, METADATA_WEBP_HEAD_BUDGET_BYTES);
-                    const overflow = allHead.subarray(METADATA_WEBP_HEAD_BUDGET_BYTES);
                     headChunks.length = 0;
                     headChunks.push(boundedHead.slice());
                     headLength = boundedHead.byteLength;
-                    appendTail(overflow);
                     return;
                 }
                 const budget = localHeadLimit(format);
@@ -3404,6 +3573,31 @@ async function handleFetchImageMetadata(imageUrl) {
                 });
                 if (format === 'webp') checkWebpDeclaredSize(materialize(headChunks, headLength));
                 return parsed;
+            };
+            const feedWebpScanner = (chunk, copiedFromChunk) => {
+                if (format !== 'webp' || typeof createWebpMetadataStreamScanner !== 'function') return;
+                const pushWebpBytes = (bytes) => {
+                    const remaining = webpScanLimitBytes - webpBytesScanned;
+                    if (remaining <= 0 || bytes.byteLength === 0) return;
+                    const accepted = bytes.subarray(0, Math.min(bytes.byteLength, remaining));
+                    webpScannerResult = webpScanner.push(accepted);
+                    webpBytesScanned += accepted.byteLength;
+                };
+                if (!webpScanner) {
+                    webpScanner = createWebpMetadataStreamScanner({
+                        maxMetadataBytes: METADATA_WEBP_HEAD_BUDGET_BYTES,
+                        maxContainerBytes: MAX_WEBP_RIFF_SIZE_BYTES,
+                    });
+                    const priorPrefix = materialize(prefixChunks, prefixLength);
+                    if (priorPrefix.byteLength > 0) {
+                        pushWebpBytes(priorPrefix);
+                    }
+                    if (copiedFromChunk < chunk.byteLength) {
+                        pushWebpBytes(chunk.subarray(copiedFromChunk));
+                    }
+                    return;
+                }
+                pushWebpBytes(chunk);
             };
             const readWithTimeout = async () => {
                 let timer = null;
@@ -3471,26 +3665,39 @@ async function handleFetchImageMetadata(imageUrl) {
                             };
                         }
                     }
+                    if (format === 'webp') {
+                        checkWebpDeclaredSize(prefix.subarray(0, prefixLength));
+                        feedWebpScanner(chunk, copiedFromChunk);
+                    }
                     const storageLimit = format ? localHeadLimit(format) : METADATA_SAFETENSORS_HEAD_BUDGET_BYTES;
                     if (format === 'webp') {
-                        const overflow = appendHead(chunk, storageLimit);
-                        appendTail(overflow);
-                        if (!webpHeadFinalized) repartitionHead();
+                        appendHead(chunk, storageLimit);
+                        if (!webpHeadFinalized && headLength >= METADATA_WEBP_HEAD_BUDGET_BYTES) {
+                            repartitionHead();
+                            webpHeadFinalized = true;
+                        }
                     } else {
                         const overflow = appendHead(chunk, storageLimit);
                         if (overflow.byteLength > 0) {
                             const partial = parseHead(false);
-                            const state = getMetadataState(partial);
-                            if (state !== 'resolved' && state !== 'empty-confirmed') {
+                            if (!isMetadataScanComplete(partial)) {
                                 await cancelReader();
+                                if (partial?.metadataPartial === true && hasMetadataPayload(partial)) {
+                                    return {
+                                        kind: 'buffer',
+                                        buffer: materialize(headChunks, headLength).buffer,
+                                        inputComplete: false,
+                                        totalFileSize: hasDeclaredLength ? declaredLength : totalLength,
+                                        totalFileSizeKnown: hasDeclaredLength,
+                                    };
+                                }
                                 throw createMetadataHeadBudgetError(headLength, storageLimit, format || 'unknown');
                             }
                         }
                     }
                     if (format && format !== 'webp' && headLength >= storageLimit) {
                         const partial = parseHead(false);
-                        const state = getMetadataState(partial);
-                        if (state === 'resolved' || state === 'empty-confirmed') {
+                        if (isMetadataScanComplete(partial)) {
                             await cancelReader();
                             return {
                                 kind: 'buffer',
@@ -3500,20 +3707,15 @@ async function handleFetchImageMetadata(imageUrl) {
                                 totalFileSizeKnown: hasDeclaredLength,
                             };
                         }
-                    } else if (format === 'webp' && headLength >= METADATA_WEBP_HEAD_BUDGET_BYTES) {
-                        if (!webpHeadFinalized) {
-                            webpHeadFinalized = true;
-                            const partial = parseHead(false);
-                            if (getMetadataState(partial) === 'resolved') {
-                                await cancelReader();
-                                return {
-                                    kind: 'buffer',
-                                    buffer: materialize(headChunks, headLength).buffer,
-                                    inputComplete: false,
-                                    totalFileSize: hasDeclaredLength ? declaredLength : totalLength,
-                                    totalFileSizeKnown: hasDeclaredLength,
-                                };
-                            }
+                        if (partial?.metadataPartial === true && hasMetadataPayload(partial)) {
+                            await cancelReader();
+                            return {
+                                kind: 'buffer',
+                                buffer: materialize(headChunks, headLength).buffer,
+                                inputComplete: false,
+                                totalFileSize: hasDeclaredLength ? declaredLength : totalLength,
+                                totalFileSizeKnown: hasDeclaredLength,
+                            };
                         }
                     }
                     if (!format && headLength >= METADATA_SAFETENSORS_HEAD_BUDGET_BYTES) {
@@ -3524,25 +3726,40 @@ async function handleFetchImageMetadata(imageUrl) {
                         await cancelReader();
                         throw new Error('File response exceeded its declared length.');
                     }
-                    if (format === 'webp' && declaredFormatSize !== null &&
-                        totalLength > declaredFormatSize) {
-                        await cancelReader();
-                        throw new Error('WebP RIFF body exceeded its declared size.');
+                    const webpScanLimitExceeded = webpBytesScanned >= webpScanLimitBytes &&
+                        (totalLength > webpBytesScanned ||
+                            (hasDeclaredLength && declaredLength > webpBytesScanned));
+                    if (format === 'webp' &&
+                        (webpScanLimitExceeded || webpScannerResult?.state === 'resource-limit')) {
+                        const snapshot = webpScanner?.finish() || webpScannerResult;
+                        const result = snapshot?.complete === true || snapshot?.state === 'resource-limit'
+                            ? snapshot
+                            : { ...snapshot, state: 'resource-limit', complete: false, scanLimitReached: true };
+                        return {
+                            kind: 'buffer',
+                            buffer: materialize(headChunks, headLength).buffer,
+                            webpStreamResult: result || null,
+                            inputComplete: result?.complete === true,
+                            totalFileSize: hasDeclaredLength ? declaredLength : totalLength,
+                            totalFileSizeKnown: hasDeclaredLength,
+                        };
                     }
                 }
 
                 assertActive();
                 if (!format) format = detectImageFormat(materialize(headChunks, headLength));
                 if (format === 'webp') {
+                    let result = webpScanner?.finish() || webpScannerResult;
+                    if (webpBytesScanned >= webpScanLimitBytes && result?.complete !== true &&
+                        result?.state !== 'resource-limit') {
+                        result = { ...result, state: 'resource-limit', complete: false, scanLimitReached: true };
+                    }
                     const head = materialize(headChunks, headLength);
-                    const parsed = parseHead(true);
-                    const state = getMetadataState(parsed);
                     return {
                         kind: 'buffer',
                         buffer: head.buffer,
-                        tailBuffer: materialize(tailChunks, tailLength).buffer,
-                        inputComplete: state === 'resolved' || state === 'empty-confirmed',
-                        requiresTailFetch: state === 'unresolved' || parsed?.requiresTailFetch === true,
+                        webpStreamResult: result || null,
+                        inputComplete: result?.complete === true,
                         totalFileSize: hasDeclaredLength ? declaredLength : totalLength,
                         totalFileSizeKnown: hasDeclaredLength,
                     };
@@ -3641,7 +3858,7 @@ async function handleFetchImageMetadata(imageUrl) {
          * @param {string} url - 取得URL
          * @returns {Promise<Object>} - readResponseForMetadata の結果
          */
-        const safeFetchFullInput = (url, signal = null) => withFullFetchHeadersTimeout(
+        const safeFetchFullInput = (url, signal = null, options = {}) => withFullFetchHeadersTimeout(
             url,
             signal,
             (response, requestSignal) => {
@@ -3649,9 +3866,35 @@ async function handleFetchImageMetadata(imageUrl) {
                 return readResponseForMetadata(response, {
                     allowPngStream: true,
                     signal: requestSignal,
+                    maxWebpScanBytes: options.maxWebpScanBytes,
                 });
             }
         );
+
+        const safeFetchFullWebpInput = async (url, signal = null, { deepScan = false } = {}) => {
+            const readFullWebpInput = async (maxWebpScanBytes) => {
+                if (!isFileScheme) {
+                    return safeFetchFullInput(url, signal, { maxWebpScanBytes });
+                }
+                const response = await fetch(url, { redirect: 'follow', signal });
+                if (!response || response.status !== HTTP_OK_STATUS) {
+                    throw new Error(`WebP full scan failed with HTTP ${response?.status ?? 'unknown'}.`);
+                }
+                return readFileResponseForMetadata(response, {
+                    imageUrl: url,
+                    signal,
+                    maxWebpScanBytes,
+                });
+            };
+
+            const input = await readFullWebpInput(
+                deepScan ? MAX_WEBP_DEEP_SCAN_BYTES : MAX_WEBP_STREAM_SCAN_BYTES,
+            );
+            if (!deepScan && input.webpStreamResult?.scanLimitReached === true) {
+                return readFullWebpInput(MAX_WEBP_DEEP_SCAN_BYTES);
+            }
+            return input;
+        };
 
         /**
          * 非PNG経路の再試行用の全取得 Fetch。buffer だけを返す。
@@ -3712,7 +3955,7 @@ async function handleFetchImageMetadata(imageUrl) {
                     rangeRepresentationComplete = true;
                 } else {
                     buffer = input.buffer;
-                    webpTailBuffer = input.tailBuffer || null;
+                    webpStreamResult = input.webpStreamResult || null;
                     pngBufferRequiresGate = input.gateRequired === true;
                     pngBufferCharge = input.charge || PNG_FULL_STREAM_UNKNOWN_SIZE_CHARGE_BYTES;
                     totalFileSizeKnown = input.totalFileSizeKnown !== false;
@@ -3831,13 +4074,14 @@ async function handleFetchImageMetadata(imageUrl) {
                                 pngStreamInput = input;
                             } else {
                                 buffer = input.buffer;
+                                webpStreamResult = input.webpStreamResult || webpStreamResult;
                                 pngBufferRequiresGate = input.gateRequired === true;
                                 pngBufferCharge = input.charge || PNG_FULL_STREAM_UNKNOWN_SIZE_CHARGE_BYTES;
                                 totalFileSizeKnown = input.totalFileSizeKnown !== false;
                                 totalFileSize = totalFileSizeKnown
                                     ? (input.totalFileSize || buffer.byteLength)
                                     : buffer.byteLength;
-                                // WebPのhead＋tail入力だけは、既存tail Rangeへ接続する。
+                                // 続きの取得が必要な場合だけRange再試行へ接続する。
                                 isRangeRequest = input.requiresTailFetch === true && totalFileSizeKnown;
                                 rangeRepresentationComplete = input.inputComplete !== false;
                             }
@@ -3915,6 +4159,7 @@ async function handleFetchImageMetadata(imageUrl) {
                         pngStreamInput = fallbackInput;
                     } else {
                         buffer = fallbackInput.buffer;
+                        webpStreamResult = fallbackInput.webpStreamResult || webpStreamResult;
                         pngBufferRequiresGate = fallbackInput.gateRequired === true;
                         pngBufferCharge = fallbackInput.charge || PNG_FULL_STREAM_UNKNOWN_SIZE_CHARGE_BYTES;
                         totalFileSizeKnown = fallbackInput.totalFileSizeKnown !== false;
@@ -3939,6 +4184,7 @@ async function handleFetchImageMetadata(imageUrl) {
                     pngStreamInput = blockedInput;
                 } else {
                     buffer = blockedInput.buffer;
+                    webpStreamResult = blockedInput.webpStreamResult || webpStreamResult;
                     pngBufferRequiresGate = blockedInput.gateRequired === true;
                     pngBufferCharge = blockedInput.charge || PNG_FULL_STREAM_UNKNOWN_SIZE_CHARGE_BYTES;
                     totalFileSizeKnown = blockedInput.totalFileSizeKnown !== false;
@@ -4074,11 +4320,13 @@ async function handleFetchImageMetadata(imageUrl) {
             if (analysisSignal?.aborted) throw createAnalysisAbortError();
             if (scanResult.status === 'normal' || scanResult.status === 'stealth') {
                 if (analysisSignal?.aborted) throw createAnalysisAbortError();
-                const cacheResult = await metadataCache.set(
-                    imageUrl,
-                    scanResult.metadata,
-                    { scannerVersion: PNG_SCANNER_CACHE_VERSION },
-                );
+                const cacheResult = scanResult.metadataPartial === true
+                    ? null
+                    : await metadataCache.set(
+                        imageUrl,
+                        scanResult.metadata,
+                        { scannerVersion: PNG_SCANNER_CACHE_VERSION },
+                    );
                 if (!isFileScheme && cacheResult && cacheResult.reason === 'size-limit') {
                     scanResult.diagnostics = [
                         ...(scanResult.diagnostics || []),
@@ -4096,12 +4344,14 @@ async function handleFetchImageMetadata(imageUrl) {
                         format: 'png',
                         metadata: scanResult.metadata,
                         scannerStatus: scanResult.status,
+                        metadataPartial: scanResult.metadataPartial === true,
                         reason: 'found',
                     });
                 }
                 return {
                     success: true,
                     metadata: scanResult.metadata,
+                    ...(scanResult.metadataPartial === true ? { metadataPartial: true } : {}),
                     diagnostics: scanResult.diagnostics,
                 };
             }
@@ -4124,6 +4374,25 @@ async function handleFetchImageMetadata(imageUrl) {
                 return {
                     success: true,
                     metadata: {},
+                    diagnostics: scanResult.diagnostics,
+                };
+            }
+
+            if (scanResult.status === 'unresolved') {
+                if (isFileScheme) {
+                    return createFileResult({
+                        state: 'unresolved',
+                        format: 'png',
+                        parserState: 'unresolved',
+                        scannerStatus: 'unresolved',
+                        reason: scanResult.reason || 'metadata-unresolved',
+                    });
+                }
+                return {
+                    success: false,
+                    analysisState: 'unresolved',
+                    parserState: 'unresolved',
+                    error: 'PNG metadata scan is incomplete.',
                     diagnostics: scanResult.diagnostics,
                 };
             }
@@ -4152,53 +4421,84 @@ async function handleFetchImageMetadata(imageUrl) {
         }
 
         let metadata = {};
+        let fullFetchFallbackAttempted = false;
+        const fetchFullAndParse = async () => {
+            if (fullFetchFallbackAttempted) {
+                throw new Error('Full fetch fallback was already attempted.');
+            }
+            fullFetchFallbackAttempted = true;
+            // Mark the fallback before awaiting it so an outer catch cannot download
+            // the same full representation again when this attempt fails.
+            isRangeRequest = false;
+            const fullBuffer = await safeFetchFull(activeUrl, getAnalysisContext(imageUrl)?.signal);
+            buffer = fullBuffer;
+            totalFileSize = fullBuffer.byteLength;
+            totalFileSizeKnown = true;
+            rangeRepresentationComplete = true;
+            metadata = extractMetadata(fullBuffer, {
+                format: detectedFormat,
+                inputComplete: true,
+            });
+            return metadata;
+        };
         try {
             metadata = extractMetadata(buffer, {
                 format: detectedFormat,
                 inputComplete: rangeRepresentationComplete,
             });
 
-            if (isFileScheme && detectedFormat === 'webp' && webpTailBuffer) {
-                const headState = getMetadataState(metadata);
-                if (headState === 'unresolved' || metadata.requiresTailFetch) {
-                    // file://ではHTTP Rangeを使わず、取得済みrolling tailだけを既存parserへ渡す。
-                    const tailMetadata = extractWebpTailMetadata(webpTailBuffer);
-                    if (Object.keys(tailMetadata).length > 0) {
-                        Object.assign(metadata, tailMetadata);
-                        delete metadata.isIncomplete;
-                        delete metadata.requiresTailFetch;
-                        Object.defineProperty(metadata, 'parserState', {
-                            value: 'resolved',
-                            enumerable: false,
-                            configurable: true,
-                        });
+            if (detectedFormat === 'webp' && webpStreamResult) {
+                metadata = mergeWebpStreamMetadata(metadata, webpStreamResult);
+            }
+
+            const webpNeedsRecovery = detectedFormat === 'webp' &&
+                (getMetadataState(metadata) === 'unresolved' || metadata.metadataPartial === true ||
+                    webpStreamResult?.scanLimitReached === true) &&
+                (!webpStreamResult || webpStreamResult.complete !== true) &&
+                (webpStreamResult?.state !== 'resource-limit' || webpStreamResult?.scanLimitReached === true);
+            if (webpNeedsRecovery) {
+                try {
+                    const fullInput = await safeFetchFullWebpInput(
+                        activeUrl,
+                        getAnalysisContext(imageUrl)?.signal,
+                        { deepScan: webpStreamResult?.scanLimitReached === true },
+                    );
+                    if (fullInput.kind === 'png-stream') {
+                        if (fullInput.stream?.cleanup) await fullInput.stream.cleanup();
+                        throw createRepresentationMismatchError(new Uint8Array(0));
                     }
+                    buffer = fullInput.buffer;
+                    webpStreamResult = fullInput.webpStreamResult || null;
+                    totalFileSize = fullInput.totalFileSize || buffer.byteLength;
+                    totalFileSizeKnown = fullInput.totalFileSizeKnown !== false;
+                    rangeRepresentationComplete = fullInput.inputComplete === true;
+                    metadata = extractMetadata(buffer, {
+                        format: detectedFormat,
+                        inputComplete: rangeRepresentationComplete,
+                    });
+                    metadata = mergeWebpStreamMetadata(metadata, webpStreamResult);
+                    isRangeRequest = false;
+                } catch (webpScanError) {
+                    debugLog('[AI Meta Viewer] ⚠ WebP structural scan failed:', webpScanError.message);
                 }
             }
 
             // メタデータ不足時の再試行ロジック
-            if (getMetadataState(metadata) === 'unresolved' && !isFileScheme) {
+            if (getMetadataState(metadata) === 'unresolved' && !isFileScheme && detectedFormat !== 'webp') {
 
                 if (!isRangeRequest) {
                     // file:// URL 等で Range が暗黙的に効いてバッファが切り詰められたケース
                     // safeFetchFull で全ファイルを取得して再解析
                     debugLog('[AI Meta Viewer] ⚠ Metadata incomplete but not a Range request. Attempting full fetch fallback.');
                     try {
-                        const fullBuffer = await safeFetchFull(activeUrl, getAnalysisContext(imageUrl)?.signal);
-                        buffer = fullBuffer;
-                        totalFileSize = buffer.byteLength; // totalFileSize を更新
-                        totalFileSizeKnown = true;
-                        metadata = extractMetadata(buffer, {
-                            format: detectedFormat,
-                            inputComplete: true,
-                        });
+                        await fetchFullAndParse();
 
                         // full fetch 成功後、完全なメタデータが取得できた場合は以降の再試行をスキップ
                         if (getMetadataState(metadata) !== 'unresolved') {
                             debugLog('[AI Meta Viewer] ✅ Full fetch successful, metadata complete.');
                             // isRangeRequest は false のまま（Stealth PNG チェックでの重複ダウンロードを防ぐ）
                         } else {
-                            // まだ incomplete の場合のみ、tail fetch を有効化
+                            // まだ incomplete の場合のみ、Range再試行を有効化
                             isRangeRequest = true;
                         }
                     } catch (fullFetchError) {
@@ -4209,210 +4509,136 @@ async function handleFetchImageMetadata(imageUrl) {
                 // full fetch 後も metadata.isIncomplete を再チェック
                 // 完全なメタデータが取得できた場合は以降の再試行をスキップ
                 if (getMetadataState(metadata) === 'unresolved') {
-                    // ComfyUI (PNGの末尾にメタデータがあるパターン)
-                    // W2: totalFileSize が異常に小さい場合（W1の問題発生時）は tail fetch をスキップ
-                    // tail 開始位置は総サイズから逆算するため、総サイズが既知であることを必須条件とする
-                    if (metadata.requiresTailFetch && totalFileSizeKnown && totalFileSize > 65535 && isRangeRequest) {
-                        const tailSize = 131072; // 末尾 128KB 取得
-                        let tailStart = totalFileSize - tailSize;
-                        if (tailStart < 65536) tailStart = 65536; // 既取得分と被らないように
+                    const requestedRetryEnd = Number.isSafeInteger(metadata.suggestedSize) && metadata.suggestedSize > 0
+                        ? metadata.suggestedSize
+                        : 131072;
+                    const maxRetryEnd = isBoundedMetadataFormat(detectedFormat)
+                        ? getMetadataHeadBudget(detectedFormat) - 1
+                        : FULL_FETCH_SIZE_LIMIT - 1;
+                    const retrySize = Math.min(Math.max(0, requestedRetryEnd), maxRetryEnd);
+                    debugLog(`[AI Meta Viewer] ⚠ Metadata is incomplete. Retrying with larger range: 0-${retrySize}`);
 
-                        debugLog(`[AI Meta Viewer] ⚠ ComfyUI signature detected. Fetching tail for metadata: bytes=${tailStart}-`);
-                        try {
-                            const controller = new AbortController();
-                            const abortFromAnalysis = () => controller.abort();
-                            if (analysisSignal) {
-                                if (analysisSignal.aborted) controller.abort();
-                                else analysisSignal.addEventListener('abort', abortFromAnalysis, { once: true });
-                            }
-                            const timeoutId = setTimeout(
-                                () => controller.abort(),
-                                RANGE_REQUEST_TIMEOUT_MS
-                            );
-                            let tailResponse;
-                            try {
-                                tailResponse = await fetch(activeUrl, {
-                                    headers: { 'Range': `bytes=${tailStart}-` },
-                                    signal: controller.signal
-                                });
+                    let retryResponse;
+                    try {
+                        const retryRangeHeader = `bytes=0-${retrySize}`;
+                        debugLog('[AI Meta Viewer] Range Request retry attempt:', {
+                            domain: domain || '(unknown)',
+                            url: activeUrl,
+                            range: retryRangeHeader
+                        });
 
-                                if (tailResponse.status === 206 || tailResponse.status === 200) {
-                                    const tailBuffer = await tailResponse.arrayBuffer();
-
-                                    // WebPの既存tail経路だけを維持する。
-                                    const format = detectImageFormat(buffer);
-                                    let tailMetadata = {};
-
-                                    if (format === 'webp') {
-                                        tailMetadata = extractWebpTailMetadata(tailBuffer);
-                                    }
-
-                                    const foundKeys = Object.keys(tailMetadata);
-                                    if (foundKeys.length > 0) {
-                                        debugLog(`[AI Meta Viewer] ✅ Tail meta found: ${foundKeys.join(', ')}`);
-                                        Object.assign(metadata, tailMetadata);
-                                    } else {
-                                        debugLog('[AI Meta Viewer] ⚠ Tail Range fetched but no metadata found in tail.');
-                                    }
-
-                                    // フラグクリア
-                                    delete metadata.isIncomplete;
-                                    delete metadata.requiresTailFetch;
-                                } else {
-                                    const tailFailure = new Error(`HTTP ${tailResponse.status}`);
-                                    logRangeRequestFailure({
-                                        phase: 'tail',
-                                        domain,
-                                        url: activeUrl,
-                                        status: tailResponse.status,
-                                        error: tailFailure
-                                    });
-                                    debugLog(`[AI Meta Viewer] ⚠ Tail Range failed (Status: ${tailResponse.status}), giving up.`);
-                                }
-                            } finally {
-                                clearTimeout(timeoutId);
-                                if (analysisSignal) {
-                                    analysisSignal.removeEventListener('abort', abortFromAnalysis);
-                                }
-                            }
-                            isRangeRequest = false; // これ以上のフェッチを防ぐ
-                        } catch (tailError) {
-                            logRangeRequestFailure({
-                                phase: 'tail',
-                                domain,
-                                url: activeUrl,
-                                error: tailError
-                            });
-                            debugLog('[AI Meta Viewer] ⚠ Tail Range threw error:', tailError.message);
-                            isRangeRequest = false;
+                        const controller = new AbortController();
+                        const abortFromAnalysis = () => controller.abort();
+                        if (analysisSignal) {
+                            if (analysisSignal.aborted) controller.abort();
+                            else analysisSignal.addEventListener('abort', abortFromAnalysis, { once: true });
                         }
-                    }
-                    // 通常の再試行 (Safetensorsなど、前方をもっと読む)
-                    else {
-                        const retrySize = metadata.suggestedSize || 131072;
-                        debugLog(`[AI Meta Viewer] ⚠ Metadata is incomplete. Retrying with larger range: 0-${retrySize}`);
-
-                        let retryResponse;
+                        const timeoutId = setTimeout(
+                            () => controller.abort(),
+                            RANGE_REQUEST_TIMEOUT_MS
+                        );
                         try {
-                            const retryRangeHeader = `bytes=0-${retrySize}`;
-                            debugLog('[AI Meta Viewer] Range Request retry attempt:', {
+                            retryResponse = await fetch(activeUrl, {
+                                headers: { 'Range': retryRangeHeader },
+                                signal: controller.signal
+                            });
+
+                            debugLog('[AI Meta Viewer] Range Request retry response:', {
                                 domain: domain || '(unknown)',
                                 url: activeUrl,
+                                status: retryResponse.status,
+                                ok: retryResponse.ok,
                                 range: retryRangeHeader
                             });
 
-                            const controller = new AbortController();
-                            const abortFromAnalysis = () => controller.abort();
-                            if (analysisSignal) {
-                                if (analysisSignal.aborted) controller.abort();
-                                else analysisSignal.addEventListener('abort', abortFromAnalysis, { once: true });
-                            }
-                            const timeoutId = setTimeout(
-                                () => controller.abort(),
-                                RANGE_REQUEST_TIMEOUT_MS
-                            );
-                            try {
-                                retryResponse = await fetch(activeUrl, {
-                                    headers: { 'Range': retryRangeHeader },
-                                    signal: controller.signal
+                            if (retryResponse.status === 206) {
+                                const retryRange = parseContentRangeHeader(
+                                    retryResponse.headers?.get?.('Content-Range')
+                                );
+                                if (!retryRange || retryRange.start !== 0 || retryRange.end > retrySize) {
+                                    try { await retryResponse.body?.cancel?.(); } catch (_) { }
+                                    throw new Error('Invalid or over-delivered Content-Range for metadata retry.');
+                                }
+                                const newBuffer = await retryResponse.arrayBuffer();
+                                if (newBuffer.byteLength !== retryRange.length) {
+                                    throw new Error('Content-Range length does not match retry body length.');
+                                }
+                                const retryComplete = retryRange.total !== null &&
+                                    retryRange.start === 0 && retryRange.end + 1 === retryRange.total &&
+                                    retryRange.length === retryRange.total;
+                                const nextMetadata = extractMetadata(newBuffer, {
+                                    format: detectedFormat,
+                                    inputComplete: retryComplete,
                                 });
-
-                                debugLog('[AI Meta Viewer] Range Request retry response:', {
-                                    domain: domain || '(unknown)',
+                                const retryState = getMetadataState(nextMetadata);
+                                const budgetReached = isBoundedMetadataFormat(detectedFormat) &&
+                                    newBuffer.byteLength >= getMetadataHeadBudget(detectedFormat);
+                                if (retryState === 'unresolved' && !budgetReached &&
+                                    !fullFetchFallbackAttempted) {
+                                    debugLog('[AI Meta Viewer] ⚠ Still incomplete. Falling back to safe full fetch.');
+                                    await fetchFullAndParse();
+                                } else {
+                                    buffer = newBuffer;
+                                    metadata = nextMetadata;
+                                }
+                            } else if (retryResponse.status === HTTP_OK_STATUS) {
+                                const retryInput = await readResponseForMetadata(retryResponse, {
+                                    allowPngStream: false,
+                                    signal: analysisSignal,
+                                });
+                                if (retryInput.kind === 'png-stream' || retryInput.kind === 'png-buffer') {
+                                    throw createRepresentationMismatchError(
+                                        new Uint8Array(retryInput.buffer || new ArrayBuffer(0)).subarray(0, PNG_SIGNATURE.length)
+                                    );
+                                }
+                                buffer = retryInput.buffer;
+                                totalFileSize = retryInput.totalFileSize || buffer.byteLength;
+                                totalFileSizeKnown = retryInput.totalFileSizeKnown !== false;
+                                rangeRepresentationComplete = retryInput.inputComplete !== false;
+                                metadata = extractMetadata(buffer, {
+                                    format: detectedFormat,
+                                    inputComplete: rangeRepresentationComplete,
+                                });
+                            } else {
+                                const retryFailure = new Error(`HTTP ${retryResponse.status}`);
+                                logRangeRequestFailure({
+                                    phase: 'retry',
+                                    domain,
                                     url: activeUrl,
                                     status: retryResponse.status,
-                                    ok: retryResponse.ok,
-                                    range: retryRangeHeader
+                                    error: retryFailure
                                 });
-
-                                if (retryResponse.status === 206) {
-                                    const newBuffer = await retryResponse.arrayBuffer();
-                                    const retryRange = parseContentRangeHeader(
-                                        retryResponse.headers?.get?.('Content-Range')
-                                    );
-                                    const retryComplete = retryRange?.total !== null &&
-                                        retryRange?.total !== undefined &&
-                                        retryRange.length === retryRange.total;
-                                    const nextMetadata = extractMetadata(newBuffer, {
-                                        format: detectedFormat,
-                                        inputComplete: retryComplete,
-                                    });
-                                    const retryState = getMetadataState(nextMetadata);
-                                    const budgetReached = isBoundedMetadataFormat(detectedFormat) &&
-                                        newBuffer.byteLength >= getMetadataHeadBudget(detectedFormat);
-                                    if (retryState === 'unresolved' && !budgetReached) {
-                                        debugLog('[AI Meta Viewer] ⚠ Still incomplete. Falling back to safe full fetch.');
-                                        const fullBuffer = await safeFetchFull(activeUrl, getAnalysisContext(imageUrl)?.signal);
-                                        buffer = fullBuffer;
-                                        totalFileSize = buffer.byteLength; // totalFileSize を更新
-                                        totalFileSizeKnown = true;
-                                        metadata = extractMetadata(fullBuffer, {
-                                            format: detectedFormat,
-                                            inputComplete: true,
-                                        });
-                                    } else {
-                                        buffer = newBuffer;
-                                        metadata = nextMetadata;
-                                    }
-                                } else {
-                                    const retryFailure = new Error(`HTTP ${retryResponse.status}`);
-                                    logRangeRequestFailure({
-                                        phase: 'retry',
-                                        domain,
-                                        url: activeUrl,
-                                        status: retryResponse.status,
-                                        error: retryFailure
-                                    });
-                                    debugLog('[AI Meta Viewer] ⚠ Retry Range failed, falling back to safe full fetch.', {
-                                        domain: domain || '(unknown)',
-                                        status: retryResponse.status
-                                    });
-                                    const fullBuffer = await safeFetchFull(activeUrl, getAnalysisContext(imageUrl)?.signal);
-                                    buffer = fullBuffer;
-                                    totalFileSize = buffer.byteLength; // totalFileSize を更新
-                                    metadata = extractMetadata(fullBuffer, {
-                                        format: detectedFormat,
-                                        inputComplete: true,
-                                    });
-                                }
-                            } finally {
-                                clearTimeout(timeoutId);
-                                if (analysisSignal) {
-                                    analysisSignal.removeEventListener('abort', abortFromAnalysis);
-                                }
+                                debugLog('[AI Meta Viewer] ⚠ Retry Range failed; using full fetch fallback if available.', {
+                                    domain: domain || '(unknown)',
+                                    status: retryResponse.status
+                                });
+                                throw retryFailure;
                             }
-                            isRangeRequest = false;
-                        } catch (retryError) {
-                            logRangeRequestFailure({
-                                phase: 'retry',
-                                domain,
-                                url: activeUrl,
-                                status: retryResponse?.status,
-                                error: retryError
-                            });
-                            debugLog('[AI Meta Viewer] ⚠ Range retry failed, final attempt with safe full fetch:', retryError.message);
-                            const fullBuffer = await safeFetchFull(activeUrl, getAnalysisContext(imageUrl)?.signal);
-                            buffer = fullBuffer;
-                            totalFileSize = buffer.byteLength; // totalFileSize を更新
-                            metadata = extractMetadata(fullBuffer, {
-                                format: detectedFormat,
-                                inputComplete: true,
-                            });
-                            isRangeRequest = false;
+                        } finally {
+                            clearTimeout(timeoutId);
+                            if (analysisSignal) {
+                                analysisSignal.removeEventListener('abort', abortFromAnalysis);
+                            }
                         }
+                        isRangeRequest = false;
+                    } catch (retryError) {
+                        logRangeRequestFailure({
+                            phase: 'retry',
+                            domain,
+                            url: activeUrl,
+                            status: retryResponse?.status,
+                            error: retryError
+                        });
+                        debugLog('[AI Meta Viewer] ⚠ Range retry failed, final attempt with safe full fetch:', retryError.message);
+                        if (fullFetchFallbackAttempted) throw retryError;
+                        await fetchFullAndParse();
                     }
                 } // if (metadata.isIncomplete) の終わり
             }
         } catch (e) {
             debugLog('[AI Meta Viewer] Parse failed, trying safe full fetch fallback:', e.message);
-            if (isRangeRequest) {
-                const fullBuffer = await safeFetchFull(activeUrl, getAnalysisContext(imageUrl)?.signal);
-                buffer = fullBuffer;
-                metadata = extractMetadata(buffer, {
-                    format: detectedFormat,
-                    inputComplete: true,
-                });
-                isRangeRequest = false;
+            if (isRangeRequest && !fullFetchFallbackAttempted) {
+                await fetchFullAndParse();
             } else {
                 throw e;
             }
@@ -4427,6 +4653,29 @@ async function handleFetchImageMetadata(imageUrl) {
                     ? 'resource-limit'
                     : metadataState === 'unresolved' ? 'unresolved' : 'failure';
         debugLog({ category: 'parser', phase: 'background', event: 'parse-result', analysisOutcome, urlId });
+        if (metadataState === 'invalid') {
+            const parserReason = metadata.parserReason || 'invalid-metadata';
+            if (isFileScheme) {
+                const error = new Error('Metadata parser reported structurally invalid input.');
+                error.name = 'MetadataInvalidError';
+                error.format = detectedFormat;
+                error.parserState = metadataState;
+                error.parserReason = parserReason;
+                return createFileFailureResult(error, {
+                    format: detectedFormat,
+                    parserState: metadataState,
+                    parserReason,
+                    reason: parserReason,
+                });
+            }
+            return {
+                success: false,
+                analysisState: 'failure',
+                parserState: metadataState,
+                parserReason,
+                error: 'Metadata parser reported structurally invalid input.',
+            };
+        }
         if (isFileScheme) {
             filePhase = 'parser';
             fileFormat = detectedFormat;
@@ -4474,15 +4723,18 @@ async function handleFetchImageMetadata(imageUrl) {
                 });
             }
             if (metadataState === 'resolved') {
-                await metadataCache.set(imageUrl, metadata, {
-                    parserVersion: PARSER_CACHE_VERSION,
-                });
+                if (metadata.metadataPartial !== true) {
+                    await metadataCache.set(imageUrl, metadata, {
+                        parserVersion: PARSER_CACHE_VERSION,
+                    });
+                }
                 return createFileResult({
                     state: 'resolved',
                     format: detectedFormat,
                     metadata,
                     parserState: metadataState,
                     parserReason,
+                    metadataPartial: metadata.metadataPartial === true,
                     reason: 'found',
                 });
             }
@@ -4511,11 +4763,17 @@ async function handleFetchImageMetadata(imageUrl) {
                 parserState: metadataState,
             });
         } else if (Object.keys(metadata).length > 0) {
-            await metadataCache.set(imageUrl, metadata, {
-                parserVersion: PARSER_CACHE_VERSION,
-            });
+            if (metadata.metadataPartial !== true) {
+                await metadataCache.set(imageUrl, metadata, {
+                    parserVersion: PARSER_CACHE_VERSION,
+                });
+            }
         }
-        return { success: true, metadata: metadata };
+        return {
+            success: true,
+            metadata,
+            ...(metadata.metadataPartial === true ? { metadataPartial: true } : {}),
+        };
 
     } catch (error) {
         const status = Number.isInteger(error?.status) ? error.status : undefined;
