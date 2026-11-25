@@ -27,7 +27,6 @@
     const MAX_EXIF_CHUNK_PREFIX_BYTES = 64 * 1024;
     const MAX_STEALTH_HEADER_ROWS = 160;
     const MAX_IDAT_INFLATE_PUSH_BYTES = 4 * 1024;
-    const FAST_IDAT_PROCESSING_STOP = Symbol('fast-idat-processing-stop');
     const BITS_PER_BYTE = 8;
     const PNG_FILTER_TYPES = Object.freeze([0, 1, 2, 3, 4]);
     const PNG_CHANNEL_COUNTS = Object.freeze({
@@ -621,6 +620,11 @@
         finishRow(absoluteOffset) {
             const filterType = this.scanline[0];
             if (!PNG_FILTER_TYPES.includes(filterType)) throw new PngStructuralError(`Unsupported PNG filter type: ${filterType}`);
+            if (this.candidates.length === 0) {
+                this.rowsCompleted += 1;
+                if (this.onRowComplete) this.onRowComplete(absoluteOffset);
+                return;
+            }
             const bpp = this.layout.bytesPerPixel;
             for (let index = 0; index < this.layout.rowBytes; index += 1) {
                 const raw = this.scanline[index + 1];
@@ -917,7 +921,6 @@
             this.idatSeen = false;
             this.idatEnded = false;
             this.idatOpen = false;
-            this.skipIdatProcessing = false;
             this.iendSeen = false;
             this.stealthStopped = false;
             this.stealthSuppressedByNormalMetadata = false;
@@ -925,6 +928,7 @@
             this.candidates = [];
             this.stealthResult = null;
             this.metadataChunkIncomplete = false;
+            this.metadataPartial = false;
             this.fatalError = null;
         }
 
@@ -1061,16 +1065,13 @@
                 this.currentData = new Uint8Array(Math.min(this.currentLength, MAX_EXIF_CHUNK_PREFIX_BYTES));
             }
             if (this.currentType !== CHUNK_IDAT && this.idatOpen) this.finishIdat();
-            this.currentCrcState = this.currentType === CHUNK_IDAT && this.skipIdatProcessing
-                ? null
-                : globalObject.createCrc32State();
+            this.currentCrcState = globalObject.createCrc32State();
             if (this.currentCrcState) {
                 this.currentCrcState = globalObject.updateCrc32(this.currentCrcState, this.currentTypeBytes);
             }
         }
 
         ensureIdatProcessor() {
-            if (this.skipIdatProcessing) return;
             if (!this.idatInflate) {
                 this.rowAssembler = this.layout
                     ? new RowAssembler(
@@ -1079,7 +1080,6 @@
                         this.collector,
                         () => {
                             this.checkStealthStop();
-                            if (this.skipIdatProcessing) throw FAST_IDAT_PROCESSING_STOP;
                         },
                     )
                     : null;
@@ -1095,14 +1095,14 @@
 
         consumeData(bytes, cursor) {
             const remaining = this.currentLength - this.currentDataOffset;
-            const idatNeedsProcessing = this.currentType === CHUNK_IDAT && !this.skipIdatProcessing;
+            const idatNeedsProcessing = this.currentType === CHUNK_IDAT;
             const amount = Math.min(
                 bytes.length - cursor,
                 remaining,
                 idatNeedsProcessing ? MAX_IDAT_INFLATE_PUSH_BYTES : remaining,
             );
             const slice = bytes.subarray(cursor, cursor + amount);
-            if (this.currentCrcState && !(this.currentType === CHUNK_IDAT && this.skipIdatProcessing)) {
+            if (this.currentCrcState) {
                 this.currentCrcState = globalObject.updateCrc32(this.currentCrcState, slice);
             }
             if (this.currentData && this.currentType !== CHUNK_IDAT && this.currentDataOffset < this.currentData.length) {
@@ -1116,22 +1116,15 @@
                         this.idatChunkOffset,
                     );
                 }
-                try {
-                    const pushed = this.idatInflate.push(slice, false);
-                    if (!pushed || this.idatInflate.err !== 0) {
-                        throw new PngStructuralError('PNG IDAT zlib stream is invalid.', this.idatChunkOffset);
-                    }
-                    if (this.idatInflate.ended && this.idatInflate.strm && this.idatInflate.strm.avail_in > 0) {
-                        throw new PngStructuralError(
-                            'PNG IDAT contains data after the zlib stream ended.',
-                            this.idatChunkOffset,
-                        );
-                    }
-                } catch (error) {
-                    if (error !== FAST_IDAT_PROCESSING_STOP || !this.skipIdatProcessing) throw error;
-                    this.idatInflate = null;
-                    this.rowAssembler = null;
-                    this.idatStructureValidator = null;
+                const pushed = this.idatInflate.push(slice, false);
+                if (!pushed || this.idatInflate.err !== 0) {
+                    throw new PngStructuralError('PNG IDAT zlib stream is invalid.', this.idatChunkOffset);
+                }
+                if (this.idatInflate.ended && this.idatInflate.strm && this.idatInflate.strm.avail_in > 0) {
+                    throw new PngStructuralError(
+                        'PNG IDAT contains data after the zlib stream ended.',
+                        this.idatChunkOffset,
+                    );
                 }
                 this.checkStealthStop();
             }
@@ -1146,12 +1139,9 @@
         }
 
         completeChunk(crcBytes) {
-            const skippedIdatIntegrity = this.currentType === CHUNK_IDAT && this.skipIdatProcessing;
-            const expectedCrc = skippedIdatIntegrity ? null : readUint32(crcBytes, 0);
-            const actualCrc = skippedIdatIntegrity
-                ? null
-                : globalObject.finalizeCrc32(this.currentCrcState) >>> 0;
-            if (!skippedIdatIntegrity && actualCrc !== expectedCrc) {
+            const expectedCrc = readUint32(crcBytes, 0);
+            const actualCrc = globalObject.finalizeCrc32(this.currentCrcState) >>> 0;
+            if (actualCrc !== expectedCrc) {
                 if (this.currentType === CHUNK_TEXT || this.currentType === CHUNK_ITXT) {
                     const keyword = this.currentData ? getSafeTextKeyword(this.currentData) : null;
                     addTextDiagnostic(
@@ -1190,6 +1180,14 @@
                 });
                 if (parsed && Object.keys(parsed).length > 0) {
                     Object.assign(this.metadata, parsed);
+                    if (parsed.metadataPartial === true) {
+                        this.metadataPartial = true;
+                        this.collector.add({
+                            category: 'exif-incomplete',
+                            offset: this.currentChunkOffset,
+                            parserState: 'partial',
+                        });
+                    }
                     this.suppressStealthForNormalMetadata();
                 } else if (parsed?.parserState === 'unresolved' || parsed?.parserState === 'resource-limit') {
                     this.metadataChunkIncomplete = true;
@@ -1210,7 +1208,6 @@
             if (this.stealthSuppressedByNormalMetadata) return;
             this.stealthSuppressedByNormalMetadata = true;
             this.stealthStopped = true;
-            this.skipIdatProcessing = true;
             this.stealthResult = null;
             const diagnosticOffset = this.idatChunkOffset === null ? this.offset : this.idatChunkOffset;
             releaseCandidates(this.candidates, diagnosticOffset);
@@ -1245,7 +1242,6 @@
                 interlace,
                 this.currentChunkOffset,
             );
-            if (!this.layout) this.skipIdatProcessing = true;
             if (this.layout) {
                 const totalRgbBits = width * height * 3;
                 const totalAlphaBits = width * height;
@@ -1263,28 +1259,22 @@
             if (completed) {
                 this.stealthResult = completed.result;
                 this.stealthStopped = true;
-                this.skipIdatProcessing = true;
                 releaseCandidates(this.candidates, diagnosticOffset, completed);
+                if (this.rowAssembler) this.rowAssembler.candidates = [];
                 return;
             }
             if (allCandidatesRejected(this.candidates)) {
                 this.stealthStopped = true;
-                this.skipIdatProcessing = true;
                 this.analysisEndReason = END_INTENTIONAL_STOP;
                 this.collector.add({ category: 'intentional-stealth-stop', offset: diagnosticOffset });
                 releaseCandidates(this.candidates, diagnosticOffset);
+                if (this.rowAssembler) this.rowAssembler.candidates = [];
             }
         }
 
         finishIdat() {
             this.idatEnded = true;
             this.idatOpen = false;
-            if (this.skipIdatProcessing) {
-                this.idatInflate = null;
-                this.rowAssembler = null;
-                this.idatStructureValidator = null;
-                return;
-            }
             if (!this.idatInflate) {
                 this.rowAssembler = null;
                 this.idatStructureValidator = null;
@@ -1343,7 +1333,12 @@
             }
             if (!this.iendSeen) return { status: STATUS_INVALID, reason: 'truncated', diagnostics };
             if (Object.keys(this.metadata).length > 0) {
-                return { status: STATUS_NORMAL, metadata: this.metadata, diagnostics };
+                return {
+                    status: STATUS_NORMAL,
+                    metadata: this.metadata,
+                    ...(this.metadataPartial ? { metadataPartial: true } : {}),
+                    diagnostics,
+                };
             }
             if (this.stealthResult) {
                 const metadata = Object.create(null);

@@ -1422,6 +1422,7 @@ const viewportAnalysisQueue = {
     running: new Set(),
     sequence: 0,
     observer: null,
+    drainScheduled: false,
 
     /**
      * viewport へ入った画像を待機列へ入れ、実行枠があればすぐに解析する。
@@ -1452,7 +1453,17 @@ const viewportAnalysisQueue = {
             running: false,
         });
         this.enforceQueueLimit();
-        this.drain();
+        this.scheduleDrain();
+    },
+
+    /** 同一observer callbackのenqueueをまとめ、LIFO選択後すぐに解析を開始する */
+    scheduleDrain() {
+        if (this.drainScheduled) return;
+        this.drainScheduled = true;
+        Promise.resolve().then(() => {
+            this.drainScheduled = false;
+            this.drain();
+        });
     },
 
     /**

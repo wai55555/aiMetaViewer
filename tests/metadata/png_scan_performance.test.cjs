@@ -72,26 +72,29 @@ function tiffWithDescription(description) {
     return tiff;
 }
 
-test('PNG unsupported pixel layouts skip IDAT inflation and still read later text chunks', () => {
+test('PNG unsupported pixel layouts validate IDAT and still read later text chunks', () => {
     const context = scannerContext();
     const realInflate = context.pako.Inflate;
-    context.pako.Inflate = function unexpectedInflate() {
-        throw new Error('IDAT inflate should be skipped for an unsupported pixel layout');
+    let inflateCalls = 0;
+    context.pako.Inflate = function countedInflate(...args) {
+        inflateCalls += 1;
+        return new realInflate(...args);
     };
     const png = makePng(context, {
         width: 8,
         height: 8,
         colorType: 0,
-        idat: Buffer.alloc(128 * 1024, 0xa5),
+        idat: zlib.deflateSync(Buffer.alloc(8 * 9)),
         afterIdat: [pngChunk(context, 'tEXt', Buffer.from('Comment\0still found', 'latin1'))],
     });
     const result = context.scanPngMetadataBuffer(exactArrayBuffer(png));
     context.pako.Inflate = realInflate;
+    assert.ok(inflateCalls > 0);
     assert.equal(result.status, 'normal');
     assert.equal(result.metadata.Comment, 'still found');
 });
 
-test('PNG eXIf metadata suppresses Stealth decoding and skips later IDAT pixel work', () => {
+test('PNG eXIf metadata stops Stealth candidate work while validating IDAT', () => {
     const context = scannerContext();
     const ihdr = Buffer.alloc(13);
     ihdr.writeUInt32BE(1, 0);
@@ -102,7 +105,7 @@ test('PNG eXIf metadata suppresses Stealth decoding and skips later IDAT pixel w
         Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
         pngChunk(context, 'IHDR', ihdr),
         pngChunk(context, 'eXIf', tiffWithDescription('PNG EXIF prompt')),
-        pngChunk(context, 'IDAT', Buffer.alloc(4096, 0xff), 0),
+        pngChunk(context, 'IDAT', zlib.deflateSync(Buffer.alloc(5))),
         pngChunk(context, 'IEND', Buffer.alloc(0)),
     ]);
     const result = context.scanPngMetadataBuffer(exactArrayBuffer(png));
@@ -110,24 +113,58 @@ test('PNG eXIf metadata suppresses Stealth decoding and skips later IDAT pixel w
     assert.equal(result.metadata.Description, 'PNG EXIF prompt');
 });
 
-test('PNG stops IDAT work after rejecting Stealth candidates and scans later chunks', () => {
+test('PNG stops Stealth candidate work after rejection, validates IDAT, and scans later chunks', () => {
     const context = scannerContext();
     const height = 10000;
     const rawRows = Buffer.alloc(height * 5);
     const compressedRows = zlib.deflateSync(rawRows);
-    const malformedIdat = Buffer.concat([compressedRows, Buffer.alloc(32, 0xff)]);
+    // Keep the IDAT stream and CRC valid; only pixel-candidate work may stop early.
     const png = makePng(context, {
         width: 1,
         height,
         colorType: 6,
-        idat: malformedIdat,
+        idat: compressedRows,
         afterIdat: [pngChunk(context, 'tEXt', Buffer.from('Comment\0after skipped pixels', 'latin1'))],
     });
-    const idatStart = 8 + 25 + 8;
-    const idatCrcOffset = idatStart + malformedIdat.length;
-    png[idatCrcOffset] ^= 0xff;
     const result = context.scanPngMetadataBuffer(exactArrayBuffer(png));
     assert.equal(result.status, 'normal');
     assert.equal(result.metadata.Comment, 'after skipped pixels');
     assert.ok(result.diagnostics.some(entry => entry.category === 'intentional-stealth-stop'));
+});
+
+test('PNG reports invalid IDAT CRC even when EXIF metadata was already found', () => {
+    const context = scannerContext();
+    const compressedRow = zlib.deflateSync(Buffer.alloc(5));
+    const ihdr = Buffer.alloc(13);
+    ihdr.writeUInt32BE(1, 0);
+    ihdr.writeUInt32BE(1, 4);
+    ihdr[8] = 8;
+    ihdr[9] = 6;
+    const exif = tiffWithDescription('metadata before IDAT');
+    const png = Buffer.concat([
+        Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+        pngChunk(context, 'IHDR', ihdr),
+        pngChunk(context, 'eXIf', exif),
+        pngChunk(context, 'IDAT', compressedRow),
+        pngChunk(context, 'IEND', Buffer.alloc(0)),
+    ]);
+    const idatCrcOffset = 8 + 25 + 12 + exif.length + 8 + compressedRow.length;
+    png[idatCrcOffset] ^= 0xff;
+    const result = context.scanPngMetadataBuffer(exactArrayBuffer(png));
+    assert.equal(result.status, 'invalid');
+});
+
+test('PNG reports partial EXIF metadata when its bounded chunk prefix cuts a value', () => {
+    const context = scannerContext();
+    const png = makePng(context, {
+        width: 1,
+        height: 1,
+        colorType: 6,
+        idat: zlib.deflateSync(Buffer.alloc(5)),
+        afterIdat: [pngChunk(context, 'eXIf', tiffWithDescription('x'.repeat(80 * 1024)))],
+    });
+    const result = context.scanPngMetadataBuffer(exactArrayBuffer(png));
+    assert.equal(result.status, 'normal');
+    assert.equal(result.metadataPartial, true);
+    assert.equal(Object.hasOwn(result.metadata, 'metadataPartial'), false);
 });

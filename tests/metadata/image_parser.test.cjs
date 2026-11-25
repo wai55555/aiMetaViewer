@@ -202,6 +202,43 @@ test('truncated EXIF values stay unresolved and identify the required range', ()
     assert.equal(metadata.suggestedSize, tiff.length - 1);
 });
 
+test('complete malformed EXIF is terminal and does not hide later valid metadata', () => {
+    const context = parserContext();
+    const malformedTiff = Buffer.from(makeTiff({ description: 'discarded malformed value' }));
+    malformedTiff[0] = 0x58;
+    assert.equal(context.extractExifPayload(malformedTiff).parserState, 'invalid');
+
+    const validTiff = makeTiff({ description: 'later valid metadata' });
+    const invalidExif = Buffer.concat([Buffer.from('Exif\0\0', 'ascii'), malformedTiff]);
+    const validExif = Buffer.concat([Buffer.from('Exif\0\0', 'ascii'), validTiff]);
+    const jpegSegment = (payload) => Buffer.concat([
+        Buffer.from([0xff, 0xe1]),
+        Buffer.from([((payload.length + 2) >> 8) & 0xff, (payload.length + 2) & 0xff]),
+        payload,
+    ]);
+    const jpeg = Buffer.concat([
+        Buffer.from([0xff, 0xd8]),
+        jpegSegment(invalidExif),
+        jpegSegment(validExif),
+        Buffer.from([0xff, 0xda, 0, 2]),
+    ]);
+    assert.equal(context.extractMetadata(exactArrayBuffer(jpeg), { format: 'jpeg' }).Description, 'later valid metadata');
+
+    const png = Buffer.concat([
+        Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+        pngChunk(context, 'eXIf', malformedTiff),
+        pngChunk(context, 'eXIf', validTiff),
+        pngChunk(context, 'IEND', Buffer.alloc(0)),
+    ]);
+    assert.equal(context.extractMetadata(exactArrayBuffer(png), { format: 'png' }).Description, 'later valid metadata');
+
+    const webp = makeWebp([riffChunk('EXIF', malformedTiff), riffChunk('EXIF', validTiff)]);
+    assert.equal(context.extractMetadata(exactArrayBuffer(webp), { format: 'webp', inputComplete: true }).Description, 'later valid metadata');
+    const scanner = context.createWebpMetadataStreamScanner();
+    scanner.push(webp);
+    assert.equal(scanner.finish().state, 'resolved');
+});
+
 test('JPEG APP1, PNG eXIf, WebP EXIF, and AVIF Exif items share the structural TIFF reader', () => {
     const context = parserContext();
     const tiff = makeTiff({ description: 'shared description' });
@@ -231,10 +268,10 @@ test('JPEG APP1, PNG eXIf, WebP EXIF, and AVIF Exif items share the structural T
     assert.equal(avifMetadata.Description, 'shared description');
 });
 
-test('WebP stream scanner reaches EXIF after a large VP8 chunk without retaining its payload', () => {
+test('WebP stream scanner reaches EXIF after more than 2 MiB of VP8 data without retaining its payload', () => {
     const context = parserContext();
     const webp = makeWebp([
-        riffChunk('VP8 ', Buffer.alloc(180 * 1024, 0x33)),
+        riffChunk('VP8 ', Buffer.alloc(2 * 1024 * 1024 + 17, 0x33)),
         riffChunk('EXIF', Buffer.concat([Buffer.from('Exif\0\0', 'ascii'), makeTiff({ description: 'after VP8' })])),
     ]);
     const scanner = context.createWebpMetadataStreamScanner({ maxMetadataBytes: 64 * 1024 });
@@ -246,6 +283,36 @@ test('WebP stream scanner reaches EXIF after a large VP8 chunk without retaining
     assert.equal(result.state, 'resolved');
     assert.equal(result.metadata.Description, 'after VP8');
     assert.equal(result.bytesRead, webp.length);
+});
+
+test('WebP scanning preserves chunks present beyond an undersized RIFF length', () => {
+    const context = parserContext();
+    const webp = makeWebp([
+        riffChunk('VP8 ', Buffer.alloc(32, 0x33)),
+        riffChunk('EXIF', makeTiff({ description: 'beyond RIFF declaration' })),
+    ]);
+    webp.writeUInt32LE(12, 4);
+
+    const direct = context.extractMetadata(exactArrayBuffer(webp), { format: 'webp', inputComplete: true });
+    assert.equal(direct.parserState, 'resolved');
+    assert.equal(direct.Description, 'beyond RIFF declaration');
+    const directPartial = context.extractMetadata(exactArrayBuffer(webp), { format: 'webp', inputComplete: false });
+    assert.equal(directPartial.parserState, 'resolved');
+    assert.equal(directPartial.metadataPartial, true);
+
+    const scanner = context.createWebpMetadataStreamScanner();
+    scanner.push(webp);
+    const streamed = scanner.finish();
+    assert.equal(streamed.complete, true);
+    assert.equal(streamed.state, 'resolved');
+    assert.equal(streamed.metadata.Description, 'beyond RIFF declaration');
+
+    const partialScanner = context.createWebpMetadataStreamScanner();
+    partialScanner.push(webp);
+    const partial = partialScanner.finish({ inputComplete: false });
+    assert.equal(partial.complete, false);
+    assert.equal(partial.state, 'resolved');
+    assert.equal(partial.metadataPartial, true);
 });
 
 test('WebP scanner confirms an empty EXIF IFD after a large EXIF chunk prefix', () => {

@@ -1510,7 +1510,8 @@ const METADATA_JPEG_HEAD_BUDGET_BYTES = 256 * 1024;
 const METADATA_AVIF_HEAD_BUDGET_BYTES = 256 * 1024;
 const METADATA_WEBP_HEAD_BUDGET_BYTES = 64 * 1024;
 const MAX_WEBP_RIFF_SIZE_BYTES = 256 * 1024 * 1024;
-const MAX_WEBP_STREAM_SCAN_BYTES = 2 * 1024 * 1024;
+const MAX_WEBP_STREAM_SCAN_BYTES = MAX_WEBP_RIFF_SIZE_BYTES;
+const MAX_WEBP_BODYLESS_BUFFER_BYTES = 2 * 1024 * 1024;
 const METADATA_SAFETENSORS_HEAD_BUDGET_BYTES = 16 * 1024 * 1024;
 
 /**
@@ -1563,11 +1564,11 @@ function mergeWebpStreamMetadata(metadata, result) {
     delete merged.requiresTailFetch;
     const hasMetadata = Object.keys(merged).some(key => key !== 'isIncomplete' && key !== 'requiresTailFetch');
     const streamState = result.state;
-    const state = streamState === 'resolved' || hasMetadata
-        ? 'resolved'
-        : result.complete === true && streamState === 'empty-confirmed'
-            ? 'empty-confirmed'
-            : 'unresolved';
+    let state = 'unresolved';
+    if (streamState === 'resolved' || hasMetadata) state = 'resolved';
+    else if (streamState === 'resource-limit') state = 'resource-limit';
+    else if (result.complete === true && streamState === 'empty-confirmed') state = 'empty-confirmed';
+    else if (result.complete === true && streamState === 'invalid') state = 'invalid';
     if (state === 'unresolved') merged.isIncomplete = true;
     else delete merged.isIncomplete;
     Object.defineProperty(merged, 'parserState', {
@@ -2703,13 +2704,13 @@ async function handleFetchImageMetadata(imageUrl) {
     const SAFE_RESULT_FORMATS = new Set(['jpeg', 'webp', 'avif', 'png', 'safetensors', 'unknown']);
     const SAFE_RESULT_STATES = new Set([
         'resolved', 'confirmed-empty', 'empty-confirmed', 'unresolved',
-        'resource-limit', 'failure', 'unsupported-format',
+        'resource-limit', 'invalid', 'failure', 'unsupported-format',
     ]);
     const SAFE_RESULT_REASONS = new Set([
         'access-denied', 'acquisition-failed', 'aborted', 'cancelled', 'timeout',
         'body-missing', 'status-error', 'read-error', 'representation-incomplete',
         'metadata-unresolved', 'parser-failure', 'scanner-failure', 'invalid-png',
-        'resource-limit', 'truncated', 'structural', 'not-found', 'unsupported-format',
+        'resource-limit', 'truncated', 'structural', 'invalid-exif', 'not-found', 'unsupported-format',
         'found',
     ]);
     const SAFE_ERROR_NAMES = new Set([
@@ -2786,6 +2787,7 @@ async function handleFetchImageMetadata(imageUrl) {
         parserState,
         parserReason,
         scannerStatus,
+        metadataPartial = false,
         reason,
         error,
         cached = false,
@@ -2840,6 +2842,7 @@ async function handleFetchImageMetadata(imageUrl) {
             ...(safeParserState ? { parserState: safeParserState } : {}),
             ...(parserReason ? { parserReason: normalizeSafeReason(parserReason, safeReason) } : {}),
             ...(scannerStatus ? { scannerStatus: normalizeSafeScannerStatus(scannerStatus) } : {}),
+            ...(metadataPartial ? { metadataPartial: true } : {}),
             reason: safeReason,
             ...(cached ? { cached: true } : {}),
             diagnostics: diagnostic,
@@ -2918,6 +2921,12 @@ async function handleFetchImageMetadata(imageUrl) {
             signal = null,
         } = {}) => {
             const declaredLength = getDeclaredContentLength(response.headers);
+            const contentRange = response.status === HTTP_PARTIAL_CONTENT_STATUS
+                ? parseContentRangeHeader(response.headers?.get?.('content-range'))
+                : null;
+            const responseInputComplete = response.status !== HTTP_PARTIAL_CONTENT_STATUS ||
+                Boolean(contentRange && contentRange.start === 0 && contentRange.total !== null &&
+                    contentRange.end + 1 === contentRange.total);
             const charge = declaredLength !== null && declaredLength > 0
                 ? declaredLength
                 : PNG_FULL_STREAM_UNKNOWN_SIZE_CHARGE_BYTES;
@@ -2960,9 +2969,10 @@ async function handleFetchImageMetadata(imageUrl) {
                 if (format === 'webp' && typeof createWebpMetadataStreamScanner === 'function') {
                     const scanner = createWebpMetadataStreamScanner({
                         maxMetadataBytes: METADATA_WEBP_HEAD_BUDGET_BYTES,
+                        maxContainerBytes: MAX_WEBP_RIFF_SIZE_BYTES,
                     });
                     scanner.push(new Uint8Array(fullBuffer, 0, Math.min(fullBuffer.byteLength, MAX_WEBP_STREAM_SCAN_BYTES)));
-                    const result = scanner.finish();
+                    const result = scanner.finish({ inputComplete: responseInputComplete });
                     const head = fullBuffer.slice(0, METADATA_WEBP_HEAD_BUDGET_BYTES);
                     return {
                         kind: 'buffer',
@@ -3125,6 +3135,7 @@ async function handleFetchImageMetadata(imageUrl) {
                         if (!webpScanner) {
                             webpScanner = createWebpMetadataStreamScanner({
                                 maxMetadataBytes: METADATA_WEBP_HEAD_BUDGET_BYTES,
+                                maxContainerBytes: MAX_WEBP_RIFF_SIZE_BYTES,
                             });
                             const priorBytes = materialize();
                             if (priorBytes.byteLength > 0) {
@@ -3185,10 +3196,14 @@ async function handleFetchImageMetadata(imageUrl) {
                     }
 
                     if (format === 'webp' && webpScanner &&
-                        (webpScannerResult?.complete === true || webpBytesScanned >= MAX_WEBP_STREAM_SCAN_BYTES)) {
+                        (webpBytesScanned >= MAX_WEBP_STREAM_SCAN_BYTES ||
+                            webpScannerResult?.state === 'resource-limit')) {
                         await cancelReader();
                         assertReaderActive();
-                        const result = webpScanner.finish();
+                        const snapshot = webpScanner.snapshot();
+                        const result = snapshot.state === 'resource-limit'
+                            ? snapshot
+                            : { ...snapshot, state: 'resource-limit', complete: false };
                         return {
                             kind: 'buffer',
                             buffer: materialize(),
@@ -3231,7 +3246,7 @@ async function handleFetchImageMetadata(imageUrl) {
                 format = detectImageFormat(buffer);
             }
             if (format === 'webp') {
-                const result = webpScanner?.finish() || webpScannerResult;
+                        const result = webpScanner?.finish({ inputComplete: responseInputComplete }) || webpScannerResult;
                 return {
                     kind: 'buffer',
                     buffer,
@@ -3300,7 +3315,7 @@ async function handleFetchImageMetadata(imageUrl) {
                     case 'avif':
                         return METADATA_JPEG_HEAD_BUDGET_BYTES;
                     case 'webp':
-                        return MAX_WEBP_RIFF_SIZE_BYTES;
+                        return MAX_WEBP_BODYLESS_BUFFER_BYTES;
                     case 'safetensors':
                         return METADATA_SAFETENSORS_HEAD_BUDGET_BYTES;
                     case 'png':
@@ -3357,6 +3372,7 @@ async function handleFetchImageMetadata(imageUrl) {
                 if (format === 'webp' && typeof createWebpMetadataStreamScanner === 'function') {
                     const scanner = createWebpMetadataStreamScanner({
                         maxMetadataBytes: METADATA_WEBP_HEAD_BUDGET_BYTES,
+                        maxContainerBytes: MAX_WEBP_RIFF_SIZE_BYTES,
                     });
                     scanner.push(bytes.subarray(0, Math.min(bytes.byteLength, MAX_WEBP_STREAM_SCAN_BYTES)));
                     const result = scanner.finish();
@@ -3412,11 +3428,11 @@ async function handleFetchImageMetadata(imageUrl) {
             let headLength = 0;
             let totalLength = 0;
             let format = null;
-            let declaredFormatSize = null;
             let handedOverToScanner = false;
             let webpHeadFinalized = false;
             let webpScanner = null;
             let webpScannerResult = null;
+            let webpBytesScanned = 0;
             let readerCancellationPromise = null;
             const prefixChunks = [];
             let readerReleased = false;
@@ -3490,7 +3506,6 @@ async function handleFetchImageMetadata(imageUrl) {
                 if (hasDeclaredLength && declared > MAX_WEBP_RIFF_SIZE_BYTES) {
                     throw createMetadataSizeLimitError(declaredLength, MAX_WEBP_RIFF_SIZE_BYTES);
                 }
-                declaredFormatSize = declared;
             };
             const repartitionHead = () => {
                 const allHead = materialize(headChunks, headLength);
@@ -3520,20 +3535,28 @@ async function handleFetchImageMetadata(imageUrl) {
             };
             const feedWebpScanner = (chunk, copiedFromChunk) => {
                 if (format !== 'webp' || typeof createWebpMetadataStreamScanner !== 'function') return;
+                const pushWebpBytes = (bytes) => {
+                    const remaining = MAX_WEBP_STREAM_SCAN_BYTES - webpBytesScanned;
+                    if (remaining <= 0 || bytes.byteLength === 0) return;
+                    const accepted = bytes.subarray(0, Math.min(bytes.byteLength, remaining));
+                    webpScannerResult = webpScanner.push(accepted);
+                    webpBytesScanned += accepted.byteLength;
+                };
                 if (!webpScanner) {
                     webpScanner = createWebpMetadataStreamScanner({
                         maxMetadataBytes: METADATA_WEBP_HEAD_BUDGET_BYTES,
+                        maxContainerBytes: MAX_WEBP_RIFF_SIZE_BYTES,
                     });
                     const priorPrefix = materialize(prefixChunks, prefixLength);
                     if (priorPrefix.byteLength > 0) {
-                        webpScannerResult = webpScanner.push(priorPrefix);
+                        pushWebpBytes(priorPrefix);
                     }
                     if (copiedFromChunk < chunk.byteLength) {
-                        webpScannerResult = webpScanner.push(chunk.subarray(copiedFromChunk));
+                        pushWebpBytes(chunk.subarray(copiedFromChunk));
                     }
                     return;
                 }
-                webpScannerResult = webpScanner.push(chunk);
+                pushWebpBytes(chunk);
             };
             const readWithTimeout = async () => {
                 let timer = null;
@@ -3662,10 +3685,21 @@ async function handleFetchImageMetadata(imageUrl) {
                         await cancelReader();
                         throw new Error('File response exceeded its declared length.');
                     }
-                    if (format === 'webp' && declaredFormatSize !== null &&
-                        totalLength > declaredFormatSize) {
-                        await cancelReader();
-                        throw new Error('WebP RIFF body exceeded its declared size.');
+                    if (format === 'webp' &&
+                        (webpBytesScanned >= MAX_WEBP_STREAM_SCAN_BYTES ||
+                            webpScannerResult?.state === 'resource-limit')) {
+                        const snapshot = webpScanner?.snapshot() || webpScannerResult;
+                        const result = snapshot?.state === 'resource-limit'
+                            ? snapshot
+                            : { ...snapshot, state: 'resource-limit', complete: false };
+                        return {
+                            kind: 'buffer',
+                            buffer: materialize(headChunks, headLength).buffer,
+                            webpStreamResult: result || null,
+                            inputComplete: result?.complete === true,
+                            totalFileSize: hasDeclaredLength ? declaredLength : totalLength,
+                            totalFileSizeKnown: hasDeclaredLength,
+                        };
                     }
                 }
 
@@ -4213,11 +4247,13 @@ async function handleFetchImageMetadata(imageUrl) {
             if (analysisSignal?.aborted) throw createAnalysisAbortError();
             if (scanResult.status === 'normal' || scanResult.status === 'stealth') {
                 if (analysisSignal?.aborted) throw createAnalysisAbortError();
-                const cacheResult = await metadataCache.set(
-                    imageUrl,
-                    scanResult.metadata,
-                    { scannerVersion: PNG_SCANNER_CACHE_VERSION },
-                );
+                const cacheResult = scanResult.metadataPartial === true
+                    ? null
+                    : await metadataCache.set(
+                        imageUrl,
+                        scanResult.metadata,
+                        { scannerVersion: PNG_SCANNER_CACHE_VERSION },
+                    );
                 if (!isFileScheme && cacheResult && cacheResult.reason === 'size-limit') {
                     scanResult.diagnostics = [
                         ...(scanResult.diagnostics || []),
@@ -4235,12 +4271,14 @@ async function handleFetchImageMetadata(imageUrl) {
                         format: 'png',
                         metadata: scanResult.metadata,
                         scannerStatus: scanResult.status,
+                        metadataPartial: scanResult.metadataPartial === true,
                         reason: 'found',
                     });
                 }
                 return {
                     success: true,
                     metadata: scanResult.metadata,
+                    ...(scanResult.metadataPartial === true ? { metadataPartial: true } : {}),
                     diagnostics: scanResult.diagnostics,
                 };
             }
@@ -4321,7 +4359,9 @@ async function handleFetchImageMetadata(imageUrl) {
             }
 
             if (getMetadataState(metadata) === 'unresolved' && !isFileScheme &&
-                detectedFormat === 'webp' && !webpStreamResult) {
+                detectedFormat === 'webp' &&
+                (!webpStreamResult || webpStreamResult.complete !== true) &&
+                webpStreamResult?.state !== 'resource-limit') {
                 try {
                     const fullInput = await safeFetchFullInput(activeUrl, getAnalysisContext(imageUrl)?.signal);
                     if (fullInput.kind === 'png-stream') {
@@ -4561,15 +4601,18 @@ async function handleFetchImageMetadata(imageUrl) {
                 });
             }
             if (metadataState === 'resolved') {
-                await metadataCache.set(imageUrl, metadata, {
-                    parserVersion: PARSER_CACHE_VERSION,
-                });
+                if (metadata.metadataPartial !== true) {
+                    await metadataCache.set(imageUrl, metadata, {
+                        parserVersion: PARSER_CACHE_VERSION,
+                    });
+                }
                 return createFileResult({
                     state: 'resolved',
                     format: detectedFormat,
                     metadata,
                     parserState: metadataState,
                     parserReason,
+                    metadataPartial: metadata.metadataPartial === true,
                     reason: 'found',
                 });
             }
@@ -4598,11 +4641,17 @@ async function handleFetchImageMetadata(imageUrl) {
                 parserState: metadataState,
             });
         } else if (Object.keys(metadata).length > 0) {
-            await metadataCache.set(imageUrl, metadata, {
-                parserVersion: PARSER_CACHE_VERSION,
-            });
+            if (metadata.metadataPartial !== true) {
+                await metadataCache.set(imageUrl, metadata, {
+                    parserVersion: PARSER_CACHE_VERSION,
+                });
+            }
         }
-        return { success: true, metadata: metadata };
+        return {
+            success: true,
+            metadata,
+            ...(metadata.metadataPartial === true ? { metadataPartial: true } : {}),
+        };
 
     } catch (error) {
         const status = Number.isInteger(error?.status) ? error.status : undefined;

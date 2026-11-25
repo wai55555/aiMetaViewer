@@ -50,7 +50,9 @@ const PARSER_STATE_RESOLVED = 'resolved';
 const PARSER_STATE_EMPTY_CONFIRMED = 'empty-confirmed';
 const PARSER_STATE_RESOURCE_LIMIT = 'resource-limit';
 const PARSER_STATE_UNRESOLVED = 'unresolved';
+const PARSER_STATE_INVALID = 'invalid';
 const PARSER_STATE_UNSUPPORTED_FORMAT = 'unsupported-format';
+const WEBP_MAX_CONTAINER_SIZE_BYTES = 256 * 1024 * 1024;
 
 /** 形式別metadata head budget */
 const JPEG_METADATA_HEAD_BUDGET_BYTES = 256 * 1024;
@@ -429,20 +431,25 @@ function extractExifMetadata(dataValue, options = {}) {
   const resourceLimit = reason => setParserState(metadata, PARSER_STATE_RESOURCE_LIMIT, {
     parserReason: reason,
   });
+  const invalid = reason => setParserState({}, PARSER_STATE_INVALID, {
+    parserReason: reason,
+  });
 
-  if (tiffStart < 0 || declaredLength < 8 || tiffStart + 8 > data.length) {
+  if (tiffStart < 0) return invalid('invalid-tiff-offset');
+  if (declaredLength < 8) return invalid('tiff-header-too-short');
+  if (tiffStart + 8 > data.length) {
     return incomplete('tiff-header-truncated', tiffStart + 8);
   }
   const endian = String.fromCharCode(data[tiffStart], data[tiffStart + 1]);
-  if (endian !== 'II' && endian !== 'MM') return incomplete('invalid-tiff-byte-order');
+  if (endian !== 'II' && endian !== 'MM') return invalid('invalid-tiff-byte-order');
   const isLittleEndian = endian === 'II';
   if (readTiffUint16(data, tiffStart + 2, isLittleEndian) !== 42) {
-    return incomplete('invalid-tiff-magic');
+    return invalid('invalid-tiff-magic');
   }
 
   const firstIfdOffset = readTiffUint32(data, tiffStart + 4, isLittleEndian);
   if (firstIfdOffset === null || firstIfdOffset < 8 || firstIfdOffset + 2 > declaredLength) {
-    return incomplete('invalid-first-ifd-offset');
+    return invalid('invalid-first-ifd-offset');
   }
   const queue = [firstIfdOffset];
   const visited = new Set();
@@ -484,7 +491,8 @@ function extractExifMetadata(dataValue, options = {}) {
     visited.add(relativeIfdOffset);
 
     const ifdStart = tiffStart + relativeIfdOffset;
-    if (relativeIfdOffset + 2 > declaredLength || ifdStart + 2 > data.length) {
+    if (relativeIfdOffset + 2 > declaredLength) return invalid('ifd-count-outside-exif-data');
+    if (ifdStart + 2 > data.length) {
       return incomplete('ifd-count-truncated', relativeIfdOffset + 2);
     }
     const entryCount = readTiffUint16(data, ifdStart, isLittleEndian);
@@ -493,7 +501,7 @@ function extractExifMetadata(dataValue, options = {}) {
     if (entryCountTotal > EXIF_MAX_ENTRY_COUNT) return resourceLimit('exif-entry-count');
     const ifdEndRelative = relativeIfdOffset + 2 + entryCount * 12 + 4;
     if (!Number.isSafeInteger(ifdEndRelative) || ifdEndRelative > declaredLength) {
-      return incomplete('ifd-outside-exif-data');
+      return invalid('ifd-outside-exif-data');
     }
     if (tiffStart + ifdEndRelative > data.length) {
       return incomplete('ifd-entries-truncated', ifdEndRelative);
@@ -511,7 +519,7 @@ function extractExifMetadata(dataValue, options = {}) {
       if (tag === 0x010E || tag === 0x9286) {
         const value = readEntryValue(entryOffset, type, count);
         if (value.limited) return resourceLimit('exif-value-size');
-        if (!value.valid) return incomplete('invalid-exif-value-range');
+        if (!value.valid) return invalid('invalid-exif-value-range');
         if (!value.complete) {
           foundIncompleteValue = true;
           requiredEnd = Math.max(requiredEnd || 0, value.end);
@@ -533,7 +541,8 @@ function extractExifMetadata(dataValue, options = {}) {
         if (count > EXIF_MAX_DIRECTORY_COUNT) return resourceLimit('exif-ifd-pointer-count');
         const pointers = readEntryValue(entryOffset, type, count);
         if (pointers.limited) return resourceLimit('exif-ifd-pointer-size');
-        if (!pointers.valid || !pointers.complete) {
+        if (!pointers.valid) return invalid('invalid-ifd-pointer-range');
+        if (!pointers.complete) {
           return incomplete('ifd-pointer-truncated', pointers.end);
         }
         for (let pointerIndex = 0; pointerIndex < count; pointerIndex += 1) {
@@ -590,6 +599,7 @@ function scanJpegMarkers(view) {
 
   const metadata = {};
   let exifIncomplete = false;
+  let exifInvalid = false;
   let metadataPartial = false;
   let suggestedSize = null;
   let offset = 2;
@@ -599,8 +609,8 @@ function scanJpegMarkers(view) {
     if (offset >= view.length) return { reachedSos: false, complete: false, metadata, exifIncomplete };
 
     const marker = view[offset++];
-    if (marker === 0xDA) return { reachedSos: true, complete: true, metadata, exifIncomplete, metadataPartial };
-    if (marker === 0xD9) return { reachedSos: false, complete: true, metadata, exifIncomplete, metadataPartial };
+    if (marker === 0xDA) return { reachedSos: true, complete: true, metadata, exifIncomplete, exifInvalid, metadataPartial };
+    if (marker === 0xD9) return { reachedSos: false, complete: true, metadata, exifIncomplete, exifInvalid, metadataPartial };
     if (marker === 0xD8 || marker === 0x01 || (marker >= 0xD0 && marker <= 0xD7)) continue;
 
     if (offset + 2 > view.length) return { reachedSos: false, complete: false, metadata, exifIncomplete, metadataPartial };
@@ -631,6 +641,7 @@ function scanJpegMarkers(view) {
       if (parsed.parserState === PARSER_STATE_UNRESOLVED || parsed.parserState === PARSER_STATE_RESOURCE_LIMIT) {
         exifIncomplete = true;
       }
+      if (parsed.parserState === PARSER_STATE_INVALID) exifInvalid = true;
       metadataPartial ||= parsed.metadataPartial === true;
       if (Number.isSafeInteger(parsed.suggestedSize)) {
         suggestedSize = Math.max(suggestedSize || 0, payloadStart + parsed.suggestedSize);
@@ -657,6 +668,9 @@ function extractJpegMetadata(buffer, options = {}) {
         ? markerResult.suggestedSize
         : JPEG_METADATA_HEAD_BUDGET_BYTES - 1,
     });
+  }
+  if (markerResult.exifInvalid) {
+    return setParserState(metadata, PARSER_STATE_INVALID, { parserReason: 'invalid-exif' });
   }
   if (markerResult.reachedSos || markerResult.complete) {
     return setParserState(metadata, PARSER_STATE_EMPTY_CONFIRMED);
@@ -702,14 +716,25 @@ function extractWebpMetadata(buffer, options = {}) {
     return setParserState({}, PARSER_STATE_UNSUPPORTED_FORMAT);
   }
 
-  const totalSize = readUint32LE(view, 4) + 8;
-  if (!Number.isSafeInteger(totalSize) || totalSize < 12) {
+  const declaredTotalSize = readUint32LE(view, 4) + 8;
+  if (!Number.isSafeInteger(declaredTotalSize) || declaredTotalSize < 12) {
     return setParserState({}, PARSER_STATE_UNRESOLVED, { isIncomplete: true });
   }
-  const availableEnd = Math.min(view.length, totalSize);
+  const maxContainerBytes = Number.isSafeInteger(options.maxContainerBytes) && options.maxContainerBytes >= 12
+    ? Math.min(options.maxContainerBytes, WEBP_MAX_CONTAINER_SIZE_BYTES)
+    : WEBP_MAX_CONTAINER_SIZE_BYTES;
+  if (declaredTotalSize > maxContainerBytes || view.length > maxContainerBytes) {
+    return setParserState({}, PARSER_STATE_RESOURCE_LIMIT, { parserReason: 'webp-container-size' });
+  }
+  const availableEnd = Math.min(view.length, maxContainerBytes);
+  // A malformed RIFF length can be smaller than chunks actually present in the
+  // supplied representation. Scan the available bounded extent and validate
+  // each chunk against it instead of silently dropping those chunks.
+  const totalSize = Math.max(declaredTotalSize, availableEnd);
   const metadata = {};
   let offset = 12;
   let pendingExif = false;
+  let invalidExif = false;
 
   const unresolved = (requiredEnd = null, reason = null) => {
     const found = Object.keys(metadata).length > 0;
@@ -738,6 +763,7 @@ function extractWebpMetadata(buffer, options = {}) {
           parsed.metadataPartial === true) {
         pendingExif = true;
       }
+      if (parsed.parserState === PARSER_STATE_INVALID) invalidExif = true;
       if (parsed.parserState === PARSER_STATE_UNRESOLVED && Number.isSafeInteger(parsed.suggestedSize)) {
         return unresolved(chunk.dataOffset + parsed.suggestedSize + 1, parsed.parserReason);
       }
@@ -768,8 +794,11 @@ function extractWebpMetadata(buffer, options = {}) {
     offset = chunk.nextOffset;
   }
 
-  if (offset !== totalSize || view.length < totalSize || pendingExif) {
+  if (offset !== totalSize || view.length < totalSize || pendingExif || options.inputComplete === false) {
     return unresolved(totalSize, pendingExif ? 'webp-exif-incomplete' : 'webp-container-incomplete');
+  }
+  if (invalidExif && Object.keys(metadata).length === 0) {
+    return setParserState(metadata, PARSER_STATE_INVALID, { parserReason: 'invalid-exif' });
   }
   return setParserState(metadata,
     Object.keys(metadata).length > 0 ? PARSER_STATE_RESOLVED : PARSER_STATE_EMPTY_CONFIRMED);
@@ -779,6 +808,9 @@ function createWebpMetadataStreamScanner(options = {}) {
   const maxMetadataBytes = Number.isSafeInteger(options.maxMetadataBytes) && options.maxMetadataBytes > 0
     ? Math.min(options.maxMetadataBytes, 256 * 1024)
     : 64 * 1024;
+  const maxContainerBytes = Number.isSafeInteger(options.maxContainerBytes) && options.maxContainerBytes >= 12
+    ? Math.min(options.maxContainerBytes, WEBP_MAX_CONTAINER_SIZE_BYTES)
+    : WEBP_MAX_CONTAINER_SIZE_BYTES;
   const riffHeader = new Uint8Array(12);
   const chunkHeader = new Uint8Array(8);
   let riffHeaderLength = 0;
@@ -793,7 +825,9 @@ function createWebpMetadataStreamScanner(options = {}) {
   let invalid = false;
   let complete = false;
   let incompleteMetadataChunk = false;
+  let invalidMetadataChunk = false;
   let metadataPartial = false;
+  let resourceLimited = false;
 
   const parseCapture = (chunkComplete) => {
     if (!capture || capture.parsed) return;
@@ -819,15 +853,18 @@ function createWebpMetadataStreamScanner(options = {}) {
         parsed.parserState === PARSER_STATE_RESOURCE_LIMIT ||
         (!chunkComplete && capture.type === 'XMP ')) {
       incompleteMetadataChunk = true;
+    } else if (parsed.parserState === PARSER_STATE_INVALID) {
+      invalidMetadataChunk = true;
     }
   };
 
   const snapshot = () => ({
-    state: invalid ? PARSER_STATE_UNRESOLVED : state,
+    state: resourceLimited ? PARSER_STATE_RESOURCE_LIMIT : invalid ? PARSER_STATE_UNRESOLVED : state,
     metadata: { ...metadata },
     complete,
     invalid,
     incompleteMetadataChunk,
+    invalidMetadataChunk,
     metadataPartial,
     bytesRead: position,
   });
@@ -855,10 +892,21 @@ function createWebpMetadataStreamScanner(options = {}) {
           state = PARSER_STATE_UNRESOLVED;
           break;
         }
+        if (totalSize > maxContainerBytes) {
+          resourceLimited = true;
+          state = PARSER_STATE_RESOURCE_LIMIT;
+          break;
+        }
         continue;
       }
 
-      if (invalid || complete || absoluteOffset >= totalSize) break;
+      if (invalid || resourceLimited || complete || absoluteOffset >= maxContainerBytes) {
+        if (absoluteOffset >= maxContainerBytes) {
+          resourceLimited = true;
+          state = PARSER_STATE_RESOURCE_LIMIT;
+        }
+        break;
+      }
       if (activeChunk) {
         const payloadOffset = absoluteOffset - activeChunk.dataOffset;
         const remaining = activeChunk.size - payloadOffset;
@@ -897,11 +945,19 @@ function createWebpMetadataStreamScanner(options = {}) {
       const dataOffset = nextChunkOffset + 8;
       const nextOffset = dataOffset + size + (size & 1);
       chunkHeaderLength = 0;
-      if (size === null || !Number.isSafeInteger(nextOffset) || nextOffset > totalSize) {
+      if (size === null || !Number.isSafeInteger(nextOffset) || nextOffset < dataOffset) {
         invalid = true;
         state = PARSER_STATE_UNRESOLVED;
         break;
       }
+      if (nextOffset > maxContainerBytes) {
+        resourceLimited = true;
+        state = PARSER_STATE_RESOURCE_LIMIT;
+        break;
+      }
+      // A too-small RIFF length must not hide chunks present in the supplied
+      // representation. Chunk boundaries remain the authority for the scan.
+      if (nextOffset > totalSize) totalSize = nextOffset;
       activeChunk = { type, size, dataOffset, nextOffset };
       if (type === 'EXIF' || type === 'XMP ') {
         capture = {
@@ -923,22 +979,28 @@ function createWebpMetadataStreamScanner(options = {}) {
     }
 
     position += bytes.length;
-    if (!invalid && totalSize !== null && position >= totalSize &&
-        nextChunkOffset === totalSize && !activeChunk && chunkHeaderLength === 0) {
-      complete = true;
-      if (state !== PARSER_STATE_RESOLVED) {
-        state = incompleteMetadataChunk ? PARSER_STATE_UNRESOLVED : PARSER_STATE_EMPTY_CONFIRMED;
-      }
-    }
     return snapshot();
   };
 
-  const finish = () => {
-    if (!invalid && totalSize !== null && position >= totalSize &&
+  const finish = (finishOptions = {}) => {
+    if (finishOptions.inputComplete === false) {
+      if (Object.keys(metadata).length > 0) {
+        state = PARSER_STATE_RESOLVED;
+        metadataPartial = true;
+      } else {
+        state = PARSER_STATE_UNRESOLVED;
+      }
+      return snapshot();
+    }
+    if (!invalid && !resourceLimited && totalSize !== null && position >= totalSize &&
         nextChunkOffset === totalSize && !activeChunk && chunkHeaderLength === 0) {
       complete = true;
       if (state !== PARSER_STATE_RESOLVED) {
-        state = incompleteMetadataChunk ? PARSER_STATE_UNRESOLVED : PARSER_STATE_EMPTY_CONFIRMED;
+        state = incompleteMetadataChunk
+          ? PARSER_STATE_UNRESOLVED
+          : invalidMetadataChunk
+            ? PARSER_STATE_INVALID
+            : PARSER_STATE_EMPTY_CONFIRMED;
       }
     } else if (!complete) {
       state = PARSER_STATE_UNRESOLVED;
