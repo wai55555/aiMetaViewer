@@ -1403,15 +1403,11 @@ async function checkMetadataForElement(el) {
 // バッジ生成機能(addAnalyzingBadge, addBadgeToImage)などは badge_controller.js に移動しました
 
 // --- viewport 解析キュー ---
-// IntersectionObserver から即座に解析を開始すると、pixiv のような大量サムネイル
-// ページでスクロール中に数十本の全body取得が同時発火する。
-// 停留した画像だけを LIFO で順に解析し、開始前に画面外へ出たものは取り消す。
-// すでに始まった要求は完了させ、戻ってきたときに同じ画像を再取得しないようにする。
+// IntersectionObserver からの要求はすぐに待機列へ入れ、空き枠があれば即時に解析する。
+// 同時実行数と待機列の上限で負荷を抑え、画面外へ出た待機項目だけを取り除く。
+// 開始済みの要求はキャッシュへ結果を保存できるよう完了させる。
 // 同時実行の最終的な上限は background 側の集約ゲートが保証する。
 // ここでの上限は pending message を無制限に積まないためのものである。
-
-/** viewport 停留と判定するまでの待ち時間 */
-const ANALYSIS_SETTLE_DELAY_MS = 200;
 
 /** 待機列の最大長。これを超えたら viewport から最も遠いものを捨てる */
 const MAX_PENDING_ANALYSIS_QUEUE = 32;
@@ -1425,11 +1421,10 @@ const viewportAnalysisQueue = {
     /** @type {Set<HTMLImageElement>} */
     running: new Set(),
     sequence: 0,
-    settleTimer: null,
     observer: null,
 
     /**
-     * viewport へ入った画像を待機列へ入れる。ここでは解析を開始しない。
+     * viewport へ入った画像を待機列へ入れ、実行枠があればすぐに解析する。
      * @param {HTMLImageElement} img - 対象画像
      */
     enqueue(img) {
@@ -1457,7 +1452,7 @@ const viewportAnalysisQueue = {
             running: false,
         });
         this.enforceQueueLimit();
-        this.scheduleSettle();
+        this.drain();
     },
 
     /**
@@ -1505,15 +1500,6 @@ const viewportAnalysisQueue = {
                 distance: farthestDistance
             });
         }
-    },
-
-    /** 停留判定タイマーを張り直す */
-    scheduleSettle() {
-        if (this.settleTimer !== null) clearTimeout(this.settleTimer);
-        this.settleTimer = setTimeout(() => {
-            this.settleTimer = null;
-            this.drain();
-        }, ANALYSIS_SETTLE_DELAY_MS);
     },
 
     /**
