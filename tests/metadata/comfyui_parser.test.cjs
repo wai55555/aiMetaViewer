@@ -20,7 +20,7 @@ function uiWorkflow() {
             { id: 2, type: 'CLIPTextEncode', widgets_values: ['UI positive prompt'], inputs: [] },
             { id: 3, type: 'CLIPTextEncode', title: 'Negative Prompt', widgets_values: ['UI negative prompt'], inputs: [] },
             { id: 4, type: 'LoraLoader', widgets_values: ['glow.safetensors', 0.8, 0.75], inputs: [{ name: 'model', link: 24 }, { name: 'clip', link: 25 }] },
-            { id: 5, type: 'KSampler', widgets_values: [123, 20, 7, 'euler', 'normal', 1], inputs: [{ name: 'model', link: 26 }, { name: 'positive', link: 27 }, { name: 'negative', link: 28 }] },
+            { id: 5, type: 'KSampler', widgets_values: [123, 'fixed', 20, 7, 'euler', 'normal', 1], inputs: [{ name: 'model', link: 26 }, { name: 'positive', link: 27 }, { name: 'negative', link: 28 }] },
             { id: 6, type: 'SaveImage', inputs: [{ name: 'images', link: 29 }] },
         ],
         links: [
@@ -68,11 +68,11 @@ test('ComfyUI summary parses a raw workflow JSON string without requiring object
     assert.equal(result.negative[0].text, 'UI negative prompt');
 });
 
-test('SDXL dual text inputs are both retained in the positive summary', () => {
+test('SDXL widget prompt fields follow the exported dimension-first order', () => {
     const result = summarize({ workflow: {
         nodes: [
-            { id: 1, type: 'CLIPTextEncodeSDXL', widgets_values: ['wide scene', 'fine texture'], inputs: [] },
-            { id: 2, type: 'KSampler', widgets_values: [1, 20, 5, 'euler', 'normal', 1], inputs: [{ name: 'positive', link: 4 }] },
+            { id: 1, type: 'CLIPTextEncodeSDXL', widgets_values: [1024, 1024, 0, 0, 1024, 1024, 'wide scene', 'fine texture'], inputs: [] },
+            { id: 2, type: 'KSampler', widgets_values: [1, 'fixed', 20, 5, 'euler', 'normal', 1], inputs: [{ name: 'positive', link: 4 }] },
             { id: 3, type: 'SaveImage', inputs: [{ name: 'images', link: 5 }] },
         ],
         links: [
@@ -83,14 +83,79 @@ test('SDXL dual text inputs are both retained in the positive summary', () => {
     assert.equal(result.positive[0].text, 'wide scene\nfine texture');
 });
 
+test('UI widgets map UNET loader names and KSamplerAdvanced settings without shifting values', () => {
+    const result = summarize({ workflow: {
+        nodes: [
+            { id: 1, type: 'UNETLoader', widgets_values: ['wan-model.safetensors', 'default'], inputs: [], outputs: [{ name: 'MODEL', slot_index: 0 }] },
+            { id: 2, type: 'CLIPTextEncode', widgets_values: ['video prompt'], inputs: [], outputs: [{ name: 'CONDITIONING', slot_index: 0 }] },
+            { id: 3, type: 'KSamplerAdvanced', widgets_values: [true, 123, 'fixed', 30, 6, 'euler', 'normal', 0, 30, false], inputs: [{ name: 'model', link: 1 }, { name: 'positive', link: 2 }] },
+            { id: 4, type: 'SaveVideo', inputs: [{ name: 'video', link: 3 }] },
+        ],
+        links: [
+            [1, 1, 0, 3, 0, 'MODEL'],
+            [2, 2, 0, 3, 1, 'CONDITIONING'],
+            [3, 3, 0, 4, 0, 'VIDEO'],
+        ],
+    } });
+    assert.deepEqual(result.models.map(entry => entry.text), ['wan-model.safetensors']);
+    assert.ok(result.grid.some(row => row.key === 'Steps' && row.value === '30'));
+    assert.ok(result.grid.some(row => row.key === 'CFG' && row.value === '6'));
+    assert.ok(result.grid.some(row => row.key === 'Sampler' && row.value === 'euler'));
+});
+
+test('conditioning output slots keep positive and negative source prompts separate', () => {
+    const result = summarize({ workflow: {
+        nodes: [
+            { id: 1, type: 'CLIPTextEncode', title: 'Positive', widgets_values: ['bright'], inputs: [], outputs: [{ name: 'CONDITIONING', slot_index: 0 }] },
+            { id: 2, type: 'CLIPTextEncode', title: 'Negative', widgets_values: ['blurry'], inputs: [], outputs: [{ name: 'CONDITIONING', slot_index: 0 }] },
+            { id: 3, type: 'ControlNetApplyAdvanced', inputs: [{ name: 'positive', link: 1 }, { name: 'negative', link: 2 }], outputs: [{ name: 'CONDITIONING', slot_index: 0 }, { name: 'CONDITIONING', slot_index: 1 }] },
+            { id: 4, type: 'KSampler', widgets_values: [1, 'fixed', 20, 5, 'euler', 'normal', 1], inputs: [{ name: 'positive', link: 3 }, { name: 'negative', link: 4 }] },
+            { id: 5, type: 'SaveImage', inputs: [{ name: 'images', link: 5 }] },
+        ],
+        links: [
+            [1, 1, 0, 3, 0, 'CONDITIONING'],
+            [2, 2, 0, 3, 1, 'CONDITIONING'],
+            [3, 3, 0, 4, 0, 'CONDITIONING'],
+            [4, 3, 1, 4, 1, 'CONDITIONING'],
+            [5, 4, 0, 5, 0, 'IMAGE'],
+        ],
+    } });
+    assert.deepEqual(result.positive.map(entry => entry.text), ['bright']);
+    assert.deepEqual(result.negative.map(entry => entry.text), ['blurry']);
+});
+
+test('conditioning inputs combined from separate output slots are both retained', () => {
+    const result = summarize({ workflow: {
+        nodes: [
+            { id: 1, type: 'CLIPTextEncode', widgets_values: ['bright'], inputs: [] },
+            { id: 2, type: 'CLIPTextEncode', widgets_values: ['blurry'], inputs: [] },
+            { id: 3, type: 'ControlNetApplyAdvanced', inputs: [{ name: 'positive', link: 1 }, { name: 'negative', link: 2 }], outputs: [{ name: 'CONDITIONING' }, { name: 'CONDITIONING' }] },
+            { id: 4, type: 'ConditioningCombine', inputs: [{ name: 'conditioning_1', link: 3 }, { name: 'conditioning_2', link: 4 }] },
+            { id: 5, type: 'KSampler', widgets_values: [1, 'fixed', 20, 5, 'euler', 'normal', 1], inputs: [{ name: 'positive', link: 5 }] },
+            { id: 6, type: 'SaveImage', inputs: [{ name: 'images', link: 6 }] },
+        ],
+        links: [
+            [1, 1, 0, 3, 0, 'CONDITIONING'],
+            [2, 2, 0, 3, 1, 'CONDITIONING'],
+            [3, 3, 0, 4, 0, 'CONDITIONING'],
+            [4, 3, 1, 4, 1, 'CONDITIONING'],
+            [5, 4, 0, 5, 0, 'CONDITIONING'],
+            [6, 5, 0, 6, 0, 'IMAGE'],
+        ],
+    } });
+    assert.deepEqual(new Set(result.positive.map(entry => entry.text)), new Set(['bright', 'blurry']));
+});
+
 test('outputs keep branches separate and disconnected LoRAs are ignored', () => {
     const graph = apiGraph();
     graph['7'] = { class_type: 'SaveImage', inputs: { images: ['5', 0] }, title: 'Second output' };
     graph['8'] = { class_type: 'LoraLoader', inputs: { lora_name: 'unconnected.safetensors', strength_model: 1 } };
+    graph['9'] = { class_type: 'CLIPTextEncode', inputs: { text: 'orphan prompt' } };
     const result = summarize({ prompt: graph });
     assert.equal(result.positive.length, 2);
     assert.deepEqual(new Set(result.positive.map(entry => entry.label)), new Set(['SaveImage', 'Second output']));
     assert.equal(result.loras.some(entry => entry.text.includes('unconnected')), false);
+    assert.deepEqual(result.unconnected.map(entry => [entry.label, entry.text]), [['CLIPTextEncode', 'orphan prompt']]);
 });
 
 test('video input nodes are not mistaken for workflow outputs', () => {
@@ -125,6 +190,7 @@ test('output graph limit bounds unusually large workflow payloads', () => {
     const normalized = normalizeGraph(graph);
     assert.ok(normalized.nodes.size <= 10000);
     assert.equal(normalized.limited, true);
+    assert.equal(summarize({ prompt: graph }).limited, true);
 });
 
 test('summary traversal work is capped for large connected workflow graphs', () => {

@@ -46,8 +46,12 @@ function updateBadge(badge, metadata, isError = false) {
         let previewText = generator;
 
         // プロンプトの冒頭を追加
-        const previewSection = buildSections(metadata).find(section => section.id === 'positive');
-        const positive = previewSection ? previewSection.text : '';
+        const previewSection = buildSections(metadata).find(section =>
+            section.id === 'positive' || section.id === 'comfySummaryPositive'
+        );
+        const positive = previewSection
+            ? (previewSection.text || previewSection.children?.map(child => child.text).filter(Boolean).join('\n') || '')
+            : '';
         if (positive) {
             // 最初の50文字程度を表示
             const truncatedPrompt = positive.length > 50 ? positive.substring(0, 50) + '...' : positive;
@@ -92,6 +96,8 @@ function showErrorNotification(message) {
  */
 function detectGenerator(metadata) {
     const source = metadata && typeof metadata === 'object' ? metadata : {};
+
+    if (source.generator === 'ComfyUI') return 'ComfyUI';
 
     // Midjourney
     // Description に "Job ID:" または "--v" (バージョンフラグ) が含まれている場合
@@ -344,6 +350,7 @@ function createSectionModel(id, name, kind, defaultOpen, text, extras = {}) {
     if (Array.isArray(extras.children) && extras.children.length > 0) {
         section.children = extras.children;
     }
+    if (extras.editable === false) section.editable = false;
     return section;
 }
 
@@ -584,7 +591,7 @@ function buildSectionsInternal(metadata) {
             }
         };
         const summary = window.ComfyUIParser?.summarize(source) || {
-            positive: [], negative: [], models: [], loras: [], grid: []
+            positive: [], negative: [], unconnected: [], models: [], loras: [], grid: []
         };
         const makeChildren = entries => entries.map((entry, index) => ({
             label: entry.label || `Item ${index + 1}`,
@@ -592,24 +599,22 @@ function buildSectionsInternal(metadata) {
             dataFields: []
         }));
 
-        if (summary.limited) {
-            sections.push(createSectionModel(
-                'comfySummaryNotice', 'Summary may be incomplete', 'settings', false,
-                'The workflow summary was limited for performance. The raw JSON sections below preserve the source data.',
-                { dataFields: [] }
-            ));
-        }
-
         if (summary.positive.length > 0) {
             sections.push(createSectionModel(
                 'comfySummaryPositive', 'Positive Prompt Summary', 'positive', true, '',
-                { children: makeChildren(summary.positive) }
+                { children: makeChildren(summary.positive), editable: false }
             ));
         }
         if (summary.negative.length > 0) {
             sections.push(createSectionModel(
                 'comfySummaryNegative', 'Negative Prompt Summary', 'negative', false, '',
-                { children: makeChildren(summary.negative) }
+                { children: makeChildren(summary.negative), editable: false }
+            ));
+        }
+        if (summary.unconnected?.length > 0) {
+            sections.push(createSectionModel(
+                'comfySummaryUnconnected', 'Unconnected Prompt Nodes', 'settings', false, '',
+                { children: makeChildren(summary.unconnected), editable: false }
             ));
         }
         const modelAndLora = [
@@ -619,7 +624,7 @@ function buildSectionsInternal(metadata) {
         if (modelAndLora.length > 0) {
             sections.push(createSectionModel(
                 'comfySummaryModels', 'Models and LoRAs', 'settings', false, '',
-                { children: makeChildren(modelAndLora) }
+                { children: makeChildren(modelAndLora), editable: false }
             ));
         }
 
@@ -1308,7 +1313,7 @@ async function createModal(metadata, imageUrl = null, options = {}) {
         if (cursor < text.length) target.appendChild(document.createTextNode(text.substring(cursor)));
     };
 
-    const createTextArea = (text, dataFields, highlight = false) => {
+    const createTextArea = (text, dataFields, highlight = false, sectionEditable = true) => {
         const area = document.createElement('div');
         area.className = 'ai-meta-text-area';
         const displayText = toDisplayText(text);
@@ -1318,7 +1323,7 @@ async function createModal(metadata, imageUrl = null, options = {}) {
         if (Array.isArray(dataFields) && dataFields.length > 0) {
             area.setAttribute('data-field', dataFields.join(','));
         }
-        if (editingEnabled) area.contentEditable = 'true';
+        if (editingEnabled && sectionEditable) area.contentEditable = 'true';
         return area;
     };
 
@@ -1389,11 +1394,16 @@ async function createModal(metadata, imageUrl = null, options = {}) {
                 childLabel.className = 'ai-meta-char-label';
                 childLabel.textContent = child.label;
                 block.appendChild(childLabel);
-                block.appendChild(createTextArea(child.text, child.dataFields));
+                block.appendChild(createTextArea(child.text, child.dataFields, false, sectionModelItem.editable !== false));
                 body.appendChild(block);
             });
         } else {
-            body.appendChild(createTextArea(sectionModelItem.text, sectionModelItem.dataFields, sectionModelItem.highlight));
+            body.appendChild(createTextArea(
+                sectionModelItem.text,
+                sectionModelItem.dataFields,
+                sectionModelItem.highlight,
+                sectionModelItem.editable !== false
+            ));
         }
         section.appendChild(sectionHeader);
         section.appendChild(body);

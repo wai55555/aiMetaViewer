@@ -44,7 +44,7 @@ function makeMdtaMp4(key, value) {
     const keyEntry = Buffer.concat([uint32(keyBytes.length + 8), Buffer.from('mdta'), keyBytes]);
     const keys = isoBox('keys', Buffer.concat([Buffer.alloc(4), uint32(1), keyEntry]));
     const data = isoBox('data', Buffer.concat([uint32(1), uint32(0), utf8(value)]));
-    const indexedItem = isoBox(Buffer.from([0, 0, 0, 1]), Buffer.concat([uint32(1), data]));
+    const indexedItem = isoBox(Buffer.from([0, 0, 0, 1]), data);
     const ilst = isoBox('ilst', indexedItem);
     const meta = isoBox('meta', Buffer.concat([Buffer.alloc(4), keys, ilst]));
     const moov = isoBox('moov', isoBox('udta', meta));
@@ -190,6 +190,28 @@ test('MP4 parser reports the next verified top-level atom boundary after a large
     assert.equal(metadata.nextBoxOffset, ftyp.length + mdat.length);
 });
 
+test('MP4 range scan resumes when the head ends inside an extended-size atom header', async () => {
+    const moov = makeMp4('metadata after extended mdat');
+    const moovOffset = moov.indexOf(Buffer.from('moov')) - 4;
+    const ftyp = isoBox('ftyp', Buffer.from('isom\0\0\0\0isom', 'latin1'));
+    const mdatStart = 256 * 1024 - 8;
+    const free = isoBox('free', Buffer.alloc(mdatStart - ftyp.length - 8, 0));
+    const mdat = isoBox('mdat', Buffer.alloc(96, 0x41), true);
+    const file = Buffer.concat([ftyp, free, mdat, moov.subarray(moovOffset)]);
+    const prefix = file.subarray(0, 256 * 1024);
+    const prefixResult = extractVideoMetadata(prefix, { format: 'mp4', totalSize: file.length });
+    assert.equal(prefixResult.parserState, 'unresolved');
+    assert.equal(prefixResult.nextBoxOffset, mdatStart);
+
+    const result = await scanMp4VideoMetadata(
+        async (offset, length) => file.subarray(offset, offset + length),
+        file.length,
+        { startOffset: prefixResult.nextBoxOffset }
+    );
+    assert.equal(result.parserState, 'resolved');
+    assert.equal(result.Description, 'metadata after extended mdat');
+});
+
 test('MP4 full-buffer parser stops at its top-level atom count limit', () => {
     const file = Buffer.concat(Array.from({ length: 20001 }, () => isoBox('free', Buffer.alloc(0))));
     const metadata = extractVideoMetadata(file, { format: 'mp4', inputComplete: true, totalSize: file.length });
@@ -243,7 +265,7 @@ test('MP4 header reader validates 64-bit atom sizes against the file boundary', 
     assert.equal(invalid.state, 'invalid');
 });
 
-test('MP4 resolves indexed mdta keys and skips the item key index before data atoms', () => {
+test('MP4 resolves indexed mdta keys and parses data atoms at the item payload start', () => {
     const bytes = makeMdtaMp4('comfyui.prompt', 'a comet above the sea');
     const metadata = extractVideoMetadata(bytes, { inputComplete: true, totalSize: bytes.length });
     assert.equal(metadata.parserState, 'resolved');
@@ -368,6 +390,28 @@ test('WebM unknown-size Cluster stays unresolved instead of confirming empty met
     assert.equal(metadata.prompt, undefined);
 });
 
+test('WebM recognizes an eight-byte unknown-size Segment in both extraction paths', async () => {
+    const tags = webmTags('PROMPT', 'unknown-size segment prompt');
+    const info = ebmlElement('1549a966', Buffer.alloc(0));
+    const header = ebmlElement('1a45dfa3', ebmlElement('4282', utf8('webm')));
+    const segment = Buffer.concat([
+        ebmlId('18538067'),
+        Buffer.from([0x01, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff]),
+        info,
+        tags,
+    ]);
+    const bytes = Buffer.concat([header, segment]);
+    const full = extractVideoMetadata(bytes, { inputComplete: true });
+    const ranged = await scanWebmVideoMetadata(
+        async (offset, length) => bytes.subarray(offset, offset + length),
+        bytes.length
+    );
+    assert.equal(full.parserState, 'resolved');
+    assert.equal(full.prompt, 'unknown-size segment prompt');
+    assert.equal(ranged.parserState, 'resolved');
+    assert.equal(ranged.prompt, 'unknown-size segment prompt');
+});
+
 test('WebM uses SeekHead positions to read Tags directly', async () => {
     const tags = webmTags('WORKFLOW', '{"nodes":[]}');
     const info = ebmlElement('1549a966', Buffer.alloc(0));
@@ -383,7 +427,8 @@ test('WebM uses SeekHead positions to read Tags directly', async () => {
     }, bytes.length);
     assert.equal(metadata.parserState, 'resolved');
     assert.equal(metadata.workflow, '{"nodes":[]}');
-    assert.ok(reads.some(read => read.offset === header.length + 5 + seekHead.length + info.length));
+    assert.equal(reads[1].offset, header.length + 5 + seekHead.length + info.length,
+        'the read after the initial prefix should use the SeekHead Tags offset');
 });
 
 test('WebM SeekHead cannot redirect parsing outside the Segment boundary', async () => {
@@ -445,6 +490,46 @@ test('WebM range scanner continues to later Tags elements after an empty one', a
     const metadata = await scanWebmVideoMetadata(async (offset, length) => bytes.subarray(offset, offset + length), bytes.length);
     assert.equal(metadata.parserState, 'resolved');
     assert.equal(metadata.prompt, 'metadata in the next Tags element');
+});
+
+test('WebM range scanner combines fields from multiple nonempty Tags elements', async () => {
+    const promptTags = webmTags('PROMPT', 'first Tags prompt');
+    const workflowTags = webmTags('WORKFLOW', '{"nodes":[]}');
+    const info = ebmlElement('1549a966', Buffer.alloc(0));
+    let seekHead = makeWebmSeekHead(0);
+    seekHead = makeWebmSeekHead(seekHead.length + info.length);
+    const header = ebmlElement('1a45dfa3', ebmlElement('4282', utf8('webm')));
+    const bytes = Buffer.concat([
+        header,
+        ebmlElement('18538067', Buffer.concat([seekHead, info, promptTags, workflowTags])),
+    ]);
+
+    const ranged = await scanWebmVideoMetadata(
+        async (offset, length) => bytes.subarray(offset, offset + length),
+        bytes.length
+    );
+    const full = extractVideoMetadata(bytes, { inputComplete: true });
+    for (const metadata of [ranged, full]) {
+        assert.equal(metadata.parserState, 'resolved');
+        assert.equal(metadata.prompt, 'first Tags prompt');
+        assert.equal(metadata.workflow, '{"nodes":[]}');
+        assert.equal(metadata['WebM Tags'].length, 2);
+    }
+});
+
+test('WebM range scanner rejects Tags that extend outside the Segment', async () => {
+    const externalTags = webmTags('PROMPT', 'must not be read outside the Segment');
+    const info = ebmlElement('1549a966', Buffer.alloc(0));
+    const tagHeaderLength = 5;
+    const segment = ebmlElement('18538067', Buffer.concat([info, externalTags.subarray(0, tagHeaderLength)]));
+    const header = ebmlElement('1a45dfa3', ebmlElement('4282', utf8('webm')));
+    const bytes = Buffer.concat([header, segment, externalTags.subarray(tagHeaderLength)]);
+    const metadata = await scanWebmVideoMetadata(
+        async (offset, length) => bytes.subarray(offset, offset + length),
+        bytes.length
+    );
+    assert.equal(metadata.parserState, 'unresolved');
+    assert.equal(metadata.prompt, undefined);
 });
 
 test('WebM binary TagBinary values are recorded by size instead of decoded as text', () => {

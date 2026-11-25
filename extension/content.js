@@ -1676,7 +1676,13 @@ function getVideoLinkedAnchor(img) {
     if (!img || img.tagName !== 'IMG') return null;
     const anchor = img.closest('a[href]');
     const mediaType = String(anchor?.type || '').toLowerCase();
-    return anchor && (isVideoMetadataUrl(anchor.href) || /^video\/(?:mp4|webm|quicktime|x-matroska)$/.test(mediaType))
+    let supportedScheme = false;
+    try {
+        supportedScheme = ['http:', 'https:', 'file:'].includes(new URL(anchor?.href || '', document.baseURI).protocol);
+    } catch (_) { }
+    return anchor && supportedScheme && (
+        isVideoMetadataUrl(anchor.href) || /^video\/(?:mp4|webm|quicktime|x-matroska)$/.test(mediaType)
+    )
         ? anchor
         : null;
 }
@@ -1773,9 +1779,16 @@ function enqueueVideoAnalysis(element) {
 }
 
 function drainVideoAnalyses() {
+    for (const [element, entry] of pendingVideoAnalyses) {
+        if (!element.isConnected || videoSelectedSources.get(element) !== entry.url ||
+            videoAnalyzedSources.get(element) === entry.url) {
+            pendingVideoAnalyses.delete(element);
+        }
+    }
     while (runningVideoAnalyses.size < VIDEO_ANALYSIS_MAX_CONCURRENT) {
         const candidates = Array.from(pendingVideoAnalyses.entries())
-            .filter(([element]) => !runningVideoAnalyses.has(element) && element.isConnected)
+            .filter(([element, entry]) => !runningVideoAnalyses.has(element) && element.isConnected &&
+                videoSelectedSources.get(element) === entry.url && videoAnalyzedSources.get(element) !== entry.url)
             .sort(([a], [b]) => distanceFromViewportCenter(a) - distanceFromViewportCenter(b));
         if (candidates.length === 0) return;
         const [element, entry] = candidates[0];
@@ -1797,7 +1810,7 @@ async function runVideoAnalysis(element, url) {
         const hasMetadata = response?.success === true && response.metadata &&
             typeof response.metadata === 'object' && Object.keys(response.metadata).length > 0;
         if (response?.analysisState === 'resolved' && hasMetadata) {
-            if (addBadgeToElement(element, response.metadata, url, { mediaType: 'video' }) !== false) {
+            if (addBadgeToElement(element, response.metadata, url, { mediaType: 'video' })) {
                 videoAnalyzedSources.set(element, url);
             }
         } else if (response?.analysisState === 'confirmed-empty' && response.success === true) {
@@ -1918,7 +1931,7 @@ function observeVideoMetadata() {
             childList: true,
             subtree: true,
             attributes: true,
-            attributeFilter: ['src', 'href', 'srcset']
+            attributeFilter: ['src', 'href', 'srcset', 'type']
         });
     }
 
@@ -2083,8 +2096,14 @@ function observeImages() {
                         if (!sameSrc) {
                             imageAnalyzedSources.delete(target);
                             clearImageAnalyzingBadge(target);
-                            removeBadge(target);
-                            processedImages.delete(target);
+                            const currentBadge = processedImages.get(target)?.badge;
+                            const linkedVideoSource = getVideoMetadataSource(target);
+                            if (currentBadge?._mediaType === 'video' && currentBadge._originalUrl === linkedVideoSource) {
+                                processedImages.get(target)?.updatePosition?.();
+                            } else {
+                                removeBadge(target);
+                                processedImages.delete(target);
+                            }
                             if (viewportAnalysisQueue.running.has(target)) {
                                 imageSourceRechecks.add(target);
                             }

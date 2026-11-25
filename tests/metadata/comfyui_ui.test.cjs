@@ -52,7 +52,7 @@ test('API-only ComfyUI prompt graphs are identified and summarized', () => {
     assert.ok(sections.some(section => section.id === 'rawApiPrompt' && section.name === 'Raw API Prompt JSON'));
 });
 
-test('limited workflow summaries explain that the raw JSON remains available', () => {
+test('limited workflow summaries keep raw JSON without showing the incomplete-summary notice', () => {
     const graph = {};
     const chainLength = 5000;
     const samplerCount = 500;
@@ -72,11 +72,32 @@ test('limited workflow summaries explain that the raw JSON remains available', (
     }
     graph.output = { class_type: 'SaveImage', inputs: { images: [`sampler${samplerCount - 1}`, 0] } };
     const sections = uiContext.__uiApi.buildSections({ generator: 'ComfyUI', prompt: graph });
-    assert.ok(sections.some(section => section.id === 'comfySummaryNotice'));
+    assert.equal(sections.some(section => section.id === 'comfySummaryNotice'), false);
     assert.ok(sections.some(section => section.id === 'rawApiPrompt' && section.name === 'Raw API Prompt JSON'));
 });
 
-test('video modal disables editing and metadata-writing while image modal keeps the existing path', () => {
+test('ComfyUI graph summaries remain read-only and list disconnected prompts separately', () => {
+    const sections = uiContext.__uiApi.buildSections({ generator: 'ComfyUI', prompt: {
+        '1': { class_type: 'CLIPTextEncode', inputs: { text: 'connected prompt' } },
+        '2': { class_type: 'KSampler', inputs: { positive: ['1', 0] } },
+        '3': { class_type: 'SaveImage', inputs: { images: ['2', 0] } },
+        '4': { class_type: 'CLIPTextEncode', title: 'Unused prompt', inputs: { text: 'unconnected prompt' } },
+    } });
+    const positive = sections.find(section => section.id === 'comfySummaryPositive');
+    const unconnected = sections.find(section => section.id === 'comfySummaryUnconnected');
+    assert.equal(positive.editable, false);
+    assert.equal(positive.children[0].text, 'connected prompt');
+    assert.equal(unconnected.name, 'Unconnected Prompt Nodes');
+    assert.equal(unconnected.editable, false);
+    assert.equal(unconnected.children[0].label, 'Unused prompt');
+    assert.equal(unconnected.children[0].text, 'unconnected prompt');
+});
+
+test('explicit ComfyUI generator is honored for a plain-text video prompt', () => {
+    assert.equal(uiContext.__uiApi.detectGenerator({ generator: 'ComfyUI', prompt: 'plain video prompt' }), 'ComfyUI');
+});
+
+test('source contract disables video editing and metadata-writing while image flow remains available', () => {
     assert.match(uiSource, /const editingEnabled = mediaType !== 'video' &&/);
     assert.match(uiSource, /if \(mediaType !== 'video' && modalSettings\.advancedModeEnabled/);
     assert.match(uiSource, /async function createModal\(metadata, imageUrl = null, options = \{\}\)/);

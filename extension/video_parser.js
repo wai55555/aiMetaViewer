@@ -5,7 +5,6 @@
 
 const VIDEO_METADATA_MAX_BYTES = 2 * 1024 * 1024;
 const VIDEO_METADATA_HEAD_BYTES = 256 * 1024;
-const VIDEO_METADATA_TAIL_BYTES = 256 * 1024;
 const WEBM_MAX_RANGE_READS = 64;
 const WEBM_MAX_TAG_BYTES = 256 * 1024;
 const VIDEO_MAX_BOXES = 20000;
@@ -92,8 +91,10 @@ function readIsoBox(bytes, offset, parentEnd, { complete = false } = {}) {
     const type = videoAscii(bytes, offset + 4, offset + 8);
     let headerSize = 8;
     if (size === 1) {
+        if (offset + 16 > parentEnd) return { invalid: true, type, start: offset };
+        if (offset + 16 > bytes.length) return { incomplete: true, type, start: offset, headerSize: 16 };
         size = videoUInt64(bytes, offset + 8);
-        if (size === null || offset + 16 > parentEnd || offset + 16 > bytes.length) return { invalid: true };
+        if (size === null) return { invalid: true, type, start: offset };
         headerSize = 16;
     } else if (size === 0) {
         if (!complete) return { incomplete: true };
@@ -264,7 +265,7 @@ function parseIsoIlst(bytes, ilstBox, keys, metadata) {
         const key = keyIndex && keys && keys[keyIndex - 1]
             ? keys[keyIndex - 1]
             : item.type;
-        const childStart = indexedItem ? item.payloadStart + 4 : item.payloadStart;
+        const childStart = item.payloadStart;
         const children = readIsoBoxes(bytes, childStart, item.end, { complete: true });
         if (children.state !== 'complete') return false;
         for (const child of children.boxes) {
@@ -356,7 +357,7 @@ function findMp4Moov(bytes, startOffset, totalSize, inputComplete, atBoxBoundary
             if (box.invalid || exceedsTotalSize(box)) return { state: 'invalid' };
             if (box.incomplete) return box.type === 'moov'
                 ? { state: 'unresolved', box }
-                : { state: 'unresolved', nextBoxOffset: Number.isSafeInteger(box.end) ? box.end : null };
+                : { state: 'unresolved', nextBoxOffset: Number.isSafeInteger(box.end) ? box.end : startOffset + offset };
             if (box.type === 'moov') return { box, state: 'found' };
             if (!box.size || box.end <= offset) return { state: 'invalid' };
             offset = box.end;
@@ -374,7 +375,7 @@ function findMp4Moov(bytes, startOffset, totalSize, inputComplete, atBoxBoundary
     if (box.invalid || exceedsTotalSize(box)) return { state: 'invalid' };
     if (box.incomplete) return box.type === 'moov'
         ? { state: 'unresolved', box }
-        : { state: 'unresolved', nextBoxOffset: Number.isSafeInteger(box.end) ? startOffset + box.end : null };
+        : { state: 'unresolved', nextBoxOffset: Number.isSafeInteger(box.end) ? startOffset + box.end : startOffset };
     if (box.type === 'moov') return { box, state: 'found' };
     return { state: 'unresolved', nextBoxOffset: startOffset + box.end };
 }
@@ -476,9 +477,9 @@ function readEbmlVint(bytes, offset, isId = false) {
     if (length > (isId ? 4 : 8) || offset + length > bytes.length) return null;
     let value = BigInt(isId ? first : first & (mask - 1));
     for (let i = 1; i < length; i++) value = (value << 8n) | BigInt(bytes[offset + i]);
-    if (value > BigInt(Number.MAX_SAFE_INTEGER)) return null;
     const unknown = !isId && value === (1n << BigInt(7 * length)) - 1n;
-    return { value: Number(value), length, unknown };
+    if (!unknown && value > BigInt(Number.MAX_SAFE_INTEGER)) return null;
+    return { value: unknown ? null : Number(value), length, unknown };
 }
 
 function readEbmlElement(bytes, offset, parentEnd) {
@@ -593,6 +594,27 @@ function parseWebmTagsElement(input, options = {}) {
     return videoParserResult({}, options.inputComplete === true ? 'empty-confirmed' : 'unresolved', { format: 'webm' });
 }
 
+const webmMetadataTagKeys = new WeakMap();
+
+function mergeWebmTagMetadata(target, source) {
+    const tags = Array.isArray(source?.['WebM Tags']) ? source['WebM Tags'] : [];
+    if (!Array.isArray(target['WebM Tags'])) target['WebM Tags'] = [];
+    let seen = webmMetadataTagKeys.get(target);
+    if (!seen) {
+        seen = new Set(target['WebM Tags'].map(tag => JSON.stringify(tag)));
+        webmMetadataTagKeys.set(target, seen);
+    }
+    for (const tag of tags) {
+        if (!tag || typeof tag.name !== 'string' || typeof tag.value !== 'string') continue;
+        const key = JSON.stringify(tag);
+        if (seen.has(key)) continue;
+        seen.add(key);
+        target['WebM Tags'].push(tag);
+        assignVideoTag(target, tag.name, tag.value);
+    }
+    return target;
+}
+
 function parseEbmlMasterChildren(bytes, start, end, depth = 0) {
     if (depth > WEBM_MAX_DEPTH) return { state: 'resource-limit', children: [] };
     const children = [];
@@ -692,6 +714,7 @@ async function scanWebmVideoMetadata(readRange, totalSize, options = {}) {
     if (!Number.isSafeInteger(segmentEnd) || segmentEnd === null || segmentEnd < segmentStart) {
         return videoParserResult({}, 'unresolved', { format: 'webm', reason: 'segment-size-unknown' });
     }
+    const collectedMetadata = {};
 
     const prefixChildren = [];
     let childOffset = segmentStart;
@@ -715,10 +738,11 @@ async function scanWebmVideoMetadata(readRange, totalSize, options = {}) {
                 if (tagHeader.id === 0x1254C367 && ['complete', 'incomplete'].includes(tagHeader.state) &&
                     tagHeader.end <= maxTagBytes && tagHeader.end <= segmentEnd - tagOffset) {
                     const tagBytes = await readAt(tagOffset, tagHeader.end);
-                if (tagBytes) {
-                    const tagResult = parseWebmTagsElement(tagBytes, { inputComplete: true });
-                    if (tagResult.parserState !== 'empty-confirmed') return tagResult;
-                }
+                    if (tagBytes) {
+                        const tagResult = parseWebmTagsElement(tagBytes, { inputComplete: true });
+                        if (tagResult.parserState === 'resolved') mergeWebmTagMetadata(collectedMetadata, tagResult);
+                        else if (tagResult.parserState !== 'empty-confirmed') return tagResult;
+                    }
                 }
             }
         }
@@ -737,10 +761,14 @@ async function scanWebmVideoMetadata(readRange, totalSize, options = {}) {
             if (!Number.isSafeInteger(header.end) || header.end > maxTagBytes) {
                 return videoParserResult({}, 'resource-limit', { format: 'webm', reason: 'tag-budget' });
             }
+            if (header.end > segmentEnd - offset) {
+                return videoParserResult({}, 'unresolved', { format: 'webm', reason: 'tag-outside-segment' });
+            }
             const tagBytes = await readAt(offset, header.end);
             if (!tagBytes) return videoParserResult({}, 'unresolved', { format: 'webm', reason: 'tag-unavailable' });
             const tagResult = parseWebmTagsElement(tagBytes, { inputComplete: true });
-            if (tagResult.parserState !== 'empty-confirmed') return tagResult;
+            if (tagResult.parserState === 'resolved') mergeWebmTagMetadata(collectedMetadata, tagResult);
+            else if (tagResult.parserState !== 'empty-confirmed') return tagResult;
             offset += header.end;
             continue;
         }
@@ -754,7 +782,9 @@ async function scanWebmVideoMetadata(readRange, totalSize, options = {}) {
         }
         offset = next; // skip Cluster payloads using their validated EBML size
     }
-    return videoParserResult({}, 'empty-confirmed', { format: 'webm' });
+    return Object.keys(collectedMetadata).length > 0
+        ? videoParserResult(collectedMetadata, 'resolved', { format: 'webm' })
+        : videoParserResult({}, 'empty-confirmed', { format: 'webm' });
 }
 
 function extractWebmVideoMetadata(input, options = {}) {
@@ -765,6 +795,7 @@ function extractWebmVideoMetadata(input, options = {}) {
     let segmentFound = false;
     let elementsVisited = 0;
     const scanSegment = (start, end) => {
+        const collectedMetadata = {};
         let childOffset = start;
         while (childOffset < end) {
             if (++elementsVisited > WEBM_MAX_ELEMENTS) return videoParserResult({}, 'resource-limit', { format: 'webm', reason: 'element-limit' });
@@ -774,12 +805,14 @@ function extractWebmVideoMetadata(input, options = {}) {
             if (child.id === 0x1254C367) {
                 if (child.size > WEBM_MAX_TAG_BYTES) return videoParserResult({}, 'resource-limit', { format: 'webm', reason: 'tag-byte-budget' });
                 const tagsResult = parseWebmTagsElement(bytes.subarray(child.offset, child.end), { inputComplete: true });
-                if (tagsResult.parserState === 'resolved' || tagsResult.parserState === 'resource-limit') return tagsResult;
-                if (tagsResult.parserState !== 'empty-confirmed') return tagsResult;
+                if (tagsResult.parserState === 'resolved') mergeWebmTagMetadata(collectedMetadata, tagsResult);
+                else if (tagsResult.parserState !== 'empty-confirmed') return tagsResult;
             }
             childOffset = child.end;
         }
-        return null;
+        return Object.keys(collectedMetadata).length > 0
+            ? videoParserResult(collectedMetadata, 'resolved', { format: 'webm' })
+            : null;
     };
     while (offset < bytes.length) {
         if (++elementsVisited > WEBM_MAX_ELEMENTS) return videoParserResult({}, 'resource-limit', { format: 'webm', reason: 'element-limit' });

@@ -15,16 +15,16 @@
 ## 安全・失敗時の扱い
 
 - parserは画像parserから分離し、atom/EBML elementの境界・サイズ・深さを検証する。
-- 合計取得量は2 MiB、MP4の初期head/tail windowは各256 KiB、WebMのrange header取得は最大64回とする。
-- ComfyUIの`prompt`・`workflow`・`generation_data` graphは各々最大10,000 node・20,000 link・100 output・100,000 traversal workで要約する。3 graphすべてがある場合の総上限は30,000 node・60,000 link・300 output・300,000 traversal workで、最終summary groupは各200件。切り詰め時はraw JSONを残したまま要約が不完全なことを表示する。
-- Range非対応、file URLのアクセス拒否、未知サイズ、上限到達、破損データは空metadataとして確定せず、`unresolved`または`resource-limit`を返す。
+- 合計取得量は2 MiB、MP4の初期headは256 KiB、後続は検証済みatom位置から必要なRangeだけを取得する。WebMのrange header取得は最大64回とする。
+- ComfyUIの`prompt`・`workflow`・`generation_data` graphは各々最大10,000 node・20,000 link・100 output・100,000 traversal workで要約する。3 graphすべてがある場合の総上限は30,000 node・60,000 link・300 output・300,000 traversal workで、最終summary groupは各200件。切り詰め時もraw JSONを保持し、要約上限の警告文は表示しない。
+- Range非対応サーバーが`200`で本文を返す場合、2 MiB以内で完全取得できれば全体を解析して`resolved`または`empty-confirmed`を返す。上限超過、本文不完全、file URLアクセス拒否、未知サイズ、破損データなど、結果を確定できない場合は`unresolved`または`resource-limit`を返す。
 - WebMのunknown-size Clusterは終了位置を安全に特定できないため走査を`unresolved`にし、後続Tagsやmetadataなしを推測しない。
 - `fetchImageMetadata`契約と画像の解析・編集動作を維持する。動画用metadataのキャッシュは画像用と名前空間を分ける。
 - 動画metadata本文や`file:` URLのpathを動画診断ログへ出さない。
 
 ## 実装チェックリスト
 
-- [x] 独立したWindows-visible worktreeとブランチを作成
+- [x] 実装用の独立した作業場所とブランチを作成
 - [x] MP4/WebM純粋parserを追加
 - [x] Background video metadata取得action・cache・bounded range reader
 - [x] ComfyUI workflow normalizerと要約表示
@@ -44,9 +44,16 @@ fixtureで自動確認するのはparser/range reader、ComfyUIの要約・secti
 
 ## 実装結果
 
-- 作業場所は`/mnt/c/github/aimetaviewer-comfyui-video`、branchは`codex/comfyui-video-metadata`。作成時のbaseは`163c1a6`。作業中にmain checkoutが`0fcd3b9`へ進んだため、統合時に最新状態を確認して追従する。
 - `extension/video_parser.js`にMP4の32/64-bit atom、`keys/ilst`、旧式QuickTime comment、WebMのEBML Tags/SimpleTagを読むparserを追加。parserは境界・サイズ・深さ・件数を制限し、動画payload内の任意文字列検索はしない。
 - `extension/video_range_reader.js`とBackground actionを追加。HTTP Range/file URLを合計2 MiB以内で読み、Range非対応時もReadableStreamを上限で打ち切る。解析結果は`video-metadata-v1:` namespaceで画像cacheから分離。
 - `extension/comfyui_parser.js`でAPI prompt graphとUI workflow graphを要約。接続されたoutput branchからpositive/negative prompt、model、LoRA、sampler設定を拾い、raw JSONも別sectionで保持。
 - `<video>`と動画URLリンク画像をviewport queueで解析。最大4件を並行処理し、DOM削除・viewport退出・source変更時に取り消す。動画modalは編集と画像書き込みを無効化。
-- Node fixtureテスト54件が成功。変更したJavaScriptの構文確認とmanifest JSON確認も成功。QuickTime 16-bit user-data textのencoding、名前付きComfyUI JSONのraw保持、raw JSON文字列からの要約、旧式MP4タグの破損や短いvalue header、不正JSONの誤要約、Content-Lengthより短い応答、WebM unknown-size Clusterの未確定扱い、大規模workflow要約と高密度linkの処理上限もfixtureで検証する。ブラウザ上での拡張機能手動動作確認はこの環境では行っていない。
+- 初回実装時点ではNode fixtureテスト54件、変更JavaScriptの構文確認、manifest JSON確認に成功。以下のレビュー後修正はこの初回結果に含まれない。ブラウザ上での拡張機能手動動作確認は未実施。
+
+## PR #35 AIレビュー後の修正
+
+- Indexed MP4 `ilst`、8-byte unknown-size EBML、head境界にかかるextended-size atom、複数WebM `Tags`、Segment外を指すTagsの扱いを修正する。
+- Range継続要求に`If-Range` validatorを使い、圧縮Range応答・未検証の別representation・読み過ぎた応答bytesを適切に扱う。
+- ComfyUIのUI widget位置、condition output slot、接続していないprompt、要約の上限フラグを修正する。要約上限の警告文は表示しない。
+- 導出summaryはread-onlyにし、動画badgeのURL scheme・observer・重複要求・画像サムネイル変更時のbadge維持を修正する。
+- このレビュー後修正に対するテストは追加・更新した。今回の作業ではテストを実行していない。
