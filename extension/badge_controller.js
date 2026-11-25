@@ -150,12 +150,14 @@ function removeAnalyzingBadge(badgeObj) {
  * @param {string} originalUrl
  * @returns {HTMLElement}
  */
-function createBadgeElement(metadata, originalUrl) {
+function createBadgeElement(metadata, originalUrl, mediaType = 'image') {
     const badge = createBadge(); // ui.js
     updateBadge(badge, metadata); // ui.js
     badge.style.zIndex = '2147483640';
     badge._metadata = metadata;
     badge._originalUrl = originalUrl;
+    badge._mediaType = mediaType === 'video' ? 'video' : 'image';
+    if (badge._mediaType === 'video') badge.setAttribute('aria-label', 'Click to view video metadata');
     return badge;
 }
 
@@ -174,7 +176,7 @@ function attachBadgeClickHandler(badge) {
 
         badge._modalCreationInFlight = true;
         try {
-            const modal = await createModal(currentMetadata, badge._originalUrl); // ui.js
+            const modal = await createModal(currentMetadata, badge._originalUrl, { mediaType: badge._mediaType }); // ui.js
             if (document.body) document.body.appendChild(modal);
         } catch (error) {
             if (typeof debugLog === 'function') {
@@ -401,14 +403,14 @@ function attachBadgeToWebPage(img, badge) {
  * バッジを画像に追加
  * @param {HTMLImageElement} img 
  * @param {Object} metadata 
- * @param {string} originalUrl 
+ * @param {string} originalUrl
  */
 function addBadgeToImage(img, metadata, originalUrl) {
     // 既にバッジがある場合はチェック
     if (processedImages.has(img)) {
         const existing = processedImages.get(img);
         if (existing && existing.badge) {
-            if (existing.badge._originalUrl === originalUrl) return;
+            if (existing.badge._originalUrl === originalUrl && existing.badge._mediaType !== 'video') return;
             debugLog('[AI Meta Viewer] URL changed for the same element. Refreshing badge.', {
                 old: existing.badge._originalUrl,
                 new: originalUrl
@@ -445,22 +447,24 @@ function addBadgeToImage(img, metadata, originalUrl) {
 
 /**
  * 汎用的な要素にバッジを追加
- * @param {HTMLElement} el 
- * @param {Object} metadata 
- * @param {string} originalUrl 
+ * @param {HTMLElement} el
+ * @param {Object} metadata
+ * @param {string} originalUrl
+ * @returns {boolean} バッジを作成または再利用できたかどうか。
  */
-function addBadgeToElement(el, metadata, originalUrl) {
+function addBadgeToElement(el, metadata, originalUrl, options = {}) {
+    const mediaType = options?.mediaType === 'video' ? 'video' : 'image';
     if (processedImages.has(el)) {
         const existing = processedImages.get(el);
         if (existing && existing.badge) {
-            if (existing.badge._originalUrl === originalUrl) return;
+            if (existing.badge._originalUrl === originalUrl && existing.badge._mediaType === mediaType) return true;
             removeBadge(el);
         }
     }
 
-    if (!document.body) return;
+    if (!document.body) return false;
 
-    const badge = createBadgeElement(metadata, originalUrl);
+    const badge = createBadgeElement(metadata, originalUrl, mediaType);
     attachBadgeClickHandler(badge);
 
     badge.style.position = 'fixed';
@@ -484,6 +488,7 @@ function addBadgeToElement(el, metadata, originalUrl) {
             resizeObserver.unobserve(el);
         }
     });
+    return true;
 }
 /**
  * Background Scriptからのメッセージを処理

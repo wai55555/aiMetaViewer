@@ -32,6 +32,7 @@
             ],
             "js": [
                 "settings_loader.js",
+                "comfyui_parser.js",
                 "ui.js",
                 "adapters.js",
                 "badge_controller.js",

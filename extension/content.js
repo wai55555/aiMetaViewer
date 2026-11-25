@@ -347,6 +347,7 @@ function init() {
         observeImages();
         observeSiteSpecificElements();
     }
+    observeVideoMetadata();
 
     extensionInitialized = true;
 }
@@ -362,6 +363,16 @@ const imageSourceRechecks = new WeakSet();
 const imageAnalyzingBadgeStates = new WeakMap();
 // 処理済みマーカーがどのcurrentSrcに対するものか記録する。
 const imageAnalyzedSources = new WeakMap();
+const videoAnalyzedSources = new Map();
+const videoSelectedSources = new Map();
+const activeVideoAnalysisStates = new WeakMap();
+const observedVideoElements = new WeakSet();
+const pendingVideoAnalyses = new Map();
+const runningVideoAnalyses = new Set();
+const VIDEO_ANALYSIS_MAX_CONCURRENT = 4;
+let videoMetadataIntersectionObserver = null;
+let videoMetadataMutationObserver = null;
+let videoMediaEventsRegistered = false;
 let sourceSelectionListenersRegistered = false;
 const ANALYZING_BADGE_DELAY_MS = 200;
 const imageDiagnosticIds = new WeakMap();
@@ -514,6 +525,13 @@ async function checkImageMetadata(img, requestOptions = {}) {
     if (!isExtensionContextValid()) {
         logImageDiagnostic('analysis-skip', img, { reason: 'context-invalid' });
         debugLog({ category: 'message', phase: 'content', errorType: 'unknown', retryable: false });
+        return;
+    }
+
+    if (isVideoLinkedThumbnail(img)) {
+        // 動画リンクのサムネイルは動画URL側を解析し、画像bytesとの二重表示を避ける。
+        if (processedImages.get(img)?.badge?._mediaType === 'image') removeBadge(img);
+        processedImages.delete(img);
         return;
     }
 
@@ -1087,8 +1105,21 @@ function startSpaUrlPolling() {
 
             // 2. 処理済み管理マップをクリア（これにより新しい要素として認識させる）
             if (typeof processedImages !== 'undefined') {
+                // Remove stale position listeners and ResizeObserver registrations
+                // before dropping records for badges whose DOM nodes were removed.
+                for (const element of Array.from(processedImages.keys())) removeBadge(element);
                 processedImages.clear();
                 debugLog('[AI Meta Viewer] processedImages Map cleared.');
+            }
+            // A video element can survive SPA navigation while its old badge is removed.
+            // Invalidate its per-source result so the new page state is analyzed again.
+            for (const element of videoSelectedSources.keys()) {
+                cancelVideoElement(element);
+                videoAnalyzedSources.delete(element);
+                if (element.isConnected) {
+                    videoMetadataIntersectionObserver?.unobserve(element);
+                    videoMetadataIntersectionObserver?.observe(element);
+                }
             }
 
             debugLog(`[AI Meta Viewer] Cleanup complete. Badges removed: ${existingBadges.length} (Current in DOM: ${document.querySelectorAll('.ai-meta-badge').length}), Map entries cleared: ${beforeMapSize}`);
@@ -1306,6 +1337,7 @@ async function checkMetadataForElement(el) {
     }
 
     if (!url) return;
+    if (isVideoMetadataUrl(url)) return;
 
     // 処理済みフラグを一時的に立てる
     processedImages.set(el, { processing: true });
@@ -1626,6 +1658,297 @@ function cleanupRemovedImage(img) {
     removeBadge(img);
     processedImages.delete(img);
     imageAnalyzedSources.delete(img);
+    cleanupVideoElement(img);
+}
+
+function isVideoMetadataUrl(value) {
+    if (typeof value !== 'string' || !value) return false;
+    try {
+        const url = new URL(value, document.baseURI);
+        if (!['http:', 'https:', 'file:'].includes(url.protocol)) return false;
+        return /\.(?:mp4|m4v|mov|webm|mkv)$/i.test(url.pathname);
+    } catch (_) {
+        return false;
+    }
+}
+
+function getVideoLinkedAnchor(img) {
+    if (!img || img.tagName !== 'IMG') return null;
+    const anchor = img.closest('a[href]');
+    const mediaType = String(anchor?.type || '').toLowerCase();
+    let supportedScheme = false;
+    try {
+        supportedScheme = ['http:', 'https:', 'file:'].includes(new URL(anchor?.href || '', document.baseURI).protocol);
+    } catch (_) { }
+    return anchor && supportedScheme && (
+        isVideoMetadataUrl(anchor.href) || /^video\/(?:mp4|webm|quicktime|x-matroska)$/.test(mediaType)
+    )
+        ? anchor
+        : null;
+}
+
+function isVideoLinkedThumbnail(img) {
+    return Boolean(getVideoLinkedAnchor(img));
+}
+
+function getVideoMetadataSource(element) {
+    if (!element || !element.isConnected) return null;
+    let value = '';
+    if (element.tagName === 'VIDEO') {
+        value = element.currentSrc || element.src || element.querySelector('source[src]')?.src || '';
+    } else if (element.tagName === 'IMG') {
+        value = getVideoLinkedAnchor(element)?.href || '';
+    }
+    if (!value) return null;
+    try {
+        const url = new URL(value, document.baseURI);
+        return ['http:', 'https:', 'file:'].includes(url.protocol) ? url.href : null;
+    } catch (_) {
+        return null;
+    }
+}
+
+function cancelVideoElement(element) {
+    pendingVideoAnalyses.delete(element);
+    const state = activeVideoAnalysisStates.get(element);
+    if (!state || state.cancelled) return;
+    state.cancelled = true;
+    sendMessageToBrave({ action: 'cancelVideoMetadata', videoUrl: state.url }).catch(() => {});
+}
+
+function cleanupVideoElement(element) {
+    if (!element) return;
+    videoMetadataIntersectionObserver?.unobserve(element);
+    observedVideoElements.delete(element);
+    pendingVideoAnalyses.delete(element);
+    cancelVideoElement(element);
+    videoAnalyzedSources.delete(element);
+    videoSelectedSources.delete(element);
+    removeBadge(element);
+    if (element.tagName === 'IMG') imageAnalyzedSources.delete(element);
+}
+
+function refreshVideoElement(element, reobserve = false) {
+    const oldSource = videoSelectedSources.get(element);
+    const newSource = getVideoMetadataSource(element);
+    if (oldSource === newSource) {
+        if (reobserve && newSource && element.isConnected) {
+            videoMetadataIntersectionObserver?.unobserve(element);
+            videoMetadataIntersectionObserver?.observe(element);
+        }
+        return;
+    }
+
+    if (oldSource) {
+        cancelVideoElement(element);
+        videoAnalyzedSources.delete(element);
+        const badge = processedImages.get(element)?.badge;
+        if (badge?._mediaType === 'video' || element.tagName === 'IMG') removeBadge(element);
+        processedImages.delete(element);
+    }
+    if (newSource) videoSelectedSources.set(element, newSource);
+    else videoSelectedSources.delete(element);
+
+    if (element.tagName === 'IMG') {
+        if (newSource) {
+            viewportAnalysisQueue.cancel(element, 'video-linked-thumbnail');
+            if (processedImages.get(element)?.badge?._mediaType === 'image') removeBadge(element);
+            processedImages.delete(element);
+        } else if (oldSource && element.isConnected) {
+            // Re-enter the existing image viewport observer after a link stops targeting video.
+            viewportAnalysisQueue.observer?.unobserve(element);
+            viewportAnalysisQueue.observer?.observe(element);
+        }
+    }
+
+    if (reobserve && newSource && element.isConnected) {
+        videoMetadataIntersectionObserver?.unobserve(element);
+        videoMetadataIntersectionObserver?.observe(element);
+    } else if (reobserve && element.tagName === 'IMG' && !newSource) {
+        videoMetadataIntersectionObserver?.unobserve(element);
+        observedVideoElements.delete(element);
+    }
+}
+
+function enqueueVideoAnalysis(element) {
+    refreshVideoElement(element);
+    const url = videoSelectedSources.get(element);
+    if (!url || videoAnalyzedSources.get(element) === url || !element.isConnected) return;
+    pendingVideoAnalyses.set(element, { url });
+    drainVideoAnalyses();
+}
+
+function drainVideoAnalyses() {
+    for (const [element, entry] of pendingVideoAnalyses) {
+        if (!element.isConnected || videoSelectedSources.get(element) !== entry.url ||
+            videoAnalyzedSources.get(element) === entry.url) {
+            pendingVideoAnalyses.delete(element);
+        }
+    }
+    while (runningVideoAnalyses.size < VIDEO_ANALYSIS_MAX_CONCURRENT) {
+        const candidates = Array.from(pendingVideoAnalyses.entries())
+            .filter(([element, entry]) => !runningVideoAnalyses.has(element) && element.isConnected &&
+                videoSelectedSources.get(element) === entry.url && videoAnalyzedSources.get(element) !== entry.url)
+            .sort(([a], [b]) => distanceFromViewportCenter(a) - distanceFromViewportCenter(b));
+        if (candidates.length === 0) return;
+        const [element, entry] = candidates[0];
+        pendingVideoAnalyses.delete(element);
+        runVideoAnalysis(element, entry.url);
+    }
+}
+
+async function runVideoAnalysis(element, url) {
+    if (!isExtensionContextValid()) return;
+    const state = { url, cancelled: false };
+    activeVideoAnalysisStates.set(element, state);
+    runningVideoAnalyses.add(element);
+    try {
+        const response = await sendMessageToBrave({ action: 'fetchVideoMetadata', videoUrl: url });
+        if (state.cancelled || activeVideoAnalysisStates.get(element) !== state ||
+            !element.isConnected || getVideoMetadataSource(element) !== url) return;
+
+        const hasMetadata = response?.success === true && response.metadata &&
+            typeof response.metadata === 'object' && Object.keys(response.metadata).length > 0;
+        if (response?.analysisState === 'resolved' && hasMetadata) {
+            if (addBadgeToElement(element, response.metadata, url, { mediaType: 'video' })) {
+                videoAnalyzedSources.set(element, url);
+            }
+        } else if (response?.analysisState === 'confirmed-empty' && response.success === true) {
+            videoAnalyzedSources.set(element, url);
+            if (processedImages.get(element)?.badge?._mediaType === 'video') removeBadge(element);
+        } else {
+            logContentAnalysisFailure(response && typeof response === 'object'
+                ? { ...response, success: false, analysisState: response?.analysisState || 'unresolved' }
+                : { success: false, analysisState: 'unresolved', diagnostics: { category: 'response-contract', phase: 'content' } });
+        }
+    } catch (error) {
+        if (!isTransientExtensionContextError(error)) {
+            logContentAnalysisFailure({
+                success: false,
+                analysisState: 'unresolved',
+                diagnostics: { category: 'message', phase: 'content', errorType: 'unknown' }
+            });
+        }
+    } finally {
+        if (activeVideoAnalysisStates.get(element) === state) activeVideoAnalysisStates.delete(element);
+        runningVideoAnalyses.delete(element);
+        drainVideoAnalyses();
+    }
+}
+
+function collectVideoElements(rootNode, output = new Set()) {
+    if (!rootNode || rootNode.nodeType !== Node.ELEMENT_NODE) return output;
+    if (rootNode.tagName === 'VIDEO') output.add(rootNode);
+    if (rootNode.tagName === 'SOURCE') {
+        const parentVideo = rootNode.closest('video');
+        if (parentVideo) output.add(parentVideo);
+    }
+    if (rootNode.tagName === 'IMG' && isVideoLinkedThumbnail(rootNode)) output.add(rootNode);
+    rootNode.querySelectorAll?.('video, a[href] img').forEach(element => {
+        if (element.tagName === 'VIDEO' || isVideoLinkedThumbnail(element)) output.add(element);
+    });
+    return output;
+}
+
+function observeVideoCandidate(element) {
+    if (!element || !['VIDEO', 'IMG'].includes(element.tagName)) return;
+    if (element.tagName === 'IMG' && !isVideoLinkedThumbnail(element) && !videoSelectedSources.has(element)) return;
+    const wasObserved = observedVideoElements.has(element);
+    refreshVideoElement(element, wasObserved);
+    if (element.tagName === 'IMG' && !videoSelectedSources.has(element)) {
+        videoMetadataIntersectionObserver?.unobserve(element);
+        observedVideoElements.delete(element);
+        return;
+    }
+    if (!observedVideoElements.has(element)) {
+        observedVideoElements.add(element);
+        videoMetadataIntersectionObserver?.observe(element);
+    }
+}
+
+function observeVideoMetadata() {
+    if (typeof IntersectionObserver === 'undefined' || typeof MutationObserver === 'undefined') return;
+    if (!videoMetadataIntersectionObserver) {
+        videoMetadataIntersectionObserver = new IntersectionObserver(entries => {
+            for (const entry of entries) {
+                const element = entry.target;
+                refreshVideoElement(element);
+                if (entry.isIntersecting) enqueueVideoAnalysis(element);
+                else {
+                    pendingVideoAnalyses.delete(element);
+                    cancelVideoElement(element);
+                }
+            }
+        }, { rootMargin: '100px' });
+    }
+
+    const discover = rootNode => {
+        if (rootNode?.tagName === 'A') {
+            rootNode.querySelectorAll?.('img').forEach(img => {
+                if (isVideoLinkedThumbnail(img) || videoSelectedSources.has(img)) observeVideoCandidate(img);
+            });
+        }
+        for (const element of collectVideoElements(rootNode)) observeVideoCandidate(element);
+    };
+    discover(document.documentElement);
+
+    if (!videoMetadataMutationObserver && document.documentElement) {
+        videoMetadataMutationObserver = new MutationObserver(mutations => {
+            for (const mutation of mutations) {
+                if (mutation.type === 'attributes') {
+                    const target = mutation.target;
+                    if (target.tagName === 'VIDEO' || target.tagName === 'IMG' || target.tagName === 'A') {
+                        if (target.tagName === 'VIDEO' || target.tagName === 'IMG') {
+                            refreshVideoElement(target, true);
+                            observeVideoCandidate(target);
+                        }
+                        discover(target);
+                    } else if (target.tagName === 'SOURCE') {
+                        const video = target.closest('video');
+                        if (video) {
+                            refreshVideoElement(video, true);
+                            observeVideoCandidate(video);
+                        }
+                    }
+                }
+                for (const node of mutation.addedNodes || []) discover(node);
+                for (const node of mutation.removedNodes || []) {
+                    for (const element of collectVideoElements(node)) cleanupVideoElement(element);
+                }
+                if (mutation.type === 'childList') {
+                    const target = mutation.target?.nodeType === Node.ELEMENT_NODE
+                        ? mutation.target
+                        : mutation.target?.parentElement;
+                    const video = target?.tagName === 'VIDEO' ? target : target?.closest?.('video');
+                    if (video) {
+                        refreshVideoElement(video, true);
+                        observeVideoCandidate(video);
+                    }
+                }
+            }
+        });
+        videoMetadataMutationObserver.observe(document.documentElement, {
+            childList: true,
+            subtree: true,
+            attributes: true,
+            attributeFilter: ['src', 'href', 'srcset', 'type']
+        });
+    }
+
+    if (!videoMediaEventsRegistered) {
+        const refreshFromMediaEvent = event => {
+            const target = event.target;
+            const video = target?.tagName === 'VIDEO' ? target : target?.closest?.('video');
+            if (video) {
+                refreshVideoElement(video, true);
+                observeVideoCandidate(video);
+            }
+        };
+        for (const eventName of ['loadstart', 'loadedmetadata', 'emptied', 'error']) {
+            document.addEventListener(eventName, refreshFromMediaEvent, true);
+        }
+        videoMediaEventsRegistered = true;
+    }
 }
 
 /**
@@ -1637,6 +1960,10 @@ function observeImages() {
     const intersectionObserver = new IntersectionObserver((entries) => {
         entries.forEach((entry) => {
             if (entry.target.tagName !== 'IMG') return;
+            if (isVideoLinkedThumbnail(entry.target)) {
+                viewportAnalysisQueue.cancel(entry.target, 'video-linked-thumbnail');
+                return;
+            }
             if (entry.isIntersecting) {
                 viewportAnalysisQueue.enqueue(entry.target);
             } else {
@@ -1769,8 +2096,14 @@ function observeImages() {
                         if (!sameSrc) {
                             imageAnalyzedSources.delete(target);
                             clearImageAnalyzingBadge(target);
-                            removeBadge(target);
-                            processedImages.delete(target);
+                            const currentBadge = processedImages.get(target)?.badge;
+                            const linkedVideoSource = getVideoMetadataSource(target);
+                            if (currentBadge?._mediaType === 'video' && currentBadge._originalUrl === linkedVideoSource) {
+                                processedImages.get(target)?.updatePosition?.();
+                            } else {
+                                removeBadge(target);
+                                processedImages.delete(target);
+                            }
                             if (viewportAnalysisQueue.running.has(target)) {
                                 imageSourceRechecks.add(target);
                             }
@@ -1901,6 +2234,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         // 拡張機能アイコンクリック時のスキャン実行
         debugLog('[AI Meta Viewer] Trigger scan requested');
         observeImages();
+        observeVideoMetadata();
         observeSiteSpecificElements();
         sendResponse({ success: true });
         return true;
@@ -1934,6 +2268,13 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
             processedImagesSize = processedImages.size;
             for (const img of processedImages.keys()) imageAnalyzedSources.delete(img);
             processedImages.clear();
+        }
+        for (const element of videoSelectedSources.keys()) {
+            videoAnalyzedSources.delete(element);
+            if (element.isConnected) {
+                videoMetadataIntersectionObserver?.unobserve(element);
+                videoMetadataIntersectionObserver?.observe(element);
+            }
         }
 
         debugLog(`[AI Meta Viewer] Cleared ${metadataCacheSize} metadata cache entries and ${processedImagesSize} processed images`);
