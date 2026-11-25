@@ -268,7 +268,7 @@ test('JPEG APP1, PNG eXIf, WebP EXIF, and AVIF Exif items share the structural T
     assert.equal(avifMetadata.Description, 'shared description');
 });
 
-test('WebP stream scanner reaches EXIF after more than 2 MiB of VP8 data without retaining its payload', () => {
+test('WebP stream scanner reaches EXIF after more than 2 MiB of VP8 data', () => {
     const context = parserContext();
     const webp = makeWebp([
         riffChunk('VP8 ', Buffer.alloc(2 * 1024 * 1024 + 17, 0x33)),

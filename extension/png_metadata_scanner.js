@@ -1336,14 +1336,19 @@
                 return {
                     status: STATUS_NORMAL,
                     metadata: this.metadata,
-                    ...(this.metadataPartial ? { metadataPartial: true } : {}),
+                    ...(this.metadataPartial || this.metadataChunkIncomplete ? { metadataPartial: true } : {}),
                     diagnostics,
                 };
             }
             if (this.stealthResult) {
                 const metadata = Object.create(null);
                 metadata[this.stealthResult.key] = this.stealthResult.value;
-                return { status: STATUS_STEALTH, metadata, diagnostics };
+                return {
+                    status: STATUS_STEALTH,
+                    metadata,
+                    ...(this.metadataChunkIncomplete ? { metadataPartial: true } : {}),
+                    diagnostics,
+                };
             }
             if (this.metadataChunkIncomplete) {
                 return { status: 'unresolved', reason: 'metadata-incomplete', diagnostics };

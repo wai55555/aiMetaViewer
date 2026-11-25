@@ -681,6 +681,9 @@ async function checkImageMetadata(img, requestOptions = {}) {
             if (explicitState === 'resolved') {
                 const hasMetadata = response?.success === true && response.metadata &&
                     typeof response.metadata === 'object' && Object.keys(response.metadata).length > 0;
+                if (response?.metadataPartial === true || response?.metadata?.metadataPartial === true) {
+                    return 'unresolved';
+                }
                 return hasMetadata ? 'resolved' : 'failure';
             }
             if (explicitState === 'confirmed-empty') {
@@ -694,6 +697,7 @@ async function checkImageMetadata(img, requestOptions = {}) {
         }
         // analysisState をまだ返さない既存 HTTP 応答との後方互換分類。
         if (response?.success === true && response.metadata && typeof response.metadata === 'object') {
+            if (response.metadataPartial === true || response.metadata.metadataPartial === true) return 'unresolved';
             return Object.keys(response.metadata).length > 0 ? 'resolved' : 'confirmed-empty';
         }
         return 'failure';
@@ -1348,6 +1352,9 @@ async function checkMetadataForElement(el) {
             if (explicitState === 'resolved') {
                 const hasMetadata = response?.success === true && response.metadata &&
                     typeof response.metadata === 'object' && Object.keys(response.metadata).length > 0;
+                if (response?.metadataPartial === true || response?.metadata?.metadataPartial === true) {
+                    return 'unresolved';
+                }
                 return hasMetadata ? 'resolved' : 'failure';
             }
             if (explicitState === 'confirmed-empty') {
@@ -1360,6 +1367,7 @@ async function checkMetadataForElement(el) {
             return response?.success === false ? explicitState : 'failure';
         }
         if (response?.success === true && response.metadata && typeof response.metadata === 'object') {
+            if (response.metadataPartial === true || response.metadata.metadataPartial === true) return 'unresolved';
             return Object.keys(response.metadata).length > 0 ? 'resolved' : 'confirmed-empty';
         }
         return 'failure';
@@ -2001,7 +2009,20 @@ function observeImages() {
     // currentSrc は src/srcset 属性が変わらなくても、viewportやDPRに応じて
     // 別候補へ切り替わる。load/errorとviewport変更で解析済み画像を照合する。
     const handleImageResourceChange = (event) => {
-        if (event.target?.tagName === 'IMG') invalidateChangedImageSource(event.target);
+        if (event.target?.tagName !== 'IMG') return;
+        const img = event.target;
+        const sourceChanged = invalidateChangedImageSource(img);
+        if (sourceChanged || event.type !== 'load' || !img.isConnected ||
+            processedImages.has(img) || viewportAnalysisQueue.running.has(img) ||
+            viewportAnalysisQueue.pending.has(img) || img.naturalWidth <= 0 || img.naturalHeight <= 0) {
+            return;
+        }
+        // A prior viewport check may have skipped an image before its intrinsic
+        // dimensions were available. Re-observe it once on load so the now-known
+        // dimensions receive a fresh size judgment.
+        const activeObserver = viewportAnalysisQueue.observer;
+        activeObserver?.unobserve(img);
+        activeObserver?.observe(img);
     };
     if (!sourceSelectionListenersRegistered) {
         document.addEventListener('load', handleImageResourceChange, true);

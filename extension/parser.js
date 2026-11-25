@@ -350,7 +350,11 @@ function extractPngMetadata(buffer) {
     offset += length + 4; // データ + CRC
   }
 
-  if (Object.keys(metadata).length > 0) return setParserState(metadata, PARSER_STATE_RESOLVED);
+  if (Object.keys(metadata).length > 0) {
+    return setParserState(metadata, PARSER_STATE_RESOLVED, {
+      ...(!reachedIend ? { metadataPartial: true } : {}),
+    });
+  }
   return setParserState(metadata, reachedIend ? PARSER_STATE_EMPTY_CONFIRMED : PARSER_STATE_UNRESOLVED, {
     ...(!reachedIend ? { isIncomplete: true } : {}),
   });
@@ -431,14 +435,22 @@ function extractExifMetadata(dataValue, options = {}) {
   const resourceLimit = reason => setParserState(metadata, PARSER_STATE_RESOURCE_LIMIT, {
     parserReason: reason,
   });
-  const invalid = reason => setParserState({}, PARSER_STATE_INVALID, {
-    parserReason: reason,
-  });
+  const invalid = reason => {
+    if (Object.keys(metadata).length > 0) {
+      return setParserState(metadata, PARSER_STATE_RESOLVED, {
+        metadataPartial: true,
+        parserReason: reason,
+      });
+    }
+    return setParserState(metadata, PARSER_STATE_INVALID, {
+      parserReason: reason,
+    });
+  };
 
   if (tiffStart < 0) return invalid('invalid-tiff-offset');
   if (declaredLength < 8) return invalid('tiff-header-too-short');
   if (tiffStart + 8 > data.length) {
-    return incomplete('tiff-header-truncated', tiffStart + 8);
+    return incomplete('tiff-header-truncated', 8);
   }
   const endian = String.fromCharCode(data[tiffStart], data[tiffStart + 1]);
   if (endian !== 'II' && endian !== 'MM') return invalid('invalid-tiff-byte-order');
@@ -657,7 +669,8 @@ function extractJpegMetadata(buffer, options = {}) {
   const metadata = markerResult.metadata;
   if (Object.keys(metadata).length > 0) {
     return setParserState(metadata, PARSER_STATE_RESOLVED, {
-      ...(markerResult.metadataPartial || markerResult.exifIncomplete ? { metadataPartial: true } : {}),
+      ...(markerResult.metadataPartial || markerResult.exifIncomplete ||
+          (!markerResult.reachedSos && !markerResult.complete) ? { metadataPartial: true } : {}),
       ...(Number.isSafeInteger(markerResult.suggestedSize) ? { suggestedSize: markerResult.suggestedSize } : {}),
     });
   }
@@ -831,6 +844,7 @@ function createWebpMetadataStreamScanner(options = {}) {
 
   const parseCapture = (chunkComplete) => {
     if (!capture || capture.parsed) return;
+    const payloadComplete = chunkComplete && capture.length >= capture.chunkSize;
     const payload = capture.bytes.subarray(0, capture.length);
     let parsed;
     if (capture.type === 'EXIF') {
@@ -841,17 +855,17 @@ function createWebpMetadataStreamScanner(options = {}) {
     } else {
       const xmpText = new TextDecoder('utf-8').decode(payload);
       parsed = parseXmpMetadata(xmpText);
-      if (!chunkComplete && Object.keys(parsed).length > 0) metadataPartial = true;
+      if (!payloadComplete && Object.keys(parsed).length > 0) metadataPartial = true;
     }
     capture.parsed = true;
     const hasMetadata = Object.keys(parsed).length > 0;
     if (hasMetadata) {
       Object.assign(metadata, parsed);
-      metadataPartial ||= parsed.metadataPartial === true || !chunkComplete;
+      metadataPartial ||= parsed.metadataPartial === true || !payloadComplete;
       state = PARSER_STATE_RESOLVED;
     } else if (parsed.parserState === PARSER_STATE_UNRESOLVED ||
         parsed.parserState === PARSER_STATE_RESOURCE_LIMIT ||
-        (!chunkComplete && capture.type === 'XMP ')) {
+        (!payloadComplete && capture.type === 'XMP ')) {
       incompleteMetadataChunk = true;
     } else if (parsed.parserState === PARSER_STATE_INVALID) {
       invalidMetadataChunk = true;
@@ -1155,6 +1169,9 @@ function parseAvifItemLocations(view, box) {
     }
     const extents = [];
     for (let extentIndex = 0; extentIndex < extentCount; extentIndex += 1) {
+      const extentHeaderSize =
+        ((version === 1 || version === 2) ? indexSize : 0) + offsetSize + lengthSize;
+      if (offset + extentHeaderSize > box.end) return { complete: false, items };
       if ((version === 1 || version === 2) && indexSize > 0) {
         const ignoredIndex = readAvifVariableUInt(view, offset, indexSize);
         if (ignoredIndex === null) return { complete: false, items };
@@ -1180,6 +1197,7 @@ function parseAvifItemLocations(view, box) {
 function extractAvifExifFromMetaBox(view, metaBox) {
   const metadata = {};
   let metadataPartial = false;
+  let invalidExif = false;
   const childStart = metaBox.dataStart + 4; // FullBox version and flags
   if (childStart > metaBox.end || metaBox.dataStart + 4 > view.length) {
     return setParserState(metadata, PARSER_STATE_UNRESOLVED, { isIncomplete: true });
@@ -1252,6 +1270,7 @@ function extractAvifExifFromMetaBox(view, metaBox) {
     });
     Object.assign(metadata, parsed);
     metadataPartial ||= parsed.metadataPartial === true;
+    if (parsed.parserState === PARSER_STATE_INVALID) invalidExif = true;
     if (parsed.parserState === PARSER_STATE_UNRESOLVED || parsed.parserState === PARSER_STATE_RESOURCE_LIMIT) {
       return setParserState(metadata, parsed.parserState, {
         isIncomplete: parsed.parserState === PARSER_STATE_UNRESOLVED,
@@ -1259,9 +1278,12 @@ function extractAvifExifFromMetaBox(view, metaBox) {
       });
     }
   }
-  return setParserState(metadata,
-    Object.keys(metadata).length > 0 ? PARSER_STATE_RESOLVED : PARSER_STATE_EMPTY_CONFIRMED,
-    metadataPartial ? { metadataPartial: true } : {});
+  if (Object.keys(metadata).length > 0) {
+    return setParserState(metadata, PARSER_STATE_RESOLVED,
+      metadataPartial ? { metadataPartial: true } : {});
+  }
+  if (invalidExif) return setParserState(metadata, PARSER_STATE_INVALID, { parserReason: 'invalid-avif-exif' });
+  return setParserState(metadata, PARSER_STATE_EMPTY_CONFIRMED);
 }
 
 function scanAvifMetaBox(view, inputComplete = false) {

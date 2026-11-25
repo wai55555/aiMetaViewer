@@ -151,7 +151,7 @@ test('PNG reports invalid IDAT CRC even when EXIF metadata was already found', (
     const idatCrcOffset = 8 + 25 + 12 + exif.length + 8 + compressedRow.length;
     png[idatCrcOffset] ^= 0xff;
     const result = context.scanPngMetadataBuffer(exactArrayBuffer(png));
-    assert.equal(result.status, 'invalid');
+    assert.equal(result.status, 'invalid-png');
 });
 
 test('PNG reports partial EXIF metadata when its bounded chunk prefix cuts a value', () => {
