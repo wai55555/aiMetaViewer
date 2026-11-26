@@ -30,7 +30,8 @@ Level 2 でも以下は変更しない。
 - WebP deep scan 上限
 
 上限で検査できなかった場合は `debug.limited` に理由が入る
-（例: `png-idat-not-acquired`, `png-idat-framing-only`）。
+（例: `png-idat-not-acquired`, `png-idat-framing-only`,
+`full-fetch-incomplete`）。
 
 ## デバッグ表示
 
