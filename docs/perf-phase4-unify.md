@@ -42,15 +42,16 @@
 ## 3. キャッシュ
 
 - `clear()` は `chrome.storage.local.getKeys()` がある環境ではキー列挙のみを行う。
-  無い場合だけ `get(null)` を使う。`storage.local.clear()` は呼ばない。
+  無い場合、または `getKeys()` が失敗した場合は `get(null)` へフォールバックする。
+  `storage.local.clear()` は呼ばない。
 - 接頭辞外のキー（設定・他機能の local データ）は削除しない。
 - `ensureCapacity` は Map の挿入順をそのまま使い、`get()` の delete/set による
   アクセス順更新も維持する。追い出し対象・件数は従来相当。
 - テスト:
   - 接頭辞外キーが残ること
   - `getKeys` 不在時の `get(null)` フォールバック
-  - FIFO 追い出し結果
-  - アクセス後の追い出し順
+  - Map 挿入順の追い出し結果（現行のアクセス更新を含む）
+  - `getKeys()` 失敗時の `get(null)` フォールバック
 
 ## 4. 共有診断
 
@@ -76,7 +77,7 @@
 |---|---:|
 | content 常駐（manifest `<all_urls>`） | **118,439 bytes**（目標 120,000） |
 | SW 起動時（background + importScripts） | **776,911 bytes**（Phase 2 案Bにより目標対象外） |
-| `node --test tests/metadata/*.test.cjs` | **140 tests / 140 pass / 0 fail** |
+| `node --test tests/metadata/*.test.cjs` | **141 tests / 141 pass / 0 fail** |
 
 `node --check`: 変更した `parser.js` / `png_metadata_scanner.js` / `background.js` /
 `content.js` / `settings_loader.js` / `shared_diagnostics.js` は OK。
@@ -87,7 +88,10 @@
 |---|---|
 | PNG サンプルのモーダル表示 | PASS（`test2.png`） |
 | 主要形式（PNG / JPEG / WebP / AVIF）の parser 回帰 | 自動テストで確認 |
-| JPEG / WebP / AVIF のブラウザ手動比較 | 未完了（サンプル環境の都合） |
+| PNG（test2.png）のブラウザ表示 | PASS（HTTP / file://） |
+| WebP（zy9a2l.webp）のブラウザ表示 | PASS（HTTP） |
+| JPEG（メタデータなし）のクラッシュ有無 | PASS（バッジなし、例外なし） |
+| AVIF のブラウザ表示 | 未実施（ローカルに AVIF サンプルなし。parser 回帰は自動テストで確認） |
 | デバッグモードの診断出力 | 共有診断の単体テストで確認 |
 | オプション画面のキャッシュクリアで sync 設定が消えない | `clear()` のスコープテストで確認（実 UI は未実行） |
 
