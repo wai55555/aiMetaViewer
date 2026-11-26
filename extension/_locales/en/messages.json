@@ -125,6 +125,12 @@
   "descDebugAllDetections": {
     "message": "Disable logical detection suppressions and show all observed carriers. No extra network fetch; results are not cached."
   },
+  "labelDebugForceFullFetch": {
+      "message": "Force Full Fetch (Level 2)"
+  },
+  "descDebugForceFullFetch": {
+      "message": "Skip the initial Range request and acquire from byte 0. Includes Level 1 full-detection debug; existing safety limits still apply."
+  },
   "btnSave": {
     "message": "💾 Save"
   },

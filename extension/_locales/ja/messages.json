@@ -119,6 +119,12 @@
     "descDebugAllDetections": {
         "message": "論理的な検知抑制を外し、観測した全担体を表示します。追加取得は行わず、結果はキャッシュしません。"
     },
+    "labelDebugForceFullFetch": {
+        "message": "強制フル取得（Level 2）"
+    },
+    "descDebugForceFullFetch": {
+        "message": "初回のRange取得をスキップし、全体取得を強制します。Level 1の全検知デバッグを含み、既存の安全上限は維持します。"
+    },
     "btnSave": {
         "message": "💾 保存"
     },
