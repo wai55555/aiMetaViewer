@@ -528,7 +528,7 @@ function extractExifMetadata(dataValue, options = {}) {
         return incomplete('ifd-entry-truncated');
       }
 
-      if (tag === 0x010E || tag === 0x9286) {
+      if (tag === 0x010E || tag === 0x9286 || tag === 0x0131) {
         const value = readEntryValue(entryOffset, type, count);
         if (value.limited) return resourceLimit('exif-value-size');
         if (!value.valid) return invalid('invalid-exif-value-range');
@@ -540,9 +540,16 @@ function extractExifMetadata(dataValue, options = {}) {
           if (tag === 0x010E) {
             const description = new TextDecoder('utf-8').decode(value.bytes).replace(/\0+$/, '');
             if (description) metadata.Description = description;
-          } else {
+          } else if (tag === 0x9286) {
             const comment = parseExifUserComment(value.bytes, isLittleEndian);
             if (comment) metadata.parameters = comment;
+          } else {
+            let softwareEnd = value.bytes.length;
+            while (softwareEnd > 0 && value.bytes[softwareEnd - 1] === 0) softwareEnd -= 1;
+            if (softwareEnd <= 256) {
+              const software = new TextDecoder('utf-8').decode(value.bytes.subarray(0, softwareEnd));
+              if (software) metadata.Software = software;
+            }
           }
         }
       }
@@ -604,30 +611,68 @@ function extractExifPayload(dataValue, options = {}) {
   });
 }
 
+const JPEG_XMP_HEADER = 'http://ns.adobe.com/xap/1.0/\0';
+const JPEG_EXTENDED_XMP_HEADER = 'http://ns.adobe.com/xmp/extension/\0';
+
+function startsWithAscii(view, start, end, text) {
+  if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start < 0 || end > view.length) return false;
+  if (end - start < text.length) return false;
+  for (let index = 0; index < text.length; index += 1) {
+    if (view[start + index] !== text.charCodeAt(index)) return false;
+  }
+  return true;
+}
+
+function mergeMissingMetadata(target, source) {
+  for (const [key, value] of Object.entries(source || {})) {
+    if (target[key] === undefined) target[key] = value;
+  }
+}
+
+function isAdoptableJpegCom(text) {
+  const trimmed = text.trim();
+  if (trimmed.startsWith('{')) {
+    try {
+      const parsed = JSON.parse(trimmed);
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed) &&
+          ['prompt', 'workflow', 'parameters'].some(key => Object.prototype.hasOwnProperty.call(parsed, key))) {
+        return true;
+      }
+    } catch (_) {
+      // Not JSON; continue to the A1111 gate.
+    }
+  }
+  if (text.includes('Negative prompt:')) return true;
+  return text.includes('Steps:') &&
+    (text.includes('Sampler:') || text.includes('Seed:') || text.includes('CFG scale:') || text.includes('Size:'));
+}
+
 function scanJpegMarkers(view) {
   if (view.length < 3 || view[0] !== 0xFF || view[1] !== 0xD8) {
-    return { reachedSos: false, complete: false, metadata: {}, exifIncomplete: false };
+    return { reachedSos: false, complete: false, metadata: {}, exifIncomplete: false, xmpIncomplete: false };
   }
 
   const metadata = {};
   let exifIncomplete = false;
+  let xmpIncomplete = false;
   let exifInvalid = false;
   let metadataPartial = false;
   let suggestedSize = null;
+  let comAdopted = false;
   let offset = 2;
   while (offset < view.length) {
-    if (view[offset] !== 0xFF) return { reachedSos: false, complete: false, metadata, exifIncomplete };
+    if (view[offset] !== 0xFF) return { reachedSos: false, complete: false, metadata, exifIncomplete, xmpIncomplete };
     while (offset < view.length && view[offset] === 0xFF) offset++;
-    if (offset >= view.length) return { reachedSos: false, complete: false, metadata, exifIncomplete };
+    if (offset >= view.length) return { reachedSos: false, complete: false, metadata, exifIncomplete, xmpIncomplete };
 
     const marker = view[offset++];
-    if (marker === 0xDA) return { reachedSos: true, complete: true, metadata, exifIncomplete, exifInvalid, metadataPartial };
-    if (marker === 0xD9) return { reachedSos: false, complete: true, metadata, exifIncomplete, exifInvalid, metadataPartial };
+    if (marker === 0xDA) return { reachedSos: true, complete: true, metadata, exifIncomplete, xmpIncomplete, exifInvalid, metadataPartial };
+    if (marker === 0xD9) return { reachedSos: false, complete: true, metadata, exifIncomplete, xmpIncomplete, exifInvalid, metadataPartial };
     if (marker === 0xD8 || marker === 0x01 || (marker >= 0xD0 && marker <= 0xD7)) continue;
 
-    if (offset + 2 > view.length) return { reachedSos: false, complete: false, metadata, exifIncomplete, metadataPartial };
+    if (offset + 2 > view.length) return { reachedSos: false, complete: false, metadata, exifIncomplete, xmpIncomplete, metadataPartial };
     const segmentLength = (view[offset] << 8) | view[offset + 1];
-    if (segmentLength < 2) return { reachedSos: false, complete: false, metadata, exifIncomplete: true };
+    if (segmentLength < 2) return { reachedSos: false, complete: false, metadata, exifIncomplete: true, xmpIncomplete };
     if (offset + segmentLength > view.length) {
       const payloadStart = offset + 2;
       if (marker === 0xE1 && payloadStart + 6 <= view.length &&
@@ -636,8 +681,12 @@ function scanJpegMarkers(view) {
           view[payloadStart + 4] === 0 && view[payloadStart + 5] === 0) {
         exifIncomplete = true;
         suggestedSize = offset + segmentLength - 1;
+      } else if (marker === 0xE1 &&
+          startsWithAscii(view, payloadStart, view.length, JPEG_XMP_HEADER)) {
+        xmpIncomplete = true;
+        suggestedSize = offset + segmentLength - 1;
       }
-      return { reachedSos: false, complete: false, metadata, exifIncomplete, metadataPartial, suggestedSize };
+      return { reachedSos: false, complete: false, metadata, exifIncomplete, xmpIncomplete, metadataPartial, suggestedSize };
     }
     const payloadStart = offset + 2;
     const payloadEnd = offset + segmentLength;
@@ -658,10 +707,28 @@ function scanJpegMarkers(view) {
       if (Number.isSafeInteger(parsed.suggestedSize)) {
         suggestedSize = Math.max(suggestedSize || 0, payloadStart + parsed.suggestedSize);
       }
+    } else if (marker === 0xFE && payloadStart < payloadEnd) {
+      try {
+        const comment = new TextDecoder('utf-8', { fatal: true }).decode(view.subarray(payloadStart, payloadEnd));
+        if (!comAdopted && isAdoptableJpegCom(comment)) {
+          comAdopted = true;
+          if (metadata.parameters === undefined) metadata.parameters = comment;
+        }
+      } catch (_) {
+        // Decode failure is treated like an unrelated comment.
+      }
+    } else if (marker === 0xE1 &&
+        startsWithAscii(view, payloadStart, payloadEnd, JPEG_XMP_HEADER)) {
+      const xmpStart = payloadStart + JPEG_XMP_HEADER.length;
+      const xmpText = new TextDecoder('utf-8').decode(view.subarray(xmpStart, payloadEnd));
+      mergeMissingMetadata(metadata, parseXmpMetadata(xmpText));
+    } else if (marker === 0xE1 &&
+        startsWithAscii(view, payloadStart, payloadEnd, JPEG_EXTENDED_XMP_HEADER)) {
+      // Extended XMP is intentionally ignored (CUT-05).
     }
     offset += segmentLength;
   }
-  return { reachedSos: false, complete: false, metadata, exifIncomplete, metadataPartial, suggestedSize };
+  return { reachedSos: false, complete: false, metadata, exifIncomplete, xmpIncomplete, metadataPartial, suggestedSize };
 }
 
 function extractJpegMetadata(buffer, options = {}) {
@@ -669,12 +736,13 @@ function extractJpegMetadata(buffer, options = {}) {
   const metadata = markerResult.metadata;
   if (Object.keys(metadata).length > 0) {
     return setParserState(metadata, PARSER_STATE_RESOLVED, {
-      ...(markerResult.metadataPartial || markerResult.exifIncomplete ||
+      ...(markerResult.metadataPartial || markerResult.exifIncomplete || markerResult.xmpIncomplete ||
           (!markerResult.reachedSos && !markerResult.complete) ? { metadataPartial: true } : {}),
       ...(Number.isSafeInteger(markerResult.suggestedSize) ? { suggestedSize: markerResult.suggestedSize } : {}),
     });
   }
-  if (markerResult.exifIncomplete || (!markerResult.reachedSos && !markerResult.complete)) {
+  if (markerResult.exifIncomplete || markerResult.xmpIncomplete ||
+      (!markerResult.reachedSos && !markerResult.complete)) {
     return setParserState(metadata, PARSER_STATE_UNRESOLVED, {
       isIncomplete: true,
       suggestedSize: Number.isSafeInteger(markerResult.suggestedSize)
@@ -1519,33 +1587,47 @@ function parseExifUserComment(data, isLittleEndian) {
  * @param {string} xmpText - XMP XML 文字列
  * @returns {Object} - 抽出されたメタデータ
  */
+function decodeXmpEntities(value) {
+  return value
+    .replace(/&quot;/g, '"')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&#x([0-9a-f]+);/gi, (match, hex) => {
+      const codePoint = parseInt(hex, 16);
+      return Number.isSafeInteger(codePoint) && codePoint >= 0 && codePoint <= 0x10FFFF
+        ? String.fromCodePoint(codePoint)
+        : match;
+    })
+    .replace(/&apos;/g, "'")
+    .replace(/&amp;/g, '&')
+    .replace(/&#10;/g, '\n')
+    .replace(/&#13;/g, '\r');
+}
+
+function parseXmpParameters(xmpText) {
+  const paramAttrMatch = xmpText.match(/\bparameters\s*=\s*(?:"([^"]*)"|'([^']*)')/);
+  if (paramAttrMatch) {
+    return decodeXmpEntities(paramAttrMatch[1] !== undefined ? paramAttrMatch[1] : paramAttrMatch[2]);
+  }
+
+  const paramTagMatch = xmpText.match(
+    /<(?:[A-Za-z_][\w.-]*:)?parameters(?:\s[^>]*)?>([\s\S]*?)<\/(?:[A-Za-z_][\w.-]*:)?parameters>/i
+  );
+  if (!paramTagMatch) return null;
+  const content = paramTagMatch[1].trim();
+  if (content.includes('<![CDATA[')) {
+    return content.replace(/<!\[CDATA\[/g, '').replace(/\]\]>/g, '').trim();
+  }
+  return decodeXmpEntities(content);
+}
+
 function parseXmpMetadata(xmpText) {
   const metadata = {};
 
-  // XMP は XML なので、簡易的な正規表現で主要なタグを抽出
-  // 1. Stable Diffusion (Automatic1111) 等で使われる parameters 属性/タグ
-  // 属性形式: parameters="..."
-  const paramAttrMatch = xmpText.match(/parameters="([^"]+)"/);
-  if (paramAttrMatch) {
-    // 実体参照をデコード (簡易版: &quot;, &lt;, &gt;, &amp;, &#10;)
-    metadata['parameters'] = paramAttrMatch[1]
-      .replace(/&quot;/g, '"')
-      .replace(/&lt;/g, '<')
-      .replace(/&gt;/g, '>')
-      .replace(/&amp;/g, '&')
-      .replace(/&#10;/g, '\n')
-      .replace(/&#13;/g, '\r');
-  } else {
-    // タグ形式: <...:parameters>...</...:parameters>
-    const paramTagMatch = xmpText.match(/<[^:>]+:parameters>([\s\S]+?)<\/[^:>]+:parameters>/);
-    if (paramTagMatch) {
-      metadata['parameters'] = paramTagMatch[1].trim();
-    }
-  }
+  const parameters = parseXmpParameters(xmpText);
+  if (parameters !== null) metadata['parameters'] = parameters;
 
-  // 2. 他の一般的なメタデータ (Description 等)
   if (!metadata['parameters']) {
-    // dc:description 内の rdf:li
     const descMatch = xmpText.match(/<dc:description>[\s\S]*?<rdf:li[^>]*>([\s\S]+?)<\/rdf:li>[\s\S]*?<\/dc:description>/);
     if (descMatch) {
       metadata['Description'] = descMatch[1].trim();

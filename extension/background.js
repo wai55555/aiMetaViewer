@@ -811,7 +811,7 @@ const HTTP_OK_STATUS = 200;
 const HTTP_PARTIAL_CONTENT_STATUS = 206;
 
 // --- 解析の集約予算 ---
-const PARSER_CACHE_VERSION = 'parser-v1';
+const PARSER_CACHE_VERSION = 'parser-v2';
 // PNGの単一ファイルサイズ上限は撤廃したままにする。制御対象は同時性である。
 // content script は複数frame・複数tabから要求を送るため、Service Worker が
 // 唯一の集約点となる。以下の上限は必ずここで適用する。
