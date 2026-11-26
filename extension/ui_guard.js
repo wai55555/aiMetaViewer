@@ -18,5 +18,5 @@
         return;
     }
     globalObject.__aiMetaViewerAbortUiModule = false;
-    globalObject.__aiMetaViewerUiModuleReady = true;
+    globalObject.__aiMetaViewerUiModuleReady = false;
 })(typeof window !== 'undefined' ? window : globalThis);

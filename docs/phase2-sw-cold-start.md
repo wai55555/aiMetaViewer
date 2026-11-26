@@ -105,5 +105,10 @@ cd /d C:\github\aiMetaViewer
 node tests/phase2/measure_sw_startup.cjs
 ```
 
+前提: このスクリプトは WebSocket クライアントとして `ws` を使う。
+Windows 側 Node がリポジトリの `node_modules` を解決できる状態にするか、
+テスト専用として `npm install --no-save ws` を実行しておく。
+製品のビルド依存には追加しない。
+
 環境変数: `CHROME_PATH`, `BENCH_URL`, `BENCH_RUNS`。
 スクリプトは一時コピーだけを計測し、`extension/` は変更しない。

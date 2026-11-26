@@ -607,6 +607,7 @@
         consume(output, absoluteOffset) {
             if (this.stopped) return;
             for (let index = 0; index < output.length; index += 1) {
+                if (this.stopped) return;
                 if (this.rowsCompleted >= this.layout.height) {
                     throw new PngStructuralError(
                         'PNG IDAT has excess decoded scanlines.',
@@ -865,7 +866,15 @@
             this.err = status;
             this.msg = this.strm && this.strm.msg ? this.strm.msg : '';
         };
-        const pushed = inflator.push(bytes, true);
+        let inputOffset = 0;
+        let pushed = true;
+        do {
+            const end = Math.min(bytes.length, inputOffset + MAX_IDAT_INFLATE_PUSH_BYTES);
+            pushed = inflator.push(bytes.subarray(inputOffset, end), end >= bytes.length);
+            inputOffset = end;
+            if (overflow || !pushed || inflator.err !== 0) break;
+        } while (inputOffset < bytes.length);
+
         if (overflow) {
             addZtxtResourceDiagnostic(collector, offset, 'MAX_TEXT_CHUNK_BYTES', outputSize, keyword);
             return null;

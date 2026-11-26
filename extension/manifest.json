@@ -34,7 +34,8 @@
                 "*://pixiv.net/*",
                 "*://*.pixiv.net/*",
                 "*://civitai.com/*",
-                "*://*.civitai.com/*"
+                "*://*.civitai.com/*",
+                "file:///*"
             ],
             "js": [
                 "adapters.js"

@@ -1018,6 +1018,9 @@ function handleSpaUrlChange(currentUrl, previousUrl) {
     if (typeof processedImages !== 'undefined') {
         for (const element of Array.from(processedImages.keys())) removeBadge(element);
         processedImages.clear();
+        document.querySelectorAll('img').forEach((img) => {
+            viewportAnalysisQueue.observer?.observe(img);
+        });
     }
     for (const element of videoSelectedSources.keys()) {
         cancelVideoElement(element);
@@ -1056,15 +1059,40 @@ function startSpaUrlTracking() {
  */
 let safetensorsLinkDetectionStarted = false;
 let safetensorsLinkDetectionActivated = false;
+let safetensorsLinkObserver = null;
+let safetensorsRetryTimer = null;
+let safetensorsRetryAttempts = 0;
+const SAFETENSORS_RETRY_LIMIT = 3;
+const SAFETENSORS_RETRY_DELAY_MS = 1000;
+
+function scheduleSafetensorsRetry() {
+    if (safetensorsRetryTimer !== null || safetensorsRetryAttempts >= SAFETENSORS_RETRY_LIMIT) return;
+    safetensorsRetryTimer = setTimeout(() => {
+        safetensorsRetryTimer = null;
+        safetensorsRetryAttempts += 1;
+        activateSafetensorsLinkDetection();
+    }, SAFETENSORS_RETRY_DELAY_MS);
+}
 
 function activateSafetensorsLinkDetection() {
     if (safetensorsLinkDetectionActivated) return false;
     if (!document.querySelector || !document.querySelector('a[href*=".safetensors"]')) return false;
     safetensorsLinkDetectionActivated = true;
     ensureLazyUiModule().then(() => {
-        if (typeof observeGenericSafetensorsLinks === 'function') observeGenericSafetensorsLinks();
+        if (typeof observeGenericSafetensorsLinks !== 'function') {
+            safetensorsLinkDetectionActivated = false;
+            scheduleSafetensorsRetry();
+            return;
+        }
+        observeGenericSafetensorsLinks();
+        safetensorsRetryAttempts = 0;
+        if (safetensorsLinkObserver) {
+            safetensorsLinkObserver.disconnect();
+            safetensorsLinkObserver = null;
+        }
     }).catch(() => {
         safetensorsLinkDetectionActivated = false;
+        scheduleSafetensorsRetry();
     });
     return true;
 }
@@ -1072,12 +1100,20 @@ function activateSafetensorsLinkDetection() {
 function startSafetensorsLinkDetection() {
     if (safetensorsLinkDetectionStarted) return;
     safetensorsLinkDetectionStarted = true;
-    if (activateSafetensorsLinkDetection()) return;
     const observer = new MutationObserver(() => {
-        if (activateSafetensorsLinkDetection()) observer.disconnect();
+        activateSafetensorsLinkDetection();
     });
+    safetensorsLinkObserver = observer;
     const root = document.documentElement || document;
-    if (root) observer.observe(root, { childList: true, subtree: true });
+    if (root) {
+        observer.observe(root, {
+            childList: true,
+            subtree: true,
+            attributes: true,
+            attributeFilter: ['href'],
+        });
+    }
+    activateSafetensorsLinkDetection();
 }
 
 /**
@@ -1468,6 +1504,12 @@ function cleanupVideoElement(element) {
 
 // 動画 observation は ui.js 側に移した。動画候補が現れた時だけ UI を遅延注入する。
 let lazyVideoObservationStarted = false;
+let lazyVideoObservationActivated = false;
+let lazyVideoDiscoveryObserver = null;
+let lazyVideoRetryTimer = null;
+let lazyVideoRetryAttempts = 0;
+const VIDEO_OBSERVATION_RETRY_LIMIT = 3;
+const VIDEO_OBSERVATION_RETRY_DELAY_MS = 1000;
 
 function hasVideoCandidate() {
     if (!document.querySelector) return false;
@@ -1475,25 +1517,45 @@ function hasVideoCandidate() {
     return Array.from(document.querySelectorAll('a[href] img')).some(img => isVideoLinkedThumbnail(img));
 }
 
+function scheduleLazyVideoRetry() {
+    if (lazyVideoRetryTimer !== null || lazyVideoRetryAttempts >= VIDEO_OBSERVATION_RETRY_LIMIT) return;
+    lazyVideoRetryTimer = setTimeout(() => {
+        lazyVideoRetryTimer = null;
+        lazyVideoRetryAttempts += 1;
+        activateLazyVideoObservation();
+    }, VIDEO_OBSERVATION_RETRY_DELAY_MS);
+}
+
+function activateLazyVideoObservation() {
+    if (lazyVideoObservationActivated) return false;
+    if (!hasVideoCandidate()) return false;
+    lazyVideoObservationActivated = true;
+    ensureLazyUiModule().then(() => {
+        if (typeof observeVideoMetadata !== 'function') {
+            lazyVideoObservationActivated = false;
+            scheduleLazyVideoRetry();
+            return;
+        }
+        observeVideoMetadata();
+        lazyVideoRetryAttempts = 0;
+        if (lazyVideoDiscoveryObserver) {
+            lazyVideoDiscoveryObserver.disconnect();
+            lazyVideoDiscoveryObserver = null;
+        }
+    }).catch(() => {
+        lazyVideoObservationActivated = false;
+        scheduleLazyVideoRetry();
+    });
+    return true;
+}
+
 function startLazyVideoObservation() {
     if (lazyVideoObservationStarted) return;
     lazyVideoObservationStarted = true;
-    let activated = false;
-    const activate = () => {
-        if (activated || !hasVideoCandidate()) return false;
-        activated = true;
-        ensureLazyUiModule().then(() => {
-            if (typeof observeVideoMetadata === 'function') observeVideoMetadata();
-        }).catch(() => {
-            activated = false;
-            lazyVideoObservationStarted = false;
-        });
-        return true;
-    };
-    if (activate()) return;
     const observer = new MutationObserver(() => {
-        if (activate()) observer.disconnect();
+        activateLazyVideoObservation();
     });
+    lazyVideoDiscoveryObserver = observer;
     if (document.documentElement) {
         observer.observe(document.documentElement, {
             childList: true,
@@ -1502,6 +1564,7 @@ function startLazyVideoObservation() {
             attributeFilter: ['href', 'src', 'type'],
         });
     }
+    activateLazyVideoObservation();
 }
 
 /**

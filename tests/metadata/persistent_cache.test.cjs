@@ -101,6 +101,22 @@ test('cache clear falls back to get(null) when getKeys is unavailable', async ()
     assert.equal(store.has('keep_me'), true);
 });
 
+test('cache clear reports full enumeration and retains the index when removal fails', async () => {
+    const { store, storage, cache } = createCache();
+    await cache.set('kept', { value: 'kept' });
+    const result = await cache.clear();
+    assert.equal(result.full, true);
+    assert.ok(result.removed >= 1);
+    assert.equal(store.has('meta_cache_kept'), false);
+
+    const second = createCache();
+    await second.cache.set('still-there', { value: 'still-there' });
+    second.storage.remove = async () => { throw new Error('remove failed'); };
+    await assert.rejects(second.cache.clear(), /remove failed/);
+    assert.deepEqual(Array.from(second.cache.index.keys()), ['still-there']);
+    assert.equal(second.store.has('meta_cache_still-there'), true);
+});
+
 test('cache clear falls back to get(null) when getKeys rejects', async () => {
     const { store, storage, cache } = createCache();
     store.set('meta_cache_a', { value: 1 });

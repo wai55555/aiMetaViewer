@@ -8,8 +8,12 @@ const ComfyUIParser = require('../../extension/comfyui_parser.js');
 const repoRoot = path.resolve(__dirname, '../..');
 const uiSource = fs.readFileSync(path.join(repoRoot, 'extension/ui.js'), 'utf8');
 const context = { window: { ComfyUIParser }, console };
-vm.runInNewContext(`${uiSource}\nglobalThis.__uiApi = { buildSections, buildGrid, detectGenerator };`, context);
-const { buildSections, buildGrid, detectGenerator } = context.__uiApi;
+vm.runInNewContext(uiSource, context);
+const { buildSections, buildGrid, detectGenerator } = {
+    buildSections: context.window.buildSections,
+    buildGrid: context.window.buildGrid,
+    detectGenerator: context.window.detectGenerator,
+};
 
 test('InvokeAI invokeai_metadata is detected and split into prompt/settings sections', () => {
     const payload = {

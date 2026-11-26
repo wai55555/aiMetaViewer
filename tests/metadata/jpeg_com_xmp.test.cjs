@@ -59,7 +59,13 @@ test('JPEG ignores unrelated COM and JSON without a generation key', () => {
 
 test('JPEG ignores COM that is not valid UTF-8', () => {
     const context = loadParserContext();
-    const invalid = Buffer.from([0x66, 0x6f, 0x6f, 0xff, 0x0a, 0x53, 0x74, 0x65, 0x70, 0x73, 0x3a, 0x20]);
+    const acceptedText = '日本語のプロンプト\nNegative prompt: 低品質\nSteps: 28, Sampler: Euler a, CFG scale: 7, Seed: 42, Size: 1024x1024';
+    const accepted = extract(context, makeJpeg([jpegSegment(0xFE, Buffer.from(acceptedText, 'utf8'))]));
+    assert.equal(accepted.parserState, 'resolved');
+    assert.equal(accepted.parameters, acceptedText);
+
+    const invalid = Buffer.from(acceptedText, 'utf8');
+    invalid[0] = 0xff;
     const result = extract(context, makeJpeg([jpegSegment(0xFE, invalid)]));
     assert.equal(result.parserState, 'empty-confirmed');
     assert.equal(result.parameters, undefined);

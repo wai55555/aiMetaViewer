@@ -83,6 +83,24 @@
             }
 
             const scanId = typeof request.scanId === 'string' ? request.scanId : null;
+            if (!isTopFrame() &&
+                typeof isExcludedUrl === 'function' && isExcludedUrl()) {
+                if (scanId) {
+                    try {
+                        const pending = chrome.runtime.sendMessage({
+                            action: 'scannerFrameResults',
+                            scanId,
+                            success: true,
+                            error: null,
+                            candidates: [],
+                            context: getScanContext(),
+                        });
+                        if (pending && typeof pending.catch === 'function') pending.catch(() => {});
+                    } catch (_) {}
+                }
+                sendResponse({ success: false, error: 'Site excluded' });
+                return;
+            }
             if (!isTopFrame()) {
                 if (!scanId) {
                     sendResponse({ success: false, error: 'Skipped: Frame is not top' });
@@ -103,6 +121,7 @@
             }
             await runTopFrameScan(request, settings, sendResponse, session);
         } catch (error) {
+            if (session) finishFrameScanSession(session, { cancelled: true });
             console.error('[AI Meta Viewer] Scan error:', error);
             if (isTopFrame()) showNotification('Scan failed: ' + error.message);
             sendResponse({ success: false, error: error.message });

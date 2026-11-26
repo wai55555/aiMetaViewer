@@ -61,7 +61,7 @@ async function fetchJson(url) {
 }
 
 function instrumentBackground(source, mode) {
-    const importLine = "    importScripts('pako.js', 'jszip.min.js', 'parser.js', 'video_parser.js', 'video_range_reader.js', 'png_metadata_scanner.js');";
+    const importLine = "    importScripts('shared_diagnostics.js', 'pako.js', 'jszip.min.js', 'parser.js', 'video_parser.js', 'video_range_reader.js', 'png_metadata_scanner.js');";
     if (!source.includes(importLine)) throw new Error('importScripts line not found');
     let output = `let __benchStart = performance.now();\nlet __benchBeforeImports = 0;\nlet __benchAfterImports = 0;\n${source}`;
     if (mode === 'background-only') {

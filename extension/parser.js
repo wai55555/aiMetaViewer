@@ -1608,7 +1608,7 @@ function writePngMetadata(buffer, text) {
 
     // IHDR チャンクの直後に新しい parameters チャンクを挿入する
     if (type === 'IHDR' && !inserted) {
-      chunks.push(createPngTextChunk('parameters', text));
+      chunks.push(createPngItxtChunk('parameters', text));
       inserted = true;
     }
 
@@ -1628,33 +1628,41 @@ function writePngMetadata(buffer, text) {
 }
 
 /**
- * PNG tEXt チャンクを生成
+ * UTF-8 の parameters を保持する PNG iTXt チャンクを生成
  */
-function createPngTextChunk(keyword, text) {
+function createPngItxtChunk(keyword, text) {
   const encoder = new TextEncoder();
   const kwBytes = encoder.encode(keyword);
   const textBytes = encoder.encode(text);
 
-  const length = kwBytes.length + 1 + textBytes.length;
+  const length = kwBytes.length + 5 + textBytes.length;
   const buffer = new ArrayBuffer(length + 12);
   const view = new DataView(buffer);
 
-  // Length
   view.setUint32(0, length);
 
-  // Type: tEXt
-  view.setUint8(4, 0x74); // t
-  view.setUint8(5, 0x45); // E
+  // Type: iTXt
+  view.setUint8(4, 0x69); // i
+  view.setUint8(5, 0x54); // T
   view.setUint8(6, 0x58); // X
   view.setUint8(7, 0x74); // t
 
   const bytes = new Uint8Array(buffer);
-  // Keyword + Null separator + Text
-  bytes.set(kwBytes, 8);
-  bytes.set([0], 8 + kwBytes.length);
-  bytes.set(textBytes, 9 + kwBytes.length);
+  let cursor = 8;
+  bytes.set(kwBytes, cursor);
+  cursor += kwBytes.length;
+  bytes[cursor] = 0; // keyword terminator
+  cursor += 1;
+  bytes[cursor] = 0; // compression flag
+  cursor += 1;
+  bytes[cursor] = 0; // compression method
+  cursor += 1;
+  bytes[cursor] = 0; // language tag terminator
+  cursor += 1;
+  bytes[cursor] = 0; // translated keyword terminator
+  cursor += 1;
+  bytes.set(textBytes, cursor);
 
-  // CRC
   const crcData = bytes.slice(4, 8 + length);
   const crc = computeCrc32(crcData);
   view.setUint32(8 + length, crc);

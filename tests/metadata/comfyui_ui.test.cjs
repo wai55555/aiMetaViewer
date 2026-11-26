@@ -8,7 +8,12 @@ const ComfyUIParser = require('../../extension/comfyui_parser.js');
 const repoRoot = path.resolve(__dirname, '../..');
 const uiSource = fs.readFileSync(path.join(repoRoot, 'extension/ui.js'), 'utf8');
 const uiContext = { window: { ComfyUIParser }, console };
-vm.runInNewContext(`${uiSource}\nglobalThis.__uiApi = { buildSections, buildGrid, detectGenerator };`, uiContext);
+vm.runInNewContext(uiSource, uiContext);
+uiContext.__uiApi = {
+    buildSections: uiContext.window.buildSections,
+    buildGrid: uiContext.window.buildGrid,
+    detectGenerator: uiContext.window.detectGenerator,
+};
 
 test('ComfyUI sections show normalized prompts and preserve complete raw JSON sections', () => {
     const metadata = {

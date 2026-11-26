@@ -135,7 +135,7 @@ test('lazy module client does not send when the injected ready flag is already s
     assert.equal(client.isLoaded(), true);
 });
 
-test('ui guard ignores hash changes but aborts on path mismatch', () => {
+test('ui guard ignores hash changes, aborts on path mismatch, and leaves readiness to ui.js', () => {
     function runGuard(href, expected) {
         const context = vm.createContext({ URL, console });
         context.window = context;
@@ -149,7 +149,7 @@ test('ui guard ignores hash changes but aborts on path mismatch', () => {
 
     const hashOnly = runGuard('https://example.test/page#new', 'https://example.test/page#old');
     assert.equal(hashOnly.__aiMetaViewerAbortUiModule, false);
-    assert.equal(hashOnly.__aiMetaViewerUiModuleReady, true);
+    assert.equal(hashOnly.__aiMetaViewerUiModuleReady, false);
 
     const mismatch = runGuard('https://example.test/other', 'https://example.test/page');
     assert.equal(mismatch.__aiMetaViewerAbortUiModule, true);
@@ -200,6 +200,9 @@ test('ui entry contains a navigation abort guard and scanner is all-frame aware'
     const ui = fs.readFileSync(path.join(extensionDir, 'ui.js'), 'utf8');
     const guard = fs.readFileSync(path.join(extensionDir, 'ui_guard.js'), 'utf8');
     assert.match(ui, /__aiMetaViewerAbortUiModule === true/);
-    assert.match(guard, /__aiMetaViewerUiModuleReady = true/);
+    assert.match(ui, /window\.observeVideoMetadata = observeVideoMetadata;/);
+    assert.match(ui, /window\.observeGenericSafetensorsLinks = observeGenericSafetensorsLinks;/);
+    assert.match(ui, /window\.__aiMetaViewerUiModuleReady = true;/);
+    assert.match(guard, /__aiMetaViewerUiModuleReady = false;/);
     assert.match(guard, /expectedUrl !== actualUrl/);
 });

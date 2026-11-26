@@ -116,7 +116,7 @@ offscreen document (offscreen.html + offscreen.js)
 | SW | offscreen の生成/再利用/終了、メッセージ転送、リクエスト合流 |
 | 取得層 | `handleFetchImageMetadata` / `handleFetchVideoMetadata` / ZIP 生成を offscreen へ移設 |
 | ZIP / ダウンロード | offscreen では `chrome.downloads` を使えない（公開 API は `chrome.runtime` messaging のみ）。offscreen が Blob URL を作り、URL文字列を SW に返し、SW が `chrome.downloads.download` を呼ぶ。`downloadPathQueue` と `onDeterminingFilename` の順序、Blob URL の寿命・revoke、offscreen 終了との競合を実装前に検証する |
-| キャッシュ | `chrome.storage` は offscreen からも利用可能。SW 側に残すか offscreen へ移すかを設計 |
+| キャッシュ | offscreen document が使える拡張 API は `chrome.runtime` messaging のみ。`chrome.storage` は SW 側に残し、必要なら runtime message 経由で読み書きする |
 | 同時実行ゲート | offscreen 内へ移すか、SW 側でリクエスト単位に維持するかを設計 |
 | テスト | offscreen を直接 Node で動かせないため、メッセージ契約と純粋関数を分離してテスト |
 

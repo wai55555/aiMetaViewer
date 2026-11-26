@@ -249,7 +249,13 @@ function emitFatalInitializationFailure() {
         retryable: false,
         redacted: true,
     };
-    console.error(`[AI Meta Viewer] ${formatSafeDiagnostic(diagnostic)}`);
+    let formatted = 'category=fatal-initialization phase=initialization errorType=import retryable=false redacted=true';
+    try {
+        formatted = formatSafeDiagnostic(diagnostic);
+    } catch (_) {
+        // shared_diagnostics.js 自体のロード失敗時も、この固定診断だけは必ず出す。
+    }
+    console.error(`[AI Meta Viewer] ${formatted}`);
 }
 
 function createInitializationUnavailableResult() {
@@ -284,34 +290,35 @@ const browserAPI = (() => {
 
         // Chrome APIをPromise化
         if (chrome.storage && chrome.storage.local) {
+            const callbackPromise = (method, args) => new Promise((resolve, reject) => {
+                try {
+                    method(...args, (result) => {
+                        if (chrome.runtime.lastError) {
+                            reject(new Error(chrome.runtime.lastError.message));
+                        } else {
+                            resolve(result);
+                        }
+                    });
+                } catch (error) {
+                    reject(error);
+                }
+            });
             chromeAPI.storage = {
                 local: {
-                    get: (keys) => new Promise(resolve => chrome.storage.local.get(keys, resolve)),
-                    set: (items) => new Promise(resolve => chrome.storage.local.set(items, resolve)),
-                    remove: (keys) => new Promise(resolve => chrome.storage.local.remove(keys, resolve)),
-                    clear: () => new Promise(resolve => chrome.storage.local.clear(resolve)),
-                    getBytesInUse: (keys) => new Promise(resolve => chrome.storage.local.getBytesInUse(keys, resolve)),
+                    get: (keys) => callbackPromise(chrome.storage.local.get.bind(chrome.storage.local), [keys]),
+                    set: (items) => callbackPromise(chrome.storage.local.set.bind(chrome.storage.local), [items]),
+                    remove: (keys) => callbackPromise(chrome.storage.local.remove.bind(chrome.storage.local), [keys]),
+                    clear: () => callbackPromise(chrome.storage.local.clear.bind(chrome.storage.local), []),
+                    getBytesInUse: (keys) => callbackPromise(chrome.storage.local.getBytesInUse.bind(chrome.storage.local), [keys]),
                     ...(typeof chrome.storage.local.getKeys === 'function'
                         ? {
-                            getKeys: () => new Promise((resolve, reject) => {
-                                try {
-                                    chrome.storage.local.getKeys((keys) => {
-                                        if (chrome.runtime.lastError) {
-                                            reject(new Error(chrome.runtime.lastError.message));
-                                        } else {
-                                            resolve(keys);
-                                        }
-                                    });
-                                } catch (error) {
-                                    reject(error);
-                                }
-                            }),
+                            getKeys: () => callbackPromise(chrome.storage.local.getKeys.bind(chrome.storage.local), []),
                         }
                         : {}),
                 },
                 sync: {
-                    get: (keys) => new Promise(resolve => chrome.storage.sync.get(keys, resolve)),
-                    set: (items) => new Promise(resolve => chrome.storage.sync.set(items, resolve))
+                    get: (keys) => callbackPromise(chrome.storage.sync.get.bind(chrome.storage.sync), [keys]),
+                    set: (items) => callbackPromise(chrome.storage.sync.set.bind(chrome.storage.sync), [items])
                 }
             };
         }
@@ -358,6 +365,14 @@ class PersistentLRUCache {
 
         // initを待機可能にするためPromiseを保持
         this.initPromise = this.init();
+        // set/clear を直列化し、clear のキー列挙中に set が割り込まないようにする。
+        this.operationChain = Promise.resolve();
+    }
+
+    _runExclusive(operation) {
+        const next = this.operationChain.then(operation, operation);
+        this.operationChain = next.catch(() => {});
+        return next;
     }
 
     async init() {
@@ -431,6 +446,10 @@ class PersistentLRUCache {
 
     async set(url, metadata, options = {}) {
         await this.initPromise;
+        return this._runExclusive(() => this._writeCache(url, metadata, options));
+    }
+
+    async _writeCache(url, metadata, options = {}) {
         const key = this.cacheKeyPrefix + url;
 
         // JSON文字列をUTF-8へ変換した実byte数をキャッシュ容量として扱う。
@@ -481,7 +500,16 @@ class PersistentLRUCache {
 
     async clear() {
         await this.initPromise;
+        return this._runExclusive(() => this._clearInternal());
+    }
+
+    async _clearInternal() {
+        if (this.saveTimer) {
+            clearTimeout(this.saveTimer);
+            this.saveTimer = null;
+        }
         let keys = null;
+        let enumerationSucceeded = false;
         try {
             if (typeof this.storage.getKeys === 'function') {
                 keys = await this.storage.getKeys();
@@ -489,11 +517,13 @@ class PersistentLRUCache {
                 const all = await this.storage.get(null);
                 keys = Object.keys(all || {});
             }
+            enumerationSucceeded = Array.isArray(keys);
         } catch (error) {
             debugLog('Cache clear key enumeration error', error);
             try {
                 const all = await this.storage.get(null);
                 keys = Object.keys(all || {});
+                enumerationSucceeded = true;
             } catch (fallbackError) {
                 debugLog('Cache clear fallback enumeration error', fallbackError);
             }
@@ -512,6 +542,7 @@ class PersistentLRUCache {
         if (keys.length > 0) await this.storage.remove(keys);
         this.index.clear();
         this.totalBytes = 0;
+        return { success: true, full: enumerationSucceeded, removed: keys.length };
     }
 
     async ensureCapacity(newSize = 0) {
@@ -1842,6 +1873,7 @@ const SCANNER_SCRIPT_FILES = Object.freeze([
 ]);
 const LAZY_INJECTION_PROMISES = new Map();
 const SCANNER_INJECTION_PROMISES = new Map();
+const LAZY_MODULE_STYLE_READY = new Set();
 
 function toHashlessUrl(value) {
     if (typeof value !== 'string') return '';
@@ -1900,15 +1932,36 @@ async function injectLazyModule(moduleName, sender) {
 
     const target = { tabId, frameIds: [frameId] };
     const expectedUrl = toHashlessUrl(senderUrl);
+    const styleKey = `${tabId}:${frameId}:${moduleName}`;
+    const moduleReadyProbe = () => chrome.scripting.executeScript({
+        target,
+        world: 'ISOLATED',
+        func: () => window.__aiMetaViewerUiModuleReady === true &&
+            typeof window.observeVideoMetadata === 'function' &&
+            typeof window.observeGenericSafetensorsLinks === 'function',
+    });
+    const ensureStyles = async () => {
+        if (!config.styles || config.styles.length === 0) return true;
+        if (LAZY_MODULE_STYLE_READY.has(styleKey)) return true;
+        try {
+            await chrome.scripting.insertCSS({ target, files: config.styles });
+            LAZY_MODULE_STYLE_READY.add(styleKey);
+            return true;
+        } catch (error) {
+            LAZY_MODULE_STYLE_READY.delete(styleKey);
+            debugLog({ category: 'message', phase: 'background', errorType: 'import' });
+            return false;
+        }
+    };
     try {
-        const alreadyReady = await chrome.scripting.executeScript({
-            target,
-            world: 'ISOLATED',
-            func: () => window.__aiMetaViewerUiModuleReady === true,
-        });
+        const alreadyReady = await moduleReadyProbe();
         if (Array.isArray(alreadyReady) && alreadyReady.some((entry) => entry.result === true)) {
+            if (!(await ensureStyles())) {
+                return { success: false, error: 'style-injection-failed' };
+            }
             return { success: true, cached: true };
         }
+        LAZY_MODULE_STYLE_READY.delete(styleKey);
         await chrome.scripting.executeScript({
             target,
             world: 'ISOLATED',
@@ -1924,20 +1977,12 @@ async function injectLazyModule(moduleName, sender) {
             world: 'ISOLATED',
             files: config.scripts,
         });
-        const ready = await chrome.scripting.executeScript({
-            target,
-            world: 'ISOLATED',
-            func: () => window.__aiMetaViewerUiModuleReady === true,
-        });
+        const ready = await moduleReadyProbe();
         if (!Array.isArray(ready) || !ready.some((entry) => entry.result === true)) {
             return { success: false, error: 'navigation-mismatch' };
         }
-        if (config.styles.length > 0) {
-            try {
-                await chrome.scripting.insertCSS({ target, files: config.styles });
-            } catch (error) {
-                debugLog({ category: 'message', phase: 'background', errorType: 'import' });
-            }
+        if (!(await ensureStyles())) {
+            return { success: false, error: 'style-injection-failed' };
         }
         return { success: true };
     } catch (error) {
@@ -1999,9 +2044,16 @@ async function injectScannerIntoFrames(tabId) {
             debugLog({ category: 'message', phase: 'background', errorType: 'import' });
         }
     }
+    if (!injectableFrames.some((frame) => frame.frameId === 0)) {
+        return {
+            success: false,
+            error: 'top-frame-injection-failed',
+            frames: injectableFrames,
+        };
+    }
     return {
-        success: injectableFrames.length > 0,
-        error: injectableFrames.length > 0 ? null : 'scanner-injection-failed',
+        success: true,
+        error: null,
         frames: injectableFrames,
     };
 }
@@ -2180,9 +2232,16 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
 
     if (request.action === 'clearCache') {
         // キャッシュをクリア
-        metadataCache.clear().then(() => {
+        metadataCache.clear().then((result) => {
             debugLog('[AI Meta Viewer] Cache cleared');
-            sendResponse({ success: true });
+            sendResponse({
+                success: true,
+                full: result?.full !== false,
+                removed: result?.removed || 0,
+            });
+        }).catch((error) => {
+            debugLog('Cache clear error', error);
+            sendResponse({ success: false, error: error.message });
         });
         return true;
     }

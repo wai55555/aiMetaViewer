@@ -2,6 +2,9 @@
 //
 // Service Worker の ui_guard.js がナビゲーション不一致を検出した場合は、
 // このファイルの読み込みを先頭で中断し、グローバル関数を定義しない。
+// 全体を per-run スコープに閉じ込め、abort 後の再注入で lexical binding が
+// 衝突しないようにする。
+(function installUiModule() {
 if (window.__aiMetaViewerAbortUiModule === true) {
     throw new Error('AI Meta Viewer UI module aborted by navigation guard');
 }
@@ -2667,3 +2670,22 @@ function observeVideoMetadata() {
         videoMediaEventsRegistered = true;
     }
 }
+
+
+// 既存の classic script 利用箇所との互換エクスポート。
+// ready フラグは ui.js の初期化が最後まで完了した後だけ立てる。
+window.createBadge = createBadge;
+window.updateBadge = updateBadge;
+window.createModal = createModal;
+window.createDownloaderModal = createDownloaderModal;
+window.detectGenerator = detectGenerator;
+window.buildSections = buildSections;
+window.buildGrid = buildGrid;
+window.observeVideoMetadata = observeVideoMetadata;
+window.observeGenericSafetensorsLinks = observeGenericSafetensorsLinks;
+window.handleDirectImageView = handleDirectImageView;
+window.checkMetadataForElement = checkMetadataForElement;
+window.showErrorNotification = showErrorNotification;
+window.sectionStateStore = sectionStateStore;
+window.__aiMetaViewerUiModuleReady = true;
+})();

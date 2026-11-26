@@ -103,3 +103,13 @@ test('CRC incremental API remains available to the scanner dependency check', ()
     assert.equal(typeof context.extractExifPayload, 'function');
     assert.equal(typeof context.scanPngMetadataBuffer, 'function');
 });
+
+test('PNG editor writes UTF-8 parameters as iTXt and round-trips through the scanner', () => {
+    const context = loadScannerContext();
+    const dimensions = pngChunkArray(context);
+    const png = makePng(context, dimensions);
+    const rewritten = context.writePngMetadata(exactArrayBuffer(png), 'café prompt');
+    const result = context.extractMetadata(exactArrayBuffer(Buffer.from(rewritten)), { format: 'png' });
+    assert.equal(result.parserState, 'resolved');
+    assert.equal(result.parameters, 'café prompt');
+});
