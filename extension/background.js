@@ -5055,6 +5055,10 @@ async function handleFetchImageMetadata(imageUrl) {
         if (debugForceFullFetch && !isFileScheme && metadata && typeof metadata === 'object' &&
             metadata.__debugDetection && typeof metadata.__debugDetection === 'object') {
             metadata.__debugDetection.forcedFullFetch = true;
+            if ((!rangeRepresentationComplete || metadata.metadataPartial === true) &&
+                !metadata.__debugDetection.limited) {
+                metadata.__debugDetection.limited = 'full-fetch-incomplete';
+            }
         }
         const metadataState = getMetadataState(metadata);
         const analysisOutcome = metadataState === 'resolved'
