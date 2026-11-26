@@ -173,6 +173,13 @@ function detectGenerator(metadata) {
     // InvokeAI / SwarmUI JSON carriers
     if (source.invokeai_metadata || source['sd-metadata']) return 'InvokeAI';
     if (source.sui_image_params) return 'SwarmUI';
+    // SwarmUI writes its JSON to the PNG tEXt `parameters` chunk in real
+    // exports. Keep the generic carrier intact, but interpret the nested
+    // record when no dedicated key was produced by the parser.
+    if (typeof source.parameters === 'string') {
+        const structured = parseStructuredMetadata(source.parameters);
+        if (structured?.sui_image_params) return 'SwarmUI';
+    }
 
     // Civitai
     // parameters内に「Civitai metadata」がある、または Version: v... がある場合
@@ -592,7 +599,11 @@ function getInvokeAiPayload(source) {
 }
 
 function getSwarmUiPayload(source) {
-    const parsed = parseStructuredMetadata(source.sui_image_params);
+    let parsed = parseStructuredMetadata(source.sui_image_params);
+    if (!parsed && typeof source.parameters === 'string') {
+        const parameters = parseStructuredMetadata(source.parameters);
+        if (parameters?.sui_image_params) parsed = parameters;
+    }
     if (!parsed) return null;
     const payload = parsed.sui_image_params || parsed;
     return payload && typeof payload === 'object' ? payload : null;
