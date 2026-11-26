@@ -120,6 +120,7 @@ SOS 以後の探索、PNG trailing のための追加ネットワーク取得、
 | CUT-10 | bundler / TypeScript / npm ビルド工程の導入 | §2 P-5。生成物の管理とビルド再現性の保守コストが、得られる軽量化を上回る | 拡張の規模がプレーン JS の手管理限界を超えたと判断されること |
 | CUT-11 | XMP の完全な XML パーサ（DOMParser 等）導入 | 重量級で、XML 特有の攻撃面も持ち込む。§6.6 の文字列レベルの限定的改善のみ行う | 正規表現系で取りこぼす XMP 実例が複数提示されること |
 | CUT-12 | 一定規模を超える画像への Stealth 候補処理 | §7 の画素数上限を超える画像は Stealth 対象から外す（テキストチャンク検出は継続）。巨大画像の全画素展開は negative コストの最大要因であるため | 上限を超える Stealth 実ファイルが提示されること（§7.3 の決定ゲート参照） |
+| CUT-13 | pako.js から DecompressionStream への移行 | 有効データの出力は一致するが、scanner / parser の同期 API を維持できず、破損・切断時の診断カテゴリも一致しない（`docs/pako-gate-phase2.md`） | scanner API の非同期化を認める別計画が承認され、破損時診断の対応表と §11.3 のテスト変更が先に追加されること |
 
 ---
 
@@ -302,6 +303,29 @@ SOS 以後の探索、PNG trailing のための追加ネットワーク取得、
 
 ### 5.2 Service Worker の遅延ロード（Phase 2）
 
+> **2026-11-26 仕様改訂（Phase 2 保留）**: Chrome MV3 の Service Worker は、
+> 初期評価後の `importScripts()` と動的 `import()` を実行できない。
+> Chromium 158 で、`fetch(chrome.runtime.getURL('parser.js'))` は 200 を返す一方、
+> 起動後の `importScripts(chrome.runtime.getURL('parser.js'))` は
+> `NetworkError: ... failed to load` になった。web.dev の Service Worker
+> 仕様でも dynamic `importScripts()` は不可と明記されている。
+>
+> したがって、本節の FR-SW-01/02 が前提とする「起動後に importScripts で
+> 遅延ロードする」方式は、本書のままでは実装不能である。
+> **Phase 2 は方式決定まで保留**し、現行の起動時 `importScripts` を
+> 暫定維持する。代替方式の詳細比較は
+> `docs/phase2-sw-lazy-options.md` を正とする。
+>
+> - **案 A**: offscreen document へ取得・解析を移す。SW を薄いルーターに
+>   でき、FR-SW-01 の 250KB 目標を達成できる可能性がある。ただし
+>   `offscreen` 権限、最低 Chrome 109、取得層の移設、Phase 2 の分割が必要。
+> - **案 B**: SW 遅延ロードを v2.0.0 の対象から外し、現行の起動時
+>   `importScripts` を維持する。実装リスクは低いが、起動時ロードは
+>   765,954 bytes のまま。
+>
+> 仕様改訂 PR ではこの保留と比較を記録し、実装は行わない。案の決定後に
+> §4.2、FR-SW-01〜04、§13.1 を改訂する。
+
 要件：
 
 - **FR-SW-01**: SW 起動時に同期ロードされるのは `background.js` 本体
@@ -358,6 +382,12 @@ spike（FR-PAKO-01）の棚卸しはこの両 API を対象とすること。代
   （FR-SW-02）は適用する。中止の判断と、満たさなかった条件は
   PR に記録し、本書 §3 に CUT 項目として追記する PR を別途出すこと
   （あわせて付録 A の ID 一覧の範囲表記も更新すること）。
+> **2026-11-26 決定（FR-PAKO-01/02）**: `docs/pako-gate-phase2.md` の検証により、
+> 有効データの出力は pako と `DecompressionStream` でバイト一致したが、
+> (a) scanner / parser の同期 API を維持できず、(b) 破損・切断時の診断カテゴリも
+> 一致しないため、移行を中止する（FR-PAKO-03）。`pako.js` は維持し、§3 に
+> CUT-13 を追加する。scanner との組ロードは Phase 2 の方式決定後に再評価する。
+
 - **禁止事項**: pako の inflate-only カスタムビルドを生成して vendor し直すことは、
   生成手順の再現性が本書で管理できないため行わない（CUT-10 の精神による）。
 - 注記：棚卸し対象のうち `parser.js` の `parsePngTextChunk` は Phase 4 で
@@ -912,6 +942,10 @@ Chrome Web Store への公開手順は本計画の対象外である。
 「作ってすぐ消す」無駄を避ける。Phase 5 は Phase 4 の後とする
 （scanner が唯一の PNG 実装になってから Stealth に手を入れる）。
 
+> **Phase 2 の状態**: §5.2 の 2026-11-26 追記により、SW 遅延ロード方式の
+> 決定まで Phase 2 は保留。Phase 3 以降の実装は、Phase 2 の代替方式決定後に
+> 着手する（フェーズ順序は変更しない）。pako の移行中止（CUT-13）は決定済み。
+
 ### 13.2 コミット規約
 
 1. 1 フェーズ = 1 PR とし、`main` へマージする。
@@ -935,6 +969,12 @@ Chrome Web Store への公開手順は本計画の対象外である。
   ここに記録すること。
 - キャッシュキーの URL 正規化（FR-CACHE-03 で見送ったもの）。
 - `background.js` のファイル分割（FR-BG-01 で見送ったもの）。
+- Service Worker の遅延解析方式（§5.2 の Phase 2 保留）。案 A（offscreen
+  document、Chrome 109+、`offscreen` 権限、取得層の移設）と案 B（起動時
+  importScripts の維持）を `docs/phase2-sw-lazy-options.md` で比較し、別計画で
+  決定する。案 A を採る場合は最低対応 Chrome を 109 以上へ改訂する。
+- pako から DecompressionStream への移行（CUT-13）。scanner API の非同期化を
+  認める別計画が前提。
 - 取得経路（Range／full fetch／file）の共通化（`BoundedFetcher` 的な抽象）。
   現状は 3 経路の重複があるが、取得層は §0-6 により本計画の対象外とした。
   着手する場合は取得層単独の計画として起案し、本書の P-1 / P-2 を継承すること。
@@ -945,7 +985,7 @@ Chrome Web Store への公開手順は本計画の対象外である。
 ## 付録 A：要件 ID 一覧
 
 - 原則：P-1〜P-7（§2）
-- 切り捨て：CUT-01〜CUT-12（§3）
+- 切り捨て：CUT-01〜CUT-13（§3）
 - content script：FR-CS-01〜05、NFR-CS-01（§5.1）
 - Service Worker：FR-SW-01〜04（§5.2）、FR-PAKO-01〜03（§5.3）
 - 検知共通：FR-DET-00a〜00f（§6 冒頭）
