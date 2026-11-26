@@ -162,7 +162,7 @@ test('manifest keeps only the resident files in the all-urls entry and makes ada
     assert.equal(manifest.content_scripts.length, 2);
 
     const always = manifest.content_scripts.find(entry => entry.matches.includes('<all_urls>'));
-    assert.deepEqual(always.js, ['settings_loader.js', 'content_runtime.js', 'badge_controller.js', 'content.js']);
+    assert.deepEqual(always.js, ['shared_diagnostics.js', 'settings_loader.js', 'content_runtime.js', 'badge_controller.js', 'content.js']);
     assert.deepEqual(always.css, ['styles.css']);
     assert.equal(always.run_at, 'document_start');
     assert.equal(always.all_frames, true);

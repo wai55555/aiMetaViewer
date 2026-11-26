@@ -84,6 +84,8 @@ const CONTENT_SAFE_ENUMS = Object.freeze({
     scheme: Object.freeze(['file', 'http', 'https'])
 });
 
+const sharedDiagnostics = window.SafeDiagnostics;
+
 const TRANSIENT_EXTENSION_CONTEXT_ERROR_CODE = 'transient-extension-context';
 const TRANSIENT_EXTENSION_CONTEXT_ERROR_PATTERNS = Object.freeze([
     'extension context invalidated',
@@ -116,16 +118,6 @@ function createTransientExtensionContextError() {
     return error;
 }
 
-function readSafeContentProperty(value, key) {
-    try {
-        return value !== null && value !== undefined && Object.prototype.hasOwnProperty.call(value, key)
-            ? value[key]
-            : undefined;
-    } catch (_) {
-        return undefined;
-    }
-}
-
 function setSafeContentField(diagnostic, key, value) {
     if (Object.prototype.hasOwnProperty.call(CONTENT_SAFE_ENUMS, key) && CONTENT_SAFE_ENUMS[key].includes(value)) {
         diagnostic[key] = value;
@@ -142,48 +134,11 @@ function setSafeContentField(diagnostic, key, value) {
     }
 }
 
-function classifySafeContentString(value, diagnostic) {
-    const normalized = value.toLowerCase();
-    const categoryKeywords = [
-        ['fatal-initialization', ['fatal-initialization', 'importscripts']],
-        ['acquisition', ['acquisition', 'fetch', 'download', 'image']],
-        ['parser', ['parser', 'metadata', 'format']],
-        ['scanner', ['scanner', 'scan', 'candidate']],
-        ['message', ['message', 'response', 'send']],
-        ['cache', ['cache']],
-        ['storage', ['storage']],
-        ['settings', ['setting', 'wildcard', 'excluded']]
-    ];
-    for (const [category, keywords] of categoryKeywords) {
-        if (keywords.some(keyword => normalized.includes(keyword))) {
-            diagnostic.category = category;
-            break;
-        }
-    }
-    if (normalized.includes('background')) diagnostic.phase = 'background';
-    else if (normalized.includes('content')) diagnostic.phase = 'content';
-    else if (normalized.includes('initial')) diagnostic.phase = 'initialization';
-    else if (normalized.includes('download')) diagnostic.phase = 'download';
-    else if (normalized.includes('setting')) diagnostic.phase = 'settings';
-    if (normalized.includes('timeout')) diagnostic.errorType = 'timeout';
-    else if (normalized.includes('abort')) diagnostic.errorType = 'abort';
-    else if (normalized.includes('network')) diagnostic.errorType = 'network';
-    else if (normalized.includes('invalid') && normalized.includes('response')) diagnostic.errorType = 'invalid-response';
-
-    if (/^file:\/\//i.test(value)) diagnostic.scheme = 'file';
-    else if (/^https?:\/\//i.test(value)) diagnostic.scheme = value.slice(0, 5).toLowerCase() === 'https' ? 'https' : 'http';
-    if (/^(?:data|blob):/i.test(value) || /^(?:https?|file):\/\//i.test(value) ||
-        /(?:password|passwd|secret|token|authorization|cookie|api[_-]?key)/i.test(value) ||
-        /(?:^[A-Z]:[\\/]|^\\\\|\/Users\/|\/home\/|\/var\/|\\AppData\\)/i.test(value)) {
-        diagnostic.redacted = true;
-    }
-}
-
 function toSafeContentDiagnostic(args) {
     const diagnostic = { redacted: false };
     for (const value of args) {
         if (typeof value === 'string') {
-            classifySafeContentString(value, diagnostic);
+            sharedDiagnostics.classifyString(value, diagnostic);
         } else if (typeof value === 'number') {
             setSafeContentField(diagnostic, 'status', value);
         } else if (value && (typeof value === 'object' || typeof value === 'function')) {
@@ -195,7 +150,7 @@ function toSafeContentDiagnostic(args) {
                 diagnostic.redacted = true;
             }
             if (errorLike) {
-                const errorName = readSafeContentProperty(value, 'name');
+                const errorName = sharedDiagnostics.readOwnProperty(value, 'name');
                 const normalizedName = typeof errorName === 'string' ? errorName.toLowerCase() : '';
                 diagnostic.errorType = normalizedName.includes('abort') ? 'abort' :
                     normalizedName.includes('timeout') ? 'timeout' :
@@ -211,7 +166,7 @@ function toSafeContentDiagnostic(args) {
                     'event', 'cacheState', 'analysisOutcome', 'reason', 'urlId', 'imageId', 'runId',
                     'candidateIndex', 'imageIndex', 'width', 'height', 'processed', 'activeRequest', 'sameSrc', 'running', 'cancelled',
                 ]) {
-                    setSafeContentField(diagnostic, key, readSafeContentProperty(value, key));
+                    setSafeContentField(diagnostic, key, sharedDiagnostics.readOwnProperty(value, key));
                 }
             }
             diagnostic.redacted = true;
@@ -224,16 +179,15 @@ function toSafeContentDiagnostic(args) {
 }
 
 function formatSafeContentDiagnostic(diagnostic) {
-    const fields = [];
-    for (const key of [
-        'category', 'phase', 'event', 'imageId', 'runId', 'imageIndex', 'candidateIndex', 'urlId',
-        'cacheState', 'analysisOutcome', 'reason', 'activeRequest', 'processed', 'running', 'sameSrc',
-        'width', 'height', 'cancelled', 'errorType', 'status', 'bodyPresent', 'scannerStatus', 'retryable', 'scheme',
-    ]) {
-        if (diagnostic[key] !== undefined) fields.push(`${key}=${diagnostic[key]}`);
-    }
-    fields.push(`redacted=${diagnostic.redacted === true}`);
-    return `[SafeDiagnostic ${fields.join(' ')}]`.slice(0, 240);
+    return sharedDiagnostics.formatSafeDiagnostic(diagnostic, {
+        orderedKeys: [
+            'category', 'phase', 'event', 'imageId', 'runId', 'imageIndex', 'candidateIndex', 'urlId',
+            'cacheState', 'analysisOutcome', 'reason', 'activeRequest', 'processed', 'running', 'sameSrc',
+            'width', 'height', 'cancelled', 'errorType', 'status', 'bodyPresent', 'scannerStatus', 'retryable', 'scheme',
+        ],
+        trusted: true,
+        maxLength: 240,
+    });
 }
 
 // settings_loader.js で定義された window.debugLog を拡張

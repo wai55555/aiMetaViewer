@@ -28,6 +28,7 @@
     const MAX_STEALTH_HEADER_ROWS = 160;
     const MAX_IDAT_INFLATE_PUSH_BYTES = 4 * 1024;
     const BITS_PER_BYTE = 8;
+    const UTF8_FATAL_DECODER = new TextDecoder('utf-8', { fatal: true });
     const PNG_FILTER_TYPES = Object.freeze([0, 1, 2, 3, 4]);
     const PNG_CHANNEL_COUNTS = Object.freeze({
         0: 1,
@@ -195,7 +196,7 @@
     }
 
     function decodeUtf8Strict(bytes) {
-        return new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+        return UTF8_FATAL_DECODER.decode(bytes);
     }
 
     function findZero(bytes, start) {
@@ -212,7 +213,7 @@
             const byte = data[index];
             if (byte < 0x20 || (byte > 0x7E && byte < 0xA1)) return null;
         }
-        const keyword = decodeLatin1(data.slice(0, separator));
+        const keyword = decodeLatin1(data.subarray(0, separator));
         return isSafeKeyword(keyword) ? keyword : null;
     }
 
@@ -744,7 +745,7 @@
             addTextDiagnostic(collector, CHUNK_TEXT, offset, 'invalid tEXt keyword grammar');
             return;
         }
-        const keywordBytes = data.slice(0, separator);
+        const keywordBytes = data.subarray(0, separator);
         for (const byte of keywordBytes) {
             if (byte < 0x20 || (byte > 0x7E && byte < 0xA1)) {
                 addTextDiagnostic(collector, CHUNK_TEXT, offset, 'invalid Latin-1 keyword');
@@ -756,7 +757,7 @@
             addTextDiagnostic(collector, CHUNK_TEXT, offset, 'dangerous keyword rejected');
             return;
         }
-        const text = decodeLatin1(data.slice(separator + 1));
+        const text = decodeLatin1(data.subarray(separator + 1));
         metadata[keyword] = text;
     }
 
@@ -766,7 +767,7 @@
             addTextDiagnostic(collector, CHUNK_ITXT, offset, 'invalid iTXt keyword grammar');
             return;
         }
-        const keywordBytes = data.slice(0, keywordEnd);
+        const keywordBytes = data.subarray(0, keywordEnd);
         for (const byte of keywordBytes) {
             if (byte < 0x20 || (byte > 0x7E && byte < 0xA1)) {
                 addTextDiagnostic(collector, CHUNK_ITXT, offset, 'invalid Latin-1 keyword');
@@ -796,7 +797,7 @@
             return;
         }
         try {
-            const language = decodeUtf8Strict(data.slice(cursor, languageEnd));
+            const language = decodeUtf8Strict(data.subarray(cursor, languageEnd));
             if (!/^[A-Za-z0-9-]*$/.test(language)) {
                 addTextDiagnostic(collector, CHUNK_ITXT, offset, 'iTXt language syntax is invalid', keyword);
                 return;
@@ -812,7 +813,7 @@
             return;
         }
         try {
-            decodeUtf8Strict(data.slice(cursor, translatedEnd));
+            decodeUtf8Strict(data.subarray(cursor, translatedEnd));
         } catch (error) {
             addTextDiagnostic(collector, CHUNK_ITXT, offset, 'iTXt translated keyword is not strict UTF-8', keyword);
             return;
@@ -822,7 +823,7 @@
             addTextDiagnostic(collector, CHUNK_ITXT, offset, 'dangerous keyword rejected');
             return;
         }
-        const textBytes = data.slice(cursor);
+        const textBytes = data.subarray(cursor);
         const text = compressionFlag === 0
             ? decodeUncompressedItxt(textBytes, offset, keyword, collector)
             : inflateItxt(textBytes, offset, keyword, collector);
@@ -885,7 +886,7 @@
             addTextDiagnostic(collector, CHUNK_ZTXT, offset, 'invalid zTXt keyword grammar');
             return;
         }
-        const keywordBytes = data.slice(0, separator);
+        const keywordBytes = data.subarray(0, separator);
         if (!isValidZtxtKeywordBytes(keywordBytes)) {
             addTextDiagnostic(collector, CHUNK_ZTXT, offset, 'invalid Latin-1 keyword');
             return;
@@ -902,7 +903,7 @@
             addTextDiagnostic(collector, CHUNK_ZTXT, offset, 'unsupported zTXt compression method', keyword, null, compressionMethod);
             return;
         }
-        const compressedBytes = data.slice(separator + 2);
+        const compressedBytes = data.subarray(separator + 2);
         if (compressedBytes.length > MAX_ZTXT_COMPRESSED_BYTES) {
             addZtxtResourceDiagnostic(collector, offset, 'MAX_ZTXT_COMPRESSED_BYTES', compressedBytes.length, keyword);
             return;

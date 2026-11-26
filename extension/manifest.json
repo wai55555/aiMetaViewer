@@ -48,6 +48,7 @@
                 "<all_urls>"
             ],
             "js": [
+                "shared_diagnostics.js",
                 "settings_loader.js",
                 "content_runtime.js",
                 "badge_controller.js",

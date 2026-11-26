@@ -194,38 +194,43 @@ function toSafeDiagnostic(...args) {
 }
 
 function formatSafeDiagnostic(diagnostic) {
-    const fields = [
-        ['category', getSafeEnum(diagnostic?.category, SAFE_CATEGORIES)],
-        ['phase', getSafeEnum(diagnostic?.phase, SAFE_PHASES)],
-        ['errorType', getSafeEnum(diagnostic?.errorType, SAFE_ERROR_TYPES)],
-        ['status', Number.isInteger(diagnostic?.status) ? diagnostic.status : undefined],
-        ['bodyPresent', typeof diagnostic?.bodyPresent === 'boolean' ? diagnostic.bodyPresent : undefined],
-        ['scannerStatus', getSafeEnum(diagnostic?.scannerStatus, SAFE_SCANNER_STATUSES)],
-        ['retryable', typeof diagnostic?.retryable === 'boolean' ? diagnostic.retryable : undefined],
-        ['scheme', getSafeEnum(diagnostic?.scheme, SAFE_SCHEMES)],
-        ['event', SAFE_DEBUG_EVENTS.includes(diagnostic?.event) ? diagnostic.event : undefined],
-        ['urlId', typeof diagnostic?.urlId === 'string' && /^[a-f0-9]{16}$/.test(diagnostic.urlId) ? diagnostic.urlId : undefined],
-        ['cacheState', SAFE_CACHE_STATES.includes(diagnostic?.cacheState) ? diagnostic.cacheState : undefined],
-        ['analysisOutcome', SAFE_ANALYSIS_OUTCOMES.includes(diagnostic?.analysisOutcome) ? diagnostic.analysisOutcome : undefined],
-        ['imageId', Number.isSafeInteger(diagnostic?.imageId) ? diagnostic.imageId : undefined],
-        ['runId', Number.isSafeInteger(diagnostic?.runId) ? diagnostic.runId : undefined],
-        ['imageIndex', Number.isSafeInteger(diagnostic?.imageIndex) ? diagnostic.imageIndex : undefined],
-        ['candidateIndex', Number.isSafeInteger(diagnostic?.candidateIndex) ? diagnostic.candidateIndex : undefined],
-        ['reason', SAFE_DEBUG_REASONS.includes(diagnostic?.reason) ? diagnostic.reason : undefined],
-        ['activeRequest', typeof diagnostic?.activeRequest === 'boolean' ? diagnostic.activeRequest : undefined],
-        ['processed', typeof diagnostic?.processed === 'boolean' ? diagnostic.processed : undefined],
-        ['running', typeof diagnostic?.running === 'boolean' ? diagnostic.running : undefined],
-        ['sameSrc', typeof diagnostic?.sameSrc === 'boolean' ? diagnostic.sameSrc : undefined],
-        ['cancelled', typeof diagnostic?.cancelled === 'boolean' ? diagnostic.cancelled : undefined],
-        ['width', Number.isSafeInteger(diagnostic?.width) ? diagnostic.width : undefined],
-        ['height', Number.isSafeInteger(diagnostic?.height) ? diagnostic.height : undefined],
-        ['redacted', true],
-    ];
-    return fields
-        .filter(([, value]) => value !== undefined && value !== 'unknown')
-        .map(([key, value]) => `${key}=${value}`)
-        .join(' ')
-        .slice(0, SAFE_DIAGNOSTIC_MAX_LENGTH);
+    const booleanValidator = (value) => typeof value === 'boolean';
+    const safeIntegerValidator = (value) => Number.isSafeInteger(value);
+    return globalThis.SafeDiagnostics.formatSafeDiagnostic(diagnostic, {
+        orderedKeys: [
+            'category', 'phase', 'errorType', 'status', 'bodyPresent', 'scannerStatus',
+            'retryable', 'scheme', 'event', 'urlId', 'cacheState', 'analysisOutcome',
+            'imageId', 'runId', 'imageIndex', 'candidateIndex', 'reason',
+            'activeRequest', 'processed', 'running', 'sameSrc', 'cancelled', 'width', 'height',
+        ],
+        enums: {
+            category: SAFE_CATEGORIES,
+            phase: SAFE_PHASES,
+            errorType: SAFE_ERROR_TYPES,
+            scannerStatus: SAFE_SCANNER_STATUSES,
+            scheme: SAFE_SCHEMES,
+            event: SAFE_DEBUG_EVENTS,
+            cacheState: SAFE_CACHE_STATES,
+            analysisOutcome: SAFE_ANALYSIS_OUTCOMES,
+            reason: SAFE_DEBUG_REASONS,
+        },
+        validators: {
+            urlId: (value) => typeof value === 'string' && /^[a-f0-9]{16}$/.test(value),
+            imageId: safeIntegerValidator,
+            runId: safeIntegerValidator,
+            imageIndex: safeIntegerValidator,
+            candidateIndex: safeIntegerValidator,
+            width: safeIntegerValidator,
+            height: safeIntegerValidator,
+            activeRequest: booleanValidator,
+            processed: booleanValidator,
+            running: booleanValidator,
+            sameSrc: booleanValidator,
+            cancelled: booleanValidator,
+        },
+        omitUnknown: true,
+        maxLength: SAFE_DIAGNOSTIC_MAX_LENGTH,
+    });
 }
 
 function debugLog(...args) {
@@ -262,7 +267,7 @@ function createInitializationUnavailableResult() {
 }
 
 try {
-    importScripts('pako.js', 'jszip.min.js', 'parser.js', 'video_parser.js', 'video_range_reader.js', 'png_metadata_scanner.js');
+    importScripts('shared_diagnostics.js', 'pako.js', 'jszip.min.js', 'parser.js', 'video_parser.js', 'video_range_reader.js', 'png_metadata_scanner.js');
     initializationState = INITIALIZATION_STATES.READY;
 } catch (error) {
     emitFatalInitializationFailure();
@@ -285,7 +290,10 @@ const browserAPI = (() => {
                     set: (items) => new Promise(resolve => chrome.storage.local.set(items, resolve)),
                     remove: (keys) => new Promise(resolve => chrome.storage.local.remove(keys, resolve)),
                     clear: () => new Promise(resolve => chrome.storage.local.clear(resolve)),
-                    getBytesInUse: (keys) => new Promise(resolve => chrome.storage.local.getBytesInUse(keys, resolve))
+                    getBytesInUse: (keys) => new Promise(resolve => chrome.storage.local.getBytesInUse(keys, resolve)),
+                    ...(typeof chrome.storage.local.getKeys === 'function'
+                        ? { getKeys: () => chrome.storage.local.getKeys() }
+                        : {}),
                 },
                 sync: {
                     get: (keys) => new Promise(resolve => chrome.storage.sync.get(keys, resolve)),
@@ -459,7 +467,29 @@ class PersistentLRUCache {
 
     async clear() {
         await this.initPromise;
-        await this.storage.clear();
+        let keys = null;
+        try {
+            if (typeof this.storage.getKeys === 'function') {
+                keys = await this.storage.getKeys();
+            } else {
+                const all = await this.storage.get(null);
+                keys = Object.keys(all || {});
+            }
+        } catch (error) {
+            debugLog('Cache clear key enumeration error', error);
+        }
+        if (Array.isArray(keys)) {
+            keys = keys.filter(key => key === this.metaKey || key.startsWith(this.cacheKeyPrefix));
+        } else {
+            // 列挙APIが使えない場合も、全体 clear() は使わず既知のキーだけを消す。
+            keys = [
+                ...new Set([
+                    ...Array.from(this.index.keys(), url => this.cacheKeyPrefix + url),
+                    this.metaKey,
+                ]),
+            ];
+        }
+        if (keys.length > 0) await this.storage.remove(keys);
         this.index.clear();
         this.totalBytes = 0;
     }
@@ -469,19 +499,14 @@ class PersistentLRUCache {
         if (this.index.size >= this.limit || (this.totalBytes + newSize) > this.byteLimit) {
             debugLog(`[Cache] Capacity check: count=${this.index.size}, totalBytes=${this.totalBytes}, adding=${newSize}`);
 
-            // 古い順にソート (t: timestamp が小さい順)
-            const sorted = Array.from(this.index.entries())
-                .sort((a, b) => {
-                    const timeA = typeof a[1] === 'object' ? a[1].t : a[1];
-                    const timeB = typeof b[1] === 'object' ? b[1].t : b[1];
-                    return timeA - timeB;
-                });
-
             const keysToRemove = [];
             const targetBytes = this.byteLimit * 0.7; // 70%まで空ける
             const targetCount = this.limit * 0.9;     // 90%まで空ける
 
-            for (const [url, value] of sorted) {
+            // Map の挿入順（最も古いエントリが先頭）をそのまま使う。
+            // アクセス時は get() が delete/set するため、現行の FIFO/LRU 相当の
+            // 追い出し順を維持する。
+            for (const [url, value] of this.index) {
                 // 削除条件を満たさなくなるまでループ
                 if (this.index.size < targetCount && this.totalBytes < targetBytes) break;
 

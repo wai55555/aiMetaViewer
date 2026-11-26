@@ -61,35 +61,13 @@ const safeDiagnostic = (() => {
         scheme: Object.freeze(['file', 'http', 'https'])
     });
 
+    const shared = window.SafeDiagnostics;
 
-    function isSafeEnumValue(enumName, value) {
-        return SAFE_DIAGNOSTIC_ENUMS[enumName].includes(value);
-    }
-
-    function readOwnProperty(value, key) {
-        try {
-            if (value !== null && value !== undefined &&
-                Object.prototype.hasOwnProperty.call(value, key)) {
-                return value[key];
-            }
-        } catch (_) {
-            // getterやProxyの例外を診断処理へ伝播させない。
-        }
-        return undefined;
-    }
-
-    function readSafeProperty(value, key) {
-        try {
-            return value !== null && value !== undefined ? value[key] : undefined;
-        } catch (_) {
-            return undefined;
-        }
-    }
 
     function markSafeDiagnosticField(diagnostic, key, value) {
         if (key === 'category' || key === 'phase' || key === 'errorType' ||
             key === 'scannerStatus' || key === 'scheme') {
-            if (isSafeEnumValue(key, value)) diagnostic[key] = value;
+            if (shared.isSafeEnumValue(SAFE_DIAGNOSTIC_ENUMS, key, value)) diagnostic[key] = value;
             return;
         }
 
@@ -103,71 +81,11 @@ const safeDiagnostic = (() => {
         }
     }
 
-    function classifyErrorType(errorName) {
-        if (typeof errorName !== 'string') return 'unknown';
-        const normalized = errorName.toLowerCase();
-        if (normalized.includes('abort')) return 'abort';
-        if (normalized.includes('timeout') || normalized.includes('stall')) return 'timeout';
-        if (normalized.includes('network')) return 'network';
-        if (normalized.includes('syntax') || normalized.includes('invalid') || normalized.includes('response')) {
-            return 'invalid-response';
-        }
-        if (normalized.includes('quota') || normalized.includes('storage')) return 'storage';
-        if (normalized.includes('import')) return 'import';
-        return 'unknown';
-    }
-
-    function classifyString(value, diagnostic) {
-        const normalized = value.toLowerCase();
-        const categoryKeywords = [
-            ['fatal-initialization', ['fatal-initialization', 'importscripts']],
-            ['acquisition', ['acquisition', 'fetch', 'download', 'image']],
-            ['parser', ['parser', 'metadata', 'format']],
-            ['scanner', ['scanner', 'scan', 'candidate']],
-            ['message', ['message', 'response', 'send']],
-            ['cache', ['cache']],
-            ['storage', ['storage']],
-            ['settings', ['setting', 'wildcard', 'excluded']]
-        ];
-
-        for (const [category, keywords] of categoryKeywords) {
-            if (keywords.some(keyword => normalized.includes(keyword))) {
-                diagnostic.category = category;
-                break;
-            }
-        }
-
-        if (normalized.includes('background')) diagnostic.phase = 'background';
-        else if (normalized.includes('content')) diagnostic.phase = 'content';
-        else if (normalized.includes('initial')) diagnostic.phase = 'initialization';
-        else if (normalized.includes('download')) diagnostic.phase = 'download';
-        else if (normalized.includes('setting')) diagnostic.phase = 'settings';
-
-        if (normalized.includes('timeout')) diagnostic.errorType = 'timeout';
-        else if (normalized.includes('abort')) diagnostic.errorType = 'abort';
-        else if (normalized.includes('network')) diagnostic.errorType = 'network';
-        else if (normalized.includes('invalid') && normalized.includes('response')) {
-            diagnostic.errorType = 'invalid-response';
-        }
-
-        if (/^file:\/\//i.test(value)) diagnostic.scheme = 'file';
-        else if (/^https:\/\//i.test(value)) diagnostic.scheme = 'https';
-        else if (/^http:\/\//i.test(value)) diagnostic.scheme = 'http';
-
-        // 自由文は出力せず、URL・path・Data URL・秘密情報らしき入力はredactionだけ残す。
-        if (/^(?:data|blob):/i.test(value) ||
-            /(?:password|passwd|secret|token|authorization|cookie|api[_-]?key)/i.test(value) ||
-            /(?:^[A-Z]:[\\/]|^\\\\|\/Users\/|\/home\/|\/var\/|\\AppData\\)/i.test(value) ||
-            /^(?:https?|file):\/\//i.test(value)) {
-            diagnostic.redacted = true;
-        }
-    }
-
     function mergeSafeDiagnosticArgument(diagnostic, value) {
         if (value === null || value === undefined) return;
 
         if (typeof value === 'string') {
-            classifyString(value, diagnostic);
+            shared.classifyString(value, diagnostic);
             return;
         }
 
@@ -181,9 +99,9 @@ const safeDiagnostic = (() => {
         if (typeof value === 'object' || typeof value === 'function') {
             let errorLike = false;
             try {
-                const errorName = readSafeProperty(value, 'name');
-                const errorMessage = readSafeProperty(value, 'message');
-                const errorStack = readSafeProperty(value, 'stack');
+                const errorName = shared.readSafeProperty(value, 'name');
+                const errorMessage = shared.readSafeProperty(value, 'message');
+                const errorStack = shared.readSafeProperty(value, 'stack');
                 errorLike = value instanceof Error ||
                     (typeof errorName === 'string' &&
                         (typeof errorMessage === 'string' || typeof errorStack === 'string'));
@@ -192,7 +110,7 @@ const safeDiagnostic = (() => {
             }
 
             if (errorLike) {
-                diagnostic.errorType = classifyErrorType(readSafeProperty(value, 'name'));
+                diagnostic.errorType = shared.classifyErrorType(shared.readSafeProperty(value, 'name'));
                 diagnostic.redacted = true;
                 return;
             }
@@ -218,7 +136,7 @@ const safeDiagnostic = (() => {
                 'authorization', 'apiKey', 'api_key'
             ];
             for (const key of sensitiveKeys) {
-                if (readOwnProperty(value, key) !== undefined) diagnostic.redacted = true;
+                if (shared.readOwnProperty(value, key) !== undefined) diagnostic.redacted = true;
             }
 
             const allowlistedKeys = [
@@ -226,7 +144,7 @@ const safeDiagnostic = (() => {
                 'scannerStatus', 'retryable', 'scheme'
             ];
             for (const key of allowlistedKeys) {
-                markSafeDiagnosticField(diagnostic, key, readOwnProperty(value, key));
+                markSafeDiagnosticField(diagnostic, key, shared.readOwnProperty(value, key));
             }
             return;
         }
@@ -242,22 +160,15 @@ const safeDiagnostic = (() => {
     }
 
     function formatSafeDiagnostic(diagnostic) {
-        const fields = [];
-        const orderedKeys = [
-            'category', 'phase', 'errorType', 'status', 'bodyPresent',
-            'scannerStatus', 'retryable', 'scheme'
-        ];
-
-        for (const key of orderedKeys) {
-            const value = diagnostic[key];
-            if (value !== undefined &&
-                (key === 'status' || key === 'bodyPresent' || key === 'retryable' ||
-                    isSafeEnumValue(key, value))) {
-                fields.push(`${key}=${value}`);
-            }
-        }
-        fields.push(`redacted=${diagnostic.redacted === true}`);
-        return `[SafeDiagnostic ${fields.join(' ')}]`.slice(0, SAFE_DIAGNOSTIC_MAX_LENGTH);
+        return shared.formatSafeDiagnostic(diagnostic, {
+            orderedKeys: [
+                'category', 'phase', 'errorType', 'status', 'bodyPresent',
+                'scannerStatus', 'retryable', 'scheme'
+            ],
+            enums: SAFE_DIAGNOSTIC_ENUMS,
+            trusted: true,
+            maxLength: SAFE_DIAGNOSTIC_MAX_LENGTH
+        });
     }
 
     return { toSafeDiagnostic, formatSafeDiagnostic };
