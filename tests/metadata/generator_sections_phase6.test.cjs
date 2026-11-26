@@ -87,6 +87,30 @@ test('SwarmUI sui_image_params is detected and split into prompt/settings sectio
     assert.equal(underscored.find(section => section.id === 'negative').text, 'n');
 });
 
+test('SwarmUI real PNG parameters carrier is interpreted without a dedicated key', () => {
+    const payload = {
+        prompt: 'real swarm prompt',
+        negativeprompt: 'real swarm negative',
+        steps: 24,
+        sampler: 'euler',
+        scheduler: 'simple',
+        cfgscale: 1,
+        seed: 42,
+        width: 832,
+        height: 1216,
+        model: 'flux/flux1-dev',
+        swarm_version: '0.9.6.0',
+    };
+    const metadata = { parameters: JSON.stringify({ sui_image_params: payload }) };
+    assert.equal(detectGenerator(metadata), 'SwarmUI');
+    const sections = buildSections(metadata);
+    assert.equal(sections.find(section => section.id === 'positive').text, 'real swarm prompt');
+    assert.equal(sections.find(section => section.id === 'negative').text, 'real swarm negative');
+    const grid = buildGrid(metadata);
+    assert.ok(grid.some(row => row.key === 'Steps' && row.value === '24'));
+    assert.ok(grid.some(row => row.key === 'SwarmUI version' && row.value === '0.9.6.0'));
+});
+
 test('invalid InvokeAI/SwarmUI JSON falls back to Other without throwing', () => {
     for (const metadata of [
         { invokeai_metadata: '{not valid json' },
