@@ -145,19 +145,46 @@ function removeAnalyzingBadge(badgeObj) {
 }
 
 /**
+ * 常駐側で生成する最小バッジ。ui.js はクリック/ホバー時に遅延注入する。
+ * @returns {HTMLElement}
+ */
+function createResidentBadge() {
+    const badge = document.createElement('div');
+    badge.className = 'ai-meta-badge';
+    badge.textContent = 'View Metadata';
+    badge.title = 'Click to view image metadata';
+    return badge;
+}
+
+function applyRichBadgePresentation(badge) {
+    if (window.__aiMetaViewerUiModuleReady !== true || typeof window.updateBadge !== 'function') return;
+    try {
+        window.updateBadge(badge, badge._metadata);
+    } catch (_) {
+        // UI の装飾失敗はバッジ表示そのものを壊さない。
+    }
+}
+
+function requestUiForBadge(badge) {
+    if (typeof ensureLazyUiModule !== 'function') return;
+    ensureLazyUiModule().then(() => applyRichBadgePresentation(badge)).catch(() => {});
+}
+
+/**
  * バッジ要素を生成してメタデータ・URLを設定する
  * @param {Object} metadata
  * @param {string} originalUrl
  * @returns {HTMLElement}
  */
 function createBadgeElement(metadata, originalUrl, mediaType = 'image') {
-    const badge = createBadge(); // ui.js
-    updateBadge(badge, metadata); // ui.js
+    const badge = createResidentBadge();
     badge.style.zIndex = '2147483640';
     badge._metadata = metadata;
     badge._originalUrl = originalUrl;
     badge._mediaType = mediaType === 'video' ? 'video' : 'image';
     if (badge._mediaType === 'video') badge.setAttribute('aria-label', 'Click to view video metadata');
+    applyRichBadgePresentation(badge);
+    badge.addEventListener('mouseenter', () => requestUiForBadge(badge), { once: true });
     return badge;
 }
 
@@ -176,6 +203,8 @@ function attachBadgeClickHandler(badge) {
 
         badge._modalCreationInFlight = true;
         try {
+            await ensureLazyUiModule();
+            applyRichBadgePresentation(badge);
             const modal = await createModal(currentMetadata, badge._originalUrl, { mediaType: badge._mediaType }); // ui.js
             if (document.body) document.body.appendChild(modal);
         } catch (error) {

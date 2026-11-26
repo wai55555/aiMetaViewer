@@ -1777,7 +1777,238 @@ chrome.runtime.onInstalled.addListener(async (details) => {
 /**
  * Content Scriptからのメッセージを処理
  */
+// --- 遅延注入（Phase 1） ---
+// module の値はこの固定対応表のキーとしてのみ解釈する。
+// リクエスト内のファイル名・パスは一切使用しない。
+const LAZY_MODULE_FILES = Object.freeze({
+    ui: Object.freeze({
+        scripts: Object.freeze(['ui_guard.js', 'comfyui_parser.js', 'ui.js']),
+        styles: Object.freeze(['ui.css']),
+    }),
+});
+const SCANNER_SCRIPT_FILES = Object.freeze([
+    'scanner/utils.js',
+    'scanner/progress-ui.js',
+    'scanner/thumbnail-finder.js',
+    'scanner/core.js',
+    'scanner/ui.js',
+    'scanner/controller.js',
+    'scanner.js',
+]);
+const LAZY_INJECTION_PROMISES = new Map();
+const SCANNER_INJECTION_PROMISES = new Map();
+
+function toHashlessUrl(value) {
+    if (typeof value !== 'string') return '';
+    const hashIndex = value.indexOf('#');
+    return hashIndex === -1 ? value : value.slice(0, hashIndex);
+}
+
+function matchesExcludedSitePattern(pattern, hostname, url) {
+    if (typeof pattern !== 'string' || pattern.length === 0) return false;
+    try {
+        const regex = new RegExp(
+            '^' + pattern
+                .replace(/[.+^${}()|[\]\\]/g, '\\$&')
+                .replace(/\*/g, '.*')
+                .replace(/\?/g, '.') + '$',
+            'i',
+        );
+        return regex.test(hostname) || regex.test(url);
+    } catch (_) {
+        return false;
+    }
+}
+
+async function isUrlExcludedBySettings(url) {
+    if (typeof url !== 'string' || url.length === 0) return false;
+    try {
+        const stored = await chrome.storage.sync.get({ excludedSites: [] });
+        const excludedSites = Array.isArray(stored?.excludedSites) ? stored.excludedSites : [];
+        if (excludedSites.length === 0) return false;
+        const hostname = new URL(url).hostname;
+        return excludedSites.some((pattern) => matchesExcludedSitePattern(pattern, hostname, url));
+    } catch (error) {
+        debugLog({
+            category: 'settings',
+            phase: 'background',
+            errorType: 'storage',
+        });
+        return false;
+    }
+}
+
+async function injectLazyModule(moduleName, sender) {
+    const config = LAZY_MODULE_FILES[moduleName];
+    const tabId = sender?.tab?.id;
+    const frameId = Number.isInteger(sender?.frameId) ? sender.frameId : 0;
+    const senderUrl = typeof sender?.url === 'string' ? sender.url : '';
+    if (!config || !Number.isInteger(tabId) || senderUrl.length === 0) {
+        return { success: false, error: 'invalid-module-request' };
+    }
+    if (!chrome.scripting?.executeScript) {
+        return { success: false, error: 'scripting-unavailable' };
+    }
+    if (await isUrlExcludedBySettings(senderUrl)) {
+        return { success: false, error: 'site-excluded' };
+    }
+
+    const target = { tabId, frameIds: [frameId] };
+    const expectedUrl = toHashlessUrl(senderUrl);
+    try {
+        const alreadyReady = await chrome.scripting.executeScript({
+            target,
+            world: 'ISOLATED',
+            func: () => window.__aiMetaViewerUiModuleReady === true,
+        });
+        if (Array.isArray(alreadyReady) && alreadyReady.some((entry) => entry.result === true)) {
+            return { success: true, cached: true };
+        }
+        await chrome.scripting.executeScript({
+            target,
+            world: 'ISOLATED',
+            func: (expected) => {
+                window.__aiMetaViewerExpectedLazyUrl = expected;
+                window.__aiMetaViewerAbortUiModule = false;
+                window.__aiMetaViewerUiModuleReady = false;
+            },
+            args: [expectedUrl],
+        });
+        await chrome.scripting.executeScript({
+            target,
+            world: 'ISOLATED',
+            files: config.scripts,
+        });
+        const ready = await chrome.scripting.executeScript({
+            target,
+            world: 'ISOLATED',
+            func: () => window.__aiMetaViewerUiModuleReady === true,
+        });
+        if (!Array.isArray(ready) || !ready.some((entry) => entry.result === true)) {
+            return { success: false, error: 'navigation-mismatch' };
+        }
+        if (config.styles.length > 0) {
+            try {
+                await chrome.scripting.insertCSS({ target, files: config.styles });
+            } catch (error) {
+                debugLog({ category: 'message', phase: 'background', errorType: 'import' });
+            }
+        }
+        return { success: true };
+    } catch (error) {
+        debugLog({ category: 'message', phase: 'background', errorType: 'import' });
+        return { success: false, error: 'module-script-failed' };
+    }
+}
+
+async function injectScannerIntoFrames(tabId) {
+    if (!Number.isInteger(tabId) || !chrome.scripting?.executeScript) {
+        return { success: false, error: 'scripting-unavailable', frames: [] };
+    }
+    let probe = [];
+    try {
+        probe = await chrome.scripting.executeScript({
+            target: { tabId, allFrames: true },
+            world: 'ISOLATED',
+            func: () => ({
+                loaded: window.__aiMetaViewerScannerLoaded === true,
+                isTop: window.top === window,
+            }),
+        });
+    } catch (error) {
+        debugLog({ category: 'message', phase: 'background', errorType: 'import' });
+        return { success: false, error: 'frame-probe-failed', frames: [] };
+    }
+    const frames = (Array.isArray(probe) ? probe : [])
+        .filter((entry) => Number.isInteger(entry.frameId))
+        .map((entry) => ({
+            frameId: entry.frameId,
+            loaded: entry.result?.loaded === true,
+            isTop: entry.result?.isTop === true,
+        }));
+    if (frames.length === 0) {
+        return { success: false, error: 'no-injectable-frames', frames: [] };
+    }
+
+    const injectableFrames = [];
+    for (const frame of frames) {
+        if (frame.loaded) {
+            injectableFrames.push(frame);
+            continue;
+        }
+        const target = { tabId, frameIds: [frame.frameId] };
+        try {
+            await chrome.scripting.insertCSS({ target, files: ['ui.css'] });
+        } catch (error) {
+            // CSS 失敗だけでスキャン機能を落とさない。
+            debugLog({ category: 'message', phase: 'background', errorType: 'import' });
+        }
+        try {
+            await chrome.scripting.executeScript({
+                target,
+                world: 'ISOLATED',
+                files: SCANNER_SCRIPT_FILES,
+            });
+            injectableFrames.push(frame);
+        } catch (error) {
+            debugLog({ category: 'message', phase: 'background', errorType: 'import' });
+        }
+    }
+    return {
+        success: injectableFrames.length > 0,
+        error: injectableFrames.length > 0 ? null : 'scanner-injection-failed',
+        frames: injectableFrames,
+    };
+}
+
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
+    if (request.action === 'ensureModule') {
+        const moduleName = typeof request.module === 'string' ? request.module : '';
+        if (!Object.prototype.hasOwnProperty.call(LAZY_MODULE_FILES, moduleName)) {
+            debugLog({ category: 'message', phase: 'background', errorType: 'invalid-response' });
+            sendResponse({ success: false, error: 'unknown-module' });
+            return false;
+        }
+        const tabId = sender?.tab?.id;
+        const frameId = Number.isInteger(sender?.frameId) ? sender.frameId : 0;
+        if (!Number.isInteger(tabId)) {
+            sendResponse({ success: false, error: 'invalid-sender' });
+            return false;
+        }
+        const key = `${tabId}:${frameId}:${moduleName}`;
+        if (!LAZY_INJECTION_PROMISES.has(key)) {
+            const promise = injectLazyModule(moduleName, sender)
+                .finally(() => LAZY_INJECTION_PROMISES.delete(key));
+            LAZY_INJECTION_PROMISES.set(key, promise);
+        }
+        LAZY_INJECTION_PROMISES.get(key)
+            .then((result) => sendResponse(result))
+            .catch(() => sendResponse({ success: false, error: 'module-injection-failed' }));
+        return true;
+    }
+
+    if (request.action === 'scannerFrameResults') {
+        const tabId = sender?.tab?.id;
+        const frameId = sender?.frameId;
+        if (!Number.isInteger(tabId) || !Number.isInteger(frameId) || frameId === 0 ||
+            typeof request.scanId !== 'string') {
+            sendResponse({ success: false, error: 'invalid-frame-result' });
+            return false;
+        }
+        const candidates = Array.isArray(request.candidates) ? request.candidates : [];
+        chrome.tabs.sendMessage(tabId, {
+            action: 'scannerFrameResults',
+            scanId: request.scanId,
+            frameId,
+            success: request.success === true,
+            error: typeof request.error === 'string' ? request.error : null,
+            candidates,
+            context: request.context && typeof request.context === 'object' ? request.context : {},
+        }, { frameId: 0 }).catch(() => {});
+        sendResponse({ success: true });
+        return false;
+    }
+
     // Content Script の画像診断ログを Service Worker の DevTools に集約する。
     // background 側で再度 allowlist を通すため、任意文字列や URL は出力されない。
     if (request.action === 'contentDiagnostic') {
@@ -2083,6 +2314,8 @@ async function handleGetMediaSize(url) {
 chrome.action.onClicked.addListener(async (tab) => {
     debugLog('[AI Meta Viewer] Extension icon clicked on tab:', tab.id);
 
+    if (!Number.isInteger(tab?.id)) return;
+
     // スキャン機能が無効化されている場合は何もしない
     // (Service Worker 再起動直後でも確実に判定できるよう、ストレージから直接読み込む)
     try {
@@ -2096,9 +2329,37 @@ chrome.action.onClicked.addListener(async (tab) => {
         return;
     }
 
-    chrome.tabs.sendMessage(tab.id, { action: 'scanPage' }).catch(err => {
-        debugLog('[AI Meta Viewer] Failed to send scanPage message', err);
-    });
+    if (await isUrlExcludedBySettings(tab.url || '')) {
+        debugLog('[AI Meta Viewer] Scanner is disabled on an excluded site');
+        return;
+    }
+
+    const injection = await injectScannerIntoFrames(tab.id);
+    if (!injection.success) {
+        debugLog({
+            category: 'message',
+            phase: 'background',
+            errorType: 'import',
+            retryable: true,
+        });
+        return;
+    }
+
+    const scanId = (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function')
+        ? crypto.randomUUID()
+        : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    const frames = [...injection.frames].sort((left, right) => Number(right.isTop) - Number(left.isTop));
+    const frameIds = frames.map((frame) => frame.frameId);
+    for (const frame of frames) {
+        chrome.tabs.sendMessage(tab.id, {
+            action: 'scanPage',
+            scanId,
+            frameIds,
+            isTopFrame: frame.isTop,
+        }, { frameId: frame.frameId }).catch(err => {
+            debugLog('[AI Meta Viewer] Failed to send scanPage message', err);
+        });
+    }
 });
 
 /**

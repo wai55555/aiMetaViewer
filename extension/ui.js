@@ -1,4 +1,10 @@
 // ui.js - UIコンポーネントモジュール
+//
+// Service Worker の ui_guard.js がナビゲーション不一致を検出した場合は、
+// このファイルの読み込みを先頭で中断し、グローバル関数を定義しない。
+if (window.__aiMetaViewerAbortUiModule === true) {
+    throw new Error('AI Meta Viewer UI module aborted by navigation guard');
+}
 
 /**
  * バッジ要素を作成
@@ -2063,4 +2069,465 @@ function createDownloaderModal(images, context) {
 
     document.body.style.overflow = 'hidden';
     return overlay;
+}
+
+/**
+ * 汎用的なsafetensorsリンクを監視
+ */
+let safetensorsObserver = null; // グローバル変数でObserverを管理
+
+function observeGenericSafetensorsLinks() {
+    // 既にObserverが作成されている場合は何もしない
+    if (safetensorsObserver) {
+        debugLog('[AI Meta Viewer] Safetensors observer already exists, skipping');
+        return;
+    }
+
+    debugLog('[AI Meta Viewer] Starting generic safetensors link observation');
+
+    // 既存のsafetensorsリンクをチェック
+    const checkExistingLinks = () => {
+        const safetensorsLinks = document.querySelectorAll('a[href*=".safetensors"]');
+        safetensorsLinks.forEach(link => {
+            if (!processedImages.has(link)) {
+                debugLog('[AI Meta Viewer] Found safetensors link:', link.href);
+                checkMetadataForElement(link);
+            }
+        });
+    };
+
+    // 初回チェック
+    checkExistingLinks();
+
+    // ページ読み込み完了後に再度チェック（遅延実行）
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', () => {
+            setTimeout(() => {
+                debugLog('[AI Meta Viewer] DOMContentLoaded - rechecking safetensors links');
+                checkExistingLinks();
+            }, 500);
+        });
+    } else {
+        // ページが既に読み込まれている場合
+        setTimeout(() => {
+            debugLog('[AI Meta Viewer] Delayed recheck - safetensors links');
+            checkExistingLinks();
+        }, 1000);
+    }
+
+    // 新しく追加されるsafetensorsリンクを監視
+    let debounceTimer = null;
+    safetensorsObserver = new MutationObserver((mutations) => {
+        // ノードの追加・削除の監視 (URLチェックは setInterval 側に任せる)
+        mutations.forEach((mutation) => {
+            if (mutation.addedNodes.length > 0) {
+                mutation.addedNodes.forEach((node) => {
+                    if (node.nodeType === Node.ELEMENT_NODE) {
+                        const links = [];
+                        if (node.tagName === 'A' && node.href && node.href.includes('.safetensors')) links.push(node);
+                        const innerLinks = node.querySelectorAll?.('a[href*=".safetensors"]');
+                        if (innerLinks) innerLinks.forEach(l => links.push(l));
+
+                        links.forEach(link => {
+                            if (!processedImages.has(link)) {
+                                debugLog('[AI Meta Viewer] New link added to DOM:', link.href);
+                                checkMetadataForElement(link);
+                            }
+                        });
+                    }
+                });
+            }
+
+            if (mutation.removedNodes.length > 0) {
+                mutation.removedNodes.forEach((node) => {
+                    if (node.nodeType === Node.ELEMENT_NODE) {
+                        const links = [];
+                        if (node.tagName === 'A' && node.href && node.href.includes('.safetensors')) links.push(node);
+                        const innerLinks = node.querySelectorAll?.('a[href*=".safetensors"]');
+                        if (innerLinks) innerLinks.forEach(l => links.push(l));
+                        links.forEach(link => processedImages.delete(link));
+                    }
+                });
+            }
+        });
+
+        // デバウンス処理（safetensorsリンクの再チェック用）
+        if (debounceTimer) clearTimeout(debounceTimer);
+        debounceTimer = setTimeout(() => {
+            checkExistingLinks();
+        }, 500);
+    });
+
+    if (!document.body) {
+        debugLog('[AI Meta Viewer] document.body not found, waiting for DOMContentLoaded to start safetensors observer');
+        document.addEventListener('DOMContentLoaded', () => {
+            if (!document.body) return; // R5: DOMContentLoaded後もbodyがない場合（リダイレクトページ等）は中断
+            safetensorsObserver.observe(document.body, { childList: true, subtree: true });
+            debugLog('[AI Meta Viewer] Generic safetensors link observer started (deferred)');
+        }, { once: true });
+        return;
+    }
+
+    safetensorsObserver.observe(document.body, {
+        childList: true,
+        subtree: true
+    });
+
+    debugLog('[AI Meta Viewer] Generic safetensors link observer started');
+}
+
+async function checkMetadataForElement(el) {
+    // 拡張機能のコンテキストが無効化されている場合は処理を停止
+    if (!isExtensionContextValid()) {
+        // すでに読み込まれている設定があればデバッグログを表示
+        if (window.settings && window.settings.debugMode) {
+            debugLog({ category: 'message', phase: 'content', errorType: 'unknown', retryable: false });
+        }
+        return;
+    }
+
+    if (processedImages.has(el)) {
+        const data = processedImages.get(el);
+        if (data) return; // 既に処理済み
+    }
+
+    // 抽出対象URLの特定
+    let url = null;
+    if (el.tagName === 'A') {
+        url = el.href;
+        // ローカルファイルテスト時の相対パス解決
+        if (window.location.protocol === 'file:' && document.title.includes('Civitai')) {
+            const href = el.getAttribute('href');
+            if (href && href.startsWith('/')) {
+                url = 'https://civitai.com' + href;
+            }
+        }
+    } else {
+        return;
+    }
+
+    if (!url) return;
+    if (isVideoMetadataUrl(url)) return;
+
+    // 処理済みフラグを一時的に立てる
+    processedImages.set(el, { processing: true });
+
+    const classifyResponse = (response) => {
+        const explicitState = response?.analysisState;
+        if (['resolved', 'confirmed-empty', 'unresolved', 'failure'].includes(explicitState)) {
+            if (explicitState === 'resolved') {
+                const hasMetadata = response?.success === true && response.metadata &&
+                    typeof response.metadata === 'object' && Object.keys(response.metadata).length > 0;
+                if (response?.metadataPartial === true || response?.metadata?.metadataPartial === true) {
+                    return 'unresolved';
+                }
+                return hasMetadata ? 'resolved' : 'failure';
+            }
+            if (explicitState === 'confirmed-empty') {
+                const hasUnexpectedMetadata = response?.metadata &&
+                    typeof response.metadata === 'object' && Object.keys(response.metadata).length > 0;
+                return response?.success === true && !hasUnexpectedMetadata
+                    ? 'confirmed-empty'
+                    : 'failure';
+            }
+            return response?.success === false ? explicitState : 'failure';
+        }
+        if (response?.success === true && response.metadata && typeof response.metadata === 'object') {
+            if (response.metadataPartial === true || response.metadata.metadataPartial === true) return 'unresolved';
+            return Object.keys(response.metadata).length > 0 ? 'resolved' : 'confirmed-empty';
+        }
+        return 'failure';
+    };
+
+    try {
+        const response = await sendMessageToBrave({
+            action: 'fetchImageMetadata',
+            imageUrl: url
+        });
+
+        const responseState = classifyResponse(response);
+        if (responseState === 'resolved') {
+            addBadgeToElement(el, response.metadata, url);
+        } else if (responseState === 'confirmed-empty') {
+            // confirmed-emptyは既存のリンク解析契約どおりバッジを除去する。
+            removeBadge(el);
+        } else {
+            // failure/unresolvedはempty処理へ降格させず、再解析可能にする。
+            logContentAnalysisFailure(response && typeof response === 'object'
+                ? { ...response, success: false, analysisState: responseState }
+                : { success: false, analysisState: responseState, diagnostics: { category: 'response-contract', phase: 'content' } });
+            processedImages.delete(el);
+        }
+    } catch (e) {
+        // 切断系は通常の診断ログへ出さず、markerだけを解除して再解析可能にする。
+        if (!isTransientExtensionContextError(e)) {
+            logContentAnalysisFailure({
+                success: false,
+                diagnostics: {
+                    category: 'message',
+                    phase: 'content',
+                    errorType: 'unknown'
+                }
+            });
+        }
+        processedImages.delete(el);
+    }
+}
+
+/**
+ * 直接表示画像の処理
+ */
+function handleDirectImageView() {
+    debugLog('[AI Meta Viewer] handleDirectImageView() called');
+    if (!document.body) {
+        debugLog('[AI Meta Viewer] No document.body, returning');
+        return;
+    }
+
+    const img = document.querySelector('img');
+    if (!img) {
+        debugLog('[AI Meta Viewer] No img element found');
+        return;
+    }
+
+    debugLog('[AI Meta Viewer] Found img element:', img.currentSrc || img.src);
+
+    // スタイル調整
+    document.body.style.backgroundColor = '#0e0e0e';
+    document.body.style.display = 'flex';
+    document.body.style.justifyContent = 'center';
+    document.body.style.alignItems = 'center';
+    document.body.style.minHeight = '100vh';
+    document.body.style.margin = '0';
+
+    img.style.maxWidth = '100%';
+    img.style.height = 'auto';
+    img.style.boxShadow = '0 0 20px rgba(0,0,0,0.5)';
+
+    debugLog('[AI Meta Viewer] Calling checkImageMetadata()');
+    checkImageMetadata(img);
+}
+
+// moved from content.js: video observation (lazy UI module)
+function refreshVideoElement(element, reobserve = false) {
+    const oldSource = videoSelectedSources.get(element);
+    const newSource = getVideoMetadataSource(element);
+    if (oldSource === newSource) {
+        if (reobserve && newSource && element.isConnected) {
+            videoMetadataIntersectionObserver?.unobserve(element);
+            videoMetadataIntersectionObserver?.observe(element);
+        }
+        return;
+    }
+
+    if (oldSource) {
+        cancelVideoElement(element);
+        videoAnalyzedSources.delete(element);
+        const badge = processedImages.get(element)?.badge;
+        if (badge?._mediaType === 'video' || element.tagName === 'IMG') removeBadge(element);
+        processedImages.delete(element);
+    }
+    if (newSource) videoSelectedSources.set(element, newSource);
+    else videoSelectedSources.delete(element);
+
+    if (element.tagName === 'IMG') {
+        if (newSource) {
+            viewportAnalysisQueue.cancel(element, 'video-linked-thumbnail');
+            if (processedImages.get(element)?.badge?._mediaType === 'image') removeBadge(element);
+            processedImages.delete(element);
+        } else if (oldSource && element.isConnected) {
+            // Re-enter the existing image viewport observer after a link stops targeting video.
+            viewportAnalysisQueue.observer?.unobserve(element);
+            viewportAnalysisQueue.observer?.observe(element);
+        }
+    }
+
+    if (reobserve && newSource && element.isConnected) {
+        videoMetadataIntersectionObserver?.unobserve(element);
+        videoMetadataIntersectionObserver?.observe(element);
+    } else if (reobserve && element.tagName === 'IMG' && !newSource) {
+        videoMetadataIntersectionObserver?.unobserve(element);
+        observedVideoElements.delete(element);
+    }
+}
+
+function enqueueVideoAnalysis(element) {
+    refreshVideoElement(element);
+    const url = videoSelectedSources.get(element);
+    if (!url || videoAnalyzedSources.get(element) === url || !element.isConnected) return;
+    pendingVideoAnalyses.set(element, { url });
+    drainVideoAnalyses();
+}
+
+function drainVideoAnalyses() {
+    for (const [element, entry] of pendingVideoAnalyses) {
+        if (!element.isConnected || videoSelectedSources.get(element) !== entry.url ||
+            videoAnalyzedSources.get(element) === entry.url) {
+            pendingVideoAnalyses.delete(element);
+        }
+    }
+    while (runningVideoAnalyses.size < VIDEO_ANALYSIS_MAX_CONCURRENT) {
+        const candidates = Array.from(pendingVideoAnalyses.entries())
+            .filter(([element, entry]) => !runningVideoAnalyses.has(element) && element.isConnected &&
+                videoSelectedSources.get(element) === entry.url && videoAnalyzedSources.get(element) !== entry.url)
+            .sort(([a], [b]) => distanceFromViewportCenter(a) - distanceFromViewportCenter(b));
+        if (candidates.length === 0) return;
+        const [element, entry] = candidates[0];
+        pendingVideoAnalyses.delete(element);
+        runVideoAnalysis(element, entry.url);
+    }
+}
+
+async function runVideoAnalysis(element, url) {
+    if (!isExtensionContextValid()) return;
+    const state = { url, cancelled: false };
+    activeVideoAnalysisStates.set(element, state);
+    runningVideoAnalyses.add(element);
+    try {
+        const response = await sendMessageToBrave({ action: 'fetchVideoMetadata', videoUrl: url });
+        if (state.cancelled || activeVideoAnalysisStates.get(element) !== state ||
+            !element.isConnected || getVideoMetadataSource(element) !== url) return;
+
+        const hasMetadata = response?.success === true && response.metadata &&
+            typeof response.metadata === 'object' && Object.keys(response.metadata).length > 0;
+        if (response?.analysisState === 'resolved' && hasMetadata) {
+            if (addBadgeToElement(element, response.metadata, url, { mediaType: 'video' })) {
+                videoAnalyzedSources.set(element, url);
+            }
+        } else if (response?.analysisState === 'confirmed-empty' && response.success === true) {
+            videoAnalyzedSources.set(element, url);
+            if (processedImages.get(element)?.badge?._mediaType === 'video') removeBadge(element);
+        } else {
+            logContentAnalysisFailure(response && typeof response === 'object'
+                ? { ...response, success: false, analysisState: response?.analysisState || 'unresolved' }
+                : { success: false, analysisState: 'unresolved', diagnostics: { category: 'response-contract', phase: 'content' } });
+        }
+    } catch (error) {
+        if (!isTransientExtensionContextError(error)) {
+            logContentAnalysisFailure({
+                success: false,
+                analysisState: 'unresolved',
+                diagnostics: { category: 'message', phase: 'content', errorType: 'unknown' }
+            });
+        }
+    } finally {
+        if (activeVideoAnalysisStates.get(element) === state) activeVideoAnalysisStates.delete(element);
+        runningVideoAnalyses.delete(element);
+        drainVideoAnalyses();
+    }
+}
+
+function collectVideoElements(rootNode, output = new Set()) {
+    if (!rootNode || rootNode.nodeType !== Node.ELEMENT_NODE) return output;
+    if (rootNode.tagName === 'VIDEO') output.add(rootNode);
+    if (rootNode.tagName === 'SOURCE') {
+        const parentVideo = rootNode.closest('video');
+        if (parentVideo) output.add(parentVideo);
+    }
+    if (rootNode.tagName === 'IMG' && isVideoLinkedThumbnail(rootNode)) output.add(rootNode);
+    rootNode.querySelectorAll?.('video, a[href] img').forEach(element => {
+        if (element.tagName === 'VIDEO' || isVideoLinkedThumbnail(element)) output.add(element);
+    });
+    return output;
+}
+
+function observeVideoCandidate(element) {
+    if (!element || !['VIDEO', 'IMG'].includes(element.tagName)) return;
+    if (element.tagName === 'IMG' && !isVideoLinkedThumbnail(element) && !videoSelectedSources.has(element)) return;
+    const wasObserved = observedVideoElements.has(element);
+    refreshVideoElement(element, wasObserved);
+    if (element.tagName === 'IMG' && !videoSelectedSources.has(element)) {
+        videoMetadataIntersectionObserver?.unobserve(element);
+        observedVideoElements.delete(element);
+        return;
+    }
+    if (!observedVideoElements.has(element)) {
+        observedVideoElements.add(element);
+        videoMetadataIntersectionObserver?.observe(element);
+    }
+}
+
+function observeVideoMetadata() {
+    if (typeof IntersectionObserver === 'undefined' || typeof MutationObserver === 'undefined') return;
+    if (!videoMetadataIntersectionObserver) {
+        videoMetadataIntersectionObserver = new IntersectionObserver(entries => {
+            for (const entry of entries) {
+                const element = entry.target;
+                refreshVideoElement(element);
+                if (entry.isIntersecting) enqueueVideoAnalysis(element);
+                else {
+                    pendingVideoAnalyses.delete(element);
+                    cancelVideoElement(element);
+                }
+            }
+        }, { rootMargin: '100px' });
+    }
+
+    const discover = rootNode => {
+        if (rootNode?.tagName === 'A') {
+            rootNode.querySelectorAll?.('img').forEach(img => {
+                if (isVideoLinkedThumbnail(img) || videoSelectedSources.has(img)) observeVideoCandidate(img);
+            });
+        }
+        for (const element of collectVideoElements(rootNode)) observeVideoCandidate(element);
+    };
+    discover(document.documentElement);
+
+    if (!videoMetadataMutationObserver && document.documentElement) {
+        videoMetadataMutationObserver = new MutationObserver(mutations => {
+            for (const mutation of mutations) {
+                if (mutation.type === 'attributes') {
+                    const target = mutation.target;
+                    if (target.tagName === 'VIDEO' || target.tagName === 'IMG' || target.tagName === 'A') {
+                        if (target.tagName === 'VIDEO' || target.tagName === 'IMG') {
+                            refreshVideoElement(target, true);
+                            observeVideoCandidate(target);
+                        }
+                        discover(target);
+                    } else if (target.tagName === 'SOURCE') {
+                        const video = target.closest('video');
+                        if (video) {
+                            refreshVideoElement(video, true);
+                            observeVideoCandidate(video);
+                        }
+                    }
+                }
+                for (const node of mutation.addedNodes || []) discover(node);
+                for (const node of mutation.removedNodes || []) {
+                    for (const element of collectVideoElements(node)) cleanupVideoElement(element);
+                }
+                if (mutation.type === 'childList') {
+                    const target = mutation.target?.nodeType === Node.ELEMENT_NODE
+                        ? mutation.target
+                        : mutation.target?.parentElement;
+                    const video = target?.tagName === 'VIDEO' ? target : target?.closest?.('video');
+                    if (video) {
+                        refreshVideoElement(video, true);
+                        observeVideoCandidate(video);
+                    }
+                }
+            }
+        });
+        videoMetadataMutationObserver.observe(document.documentElement, {
+            childList: true,
+            subtree: true,
+            attributes: true,
+            attributeFilter: ['src', 'href', 'srcset', 'type']
+        });
+    }
+
+    if (!videoMediaEventsRegistered) {
+        const refreshFromMediaEvent = event => {
+            const target = event.target;
+            const video = target?.tagName === 'VIDEO' ? target : target?.closest?.('video');
+            if (video) {
+                refreshVideoElement(video, true);
+                observeVideoCandidate(video);
+            }
+        };
+        for (const eventName of ['loadstart', 'loadedmetadata', 'emptied', 'error']) {
+            document.addEventListener(eventName, refreshFromMediaEvent, true);
+        }
+        videoMediaEventsRegistered = true;
+    }
 }

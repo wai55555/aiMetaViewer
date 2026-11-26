@@ -305,13 +305,16 @@ window.isExcludedUrl = function () {
         if (!pattern) continue;
 
         try {
-            // ワイルドカード変換 (* -> .*, ? -> .)
-            // 正規表現特殊文字をエスケープしてからワイルドカードを変換
-            const regexStr = ('^' + pattern + '$')
-                .replace(/[.+^${}()|[\]\\]/g, '\\$&') // 正規表現特殊文字をエスケープ
-                .replace(/\*/g, '.*')  // * を .* に変換
-                .replace(/\?/g, '.');  // ? を . に変換
-
+            if (typeof window.matchesExcludedSitePattern === 'function') {
+                if (window.matchesExcludedSitePattern(pattern, hostname, currentUrl)) return true;
+                continue;
+            }
+            // content_runtime.js が無い単体テスト向けのフォールバック。
+            // ワイルドカード変換 (* -> .*, ? -> .)。アンカーは変換後に付ける。
+            const regexStr = '^' + pattern
+                .replace(/[.+^${}()|[\]\\]/g, '\\$&')
+                .replace(/\*/g, '.*')
+                .replace(/\?/g, '.') + '$';
             const regex = new RegExp(regexStr, 'i');
             if (regex.test(hostname) || regex.test(currentUrl)) {
                 return true;
