@@ -76,7 +76,7 @@
 | 項目 | 値 |
 |---|---:|
 | content 常駐（manifest `<all_urls>`） | **118,439 bytes**（目標 120,000） |
-| SW 起動時（background + importScripts） | **776,911 bytes**（Phase 2 案Bにより目標対象外） |
+| SW 起動時（background + importScripts） | **777,866 bytes**（Phase 2 案Bにより目標対象外） |
 | `node --test tests/metadata/*.test.cjs` | **141 tests / 141 pass / 0 fail** |
 
 `node --check`: 変更した `parser.js` / `png_metadata_scanner.js` / `background.js` /
