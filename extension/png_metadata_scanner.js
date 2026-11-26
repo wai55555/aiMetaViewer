@@ -26,6 +26,7 @@
     const MAX_TEXT_CHUNK_BYTES = 8 * 1024 * 1024;
     const MAX_EXIF_CHUNK_PREFIX_BYTES = 64 * 1024;
     const MAX_STEALTH_HEADER_ROWS = 160;
+    const MAX_STEALTH_PIXELS = 1 << 25; // 33,554,432
     const MAX_IDAT_INFLATE_PUSH_BYTES = 4 * 1024;
     const BITS_PER_BYTE = 8;
     const UTF8_FATAL_DECODER = new TextDecoder('utf-8', { fatal: true });
@@ -600,9 +601,11 @@
             this.scanlineOffset = 0;
             this.rowsCompleted = 0;
             this.decodedBytes = 0;
+            this.stopped = false;
         }
 
         consume(output, absoluteOffset) {
+            if (this.stopped) return;
             for (let index = 0; index < output.length; index += 1) {
                 if (this.rowsCompleted >= this.layout.height) {
                     throw new PngStructuralError(
@@ -1016,6 +1019,7 @@
             this.iendSeen = false;
             this.stealthStopped = false;
             this.stealthSuppressedByNormalMetadata = false;
+            this.idatFramingOnly = false;
             this.analysisEndReason = null;
             this.candidates = [];
             this.stealthResult = null;
@@ -1179,6 +1183,12 @@
         }
 
         ensureIdatProcessor() {
+            if (this.idatFramingOnly) {
+                this.idatInflate = null;
+                this.rowAssembler = null;
+                this.idatStructureValidator = null;
+                return;
+            }
             if (!this.idatInflate) {
                 this.rowAssembler = this.layout
                     ? new RowAssembler(
@@ -1221,24 +1231,31 @@
                 const copyLength = Math.min(amount, this.currentData.length - this.currentDataOffset);
                 this.currentData.set(slice.subarray(0, copyLength), this.currentDataOffset);
             }
-            if (this.currentType === CHUNK_IDAT && this.idatInflate) {
-                if (this.idatInflate.ended) {
+            if (this.currentType === CHUNK_IDAT && this.idatInflate && !this.idatFramingOnly) {
+                const inflator = this.idatInflate;
+                if (inflator.ended) {
                     throw new PngStructuralError(
                         'PNG IDAT contains data after the zlib stream ended.',
                         this.idatChunkOffset,
                     );
                 }
-                const pushed = this.idatInflate.push(slice, false);
-                if (!pushed || this.idatInflate.err !== 0) {
+                const pushed = inflator.push(slice, false);
+                if (!this.idatFramingOnly && (!pushed || inflator.err !== 0)) {
                     throw new PngStructuralError('PNG IDAT zlib stream is invalid.', this.idatChunkOffset);
                 }
-                if (this.idatInflate.ended && this.idatInflate.strm && this.idatInflate.strm.avail_in > 0) {
+                if (!this.idatFramingOnly && inflator.ended && inflator.strm && inflator.strm.avail_in > 0) {
                     throw new PngStructuralError(
                         'PNG IDAT contains data after the zlib stream ended.',
                         this.idatChunkOffset,
                     );
                 }
                 this.checkStealthStop();
+                if (this.idatFramingOnly) {
+                    if (this.rowAssembler) this.rowAssembler.stopped = true;
+                    this.idatInflate = null;
+                    this.rowAssembler = null;
+                    this.idatStructureValidator = null;
+                }
             }
             this.currentDataOffset += amount;
             this.offset += amount;
@@ -1394,6 +1411,7 @@
             this.stealthSuppressedByNormalMetadata = true;
             this.stealthStopped = true;
             this.stealthResult = null;
+            this.idatFramingOnly = true;
             const diagnosticOffset = this.idatChunkOffset === null ? this.offset : this.idatChunkOffset;
             releaseCandidates(this.candidates, diagnosticOffset);
             for (const candidate of this.candidates) {
@@ -1401,7 +1419,13 @@
                 candidate.releaseDiagnosticPending = false;
                 candidate.releaseDiagnosticEmitted = true;
             }
-            if (this.rowAssembler) this.rowAssembler.candidates = [];
+            if (this.rowAssembler) {
+                this.rowAssembler.candidates = [];
+                this.rowAssembler.stopped = true;
+            }
+            this.idatInflate = null;
+            this.idatStructureValidator = null;
+            this.rowAssembler = null;
         }
 
         acceptIhdr() {
@@ -1419,6 +1443,25 @@
             }
             this.ihdr = { width, height, bitDepth, colorType, interlace };
             this.layout = makeLayout(width, height, bitDepth, colorType, interlace, this.collector, this.currentChunkOffset);
+            const pixelCount = width * height;
+            if (pixelCount > MAX_STEALTH_PIXELS) {
+                addUnsupportedDiagnostic(this.collector, 'unsupported-stealth-pixel-limit', {
+                    width,
+                    height,
+                    pixelCount,
+                    limit: MAX_STEALTH_PIXELS,
+                });
+                this.candidates = [];
+                this.structureLayout = null;
+                this.idatFramingOnly = true;
+                return;
+            }
+            if (!this.layout) {
+                this.candidates = [];
+                this.structureLayout = null;
+                this.idatFramingOnly = true;
+                return;
+            }
             this.structureLayout = makeStructureLayout(
                 width,
                 height,
@@ -1427,14 +1470,13 @@
                 interlace,
                 this.currentChunkOffset,
             );
-            if (this.layout) {
-                const totalRgbBits = width * height * 3;
-                const totalAlphaBits = width * height;
-                this.candidates = [];
-                for (const mode of this.layout.candidates) {
-                    this.candidates.push(makeCandidate(mode, width, height, mode === 'RGB' ? totalRgbBits : totalAlphaBits));
-                }
+            this.candidates = [];
+            const totalRgbBits = width * height * 3;
+            const totalAlphaBits = width * height;
+            for (const mode of this.layout.candidates) {
+                this.candidates.push(makeCandidate(mode, width, height, mode === 'RGB' ? totalRgbBits : totalAlphaBits));
             }
+            this.idatFramingOnly = false;
         }
 
         checkStealthStop() {
@@ -1450,17 +1492,26 @@
             }
             if (allCandidatesRejected(this.candidates)) {
                 this.stealthStopped = true;
+                this.idatFramingOnly = true;
                 this.analysisEndReason = END_INTENTIONAL_STOP;
-                this.collector.add({ category: 'intentional-stealth-stop', offset: diagnosticOffset });
+                this.collector.add({
+                    category: 'intentional-stealth-stop',
+                    offset: diagnosticOffset,
+                    decodedRows: this.rowAssembler ? this.rowAssembler.rowsCompleted : 0,
+                });
                 releaseCandidates(this.candidates, diagnosticOffset);
-                if (this.rowAssembler) this.rowAssembler.candidates = [];
+                if (this.rowAssembler) {
+                    this.rowAssembler.candidates = [];
+                    this.rowAssembler.stopped = true;
+                }
             }
         }
 
         finishIdat() {
             this.idatEnded = true;
             this.idatOpen = false;
-            if (!this.idatInflate) {
+            if (this.idatFramingOnly || !this.idatInflate) {
+                this.idatInflate = null;
                 this.rowAssembler = null;
                 this.idatStructureValidator = null;
                 return;
@@ -1805,6 +1856,8 @@
         MAX_STEALTH_COMPRESSED_BYTES,
         MAX_STEALTH_METADATA_BYTES,
         MAX_TEXT_CHUNK_BYTES,
+        MAX_STEALTH_HEADER_ROWS,
+        MAX_STEALTH_PIXELS,
         MAX_ZTXT_COMPRESSED_BYTES,
         MAX_TRAILING_BYTES,
         ANALYSIS_END_REASONS: Object.freeze([

@@ -22,6 +22,6 @@ test('metadata text is preserved as text and the modal renders it through textCo
 
 test('Phase 3 cache versions invalidate old PNG and non-PNG negative caches', () => {
     const background = fs.readFileSync(path.join(repoRoot, 'extension/background.js'), 'utf8');
-    assert.match(background, /const PNG_SCANNER_CACHE_VERSION = 'png-scanner-v3';/);
+    assert.match(background, /const PNG_SCANNER_CACHE_VERSION = 'png-scanner-v4';/);
     assert.match(background, /const PARSER_CACHE_VERSION = 'parser-v2';/);
 });

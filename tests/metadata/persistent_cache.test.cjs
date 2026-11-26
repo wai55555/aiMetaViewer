@@ -54,7 +54,7 @@ function createCache(limit = 4) {
         setTimeout: () => 0,
         clearTimeout: () => {},
         CACHE_ENTRY_MARKER: 'aiMetaViewerCacheEntry',
-        PNG_SCANNER_CACHE_VERSION: 'png-scanner-v3',
+        PNG_SCANNER_CACHE_VERSION: 'png-scanner-v4',
         PARSER_CACHE_VERSION: 'parser-v2',
         debugLog: () => {},
         browserAPI: { storage: { local: storage } },

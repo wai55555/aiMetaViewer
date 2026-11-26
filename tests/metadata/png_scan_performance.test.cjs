@@ -72,7 +72,7 @@ function tiffWithDescription(description) {
     return tiff;
 }
 
-test('PNG unsupported pixel layouts validate IDAT and still read later text chunks', () => {
+test('PNG unsupported pixel layouts skip IDAT decode and still read later text chunks', () => {
     const context = scannerContext();
     const realInflate = context.pako.Inflate;
     let inflateCalls = 0;
@@ -89,12 +89,12 @@ test('PNG unsupported pixel layouts validate IDAT and still read later text chun
     });
     const result = context.scanPngMetadataBuffer(exactArrayBuffer(png));
     context.pako.Inflate = realInflate;
-    assert.ok(inflateCalls > 0);
+    assert.equal(inflateCalls, 0);
     assert.equal(result.status, 'normal');
     assert.equal(result.metadata.Comment, 'still found');
 });
 
-test('PNG eXIf metadata stops Stealth candidate work while validating IDAT', () => {
+test('PNG eXIf metadata stops Stealth candidate work and skips IDAT decode', () => {
     const context = scannerContext();
     const ihdr = Buffer.alloc(13);
     ihdr.writeUInt32BE(1, 0);
@@ -113,7 +113,7 @@ test('PNG eXIf metadata stops Stealth candidate work while validating IDAT', () 
     assert.equal(result.metadata.Description, 'PNG EXIF prompt');
 });
 
-test('PNG stops Stealth candidate work after rejection, validates IDAT, and scans later chunks', () => {
+test('PNG stops Stealth candidate work after rejection, skips IDAT decode, and scans later chunks', () => {
     const context = scannerContext();
     const height = 10000;
     const rawRows = Buffer.alloc(height * 5);

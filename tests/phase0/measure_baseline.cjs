@@ -322,12 +322,14 @@ function main() {
     }));
     const b05 = buildB05Cases(context).map((testCase) => {
         const buffer = exactArrayBuffer(testCase.png);
-        const oldResult = context.extractPngMetadata(buffer);
+        const oldResult = typeof context.extractPngMetadata === 'function'
+            ? context.extractPngMetadata(buffer)
+            : null;
         const scannerResult = context.scanPngMetadataBuffer(buffer);
         return {
             id: testCase.id,
             bytes: testCase.png.length,
-            old: summarizeOld(oldResult),
+            old: oldResult ? summarizeOld(oldResult) : { status: 'unavailable', reason: 'removed-in-phase4' },
             scanner: summarizeScanner(scannerResult),
         };
     });
