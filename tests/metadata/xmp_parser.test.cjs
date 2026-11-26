@@ -31,6 +31,12 @@ test('XMP decodes hex character references and apostrophes', () => {
     );
 });
 
+test('XMP namespace declarations are not mistaken for parameters attributes', () => {
+    const context = loadParserContext();
+    const metadata = context.parseXmpMetadata('<rdf:Description xmlns:parameters="urn:test"><parameters>tag value</parameters></rdf:Description>');
+    assert.equal(metadata.parameters, 'tag value');
+});
+
 test('XMP parameters support both namespaced tag and unprefixed tag forms', () => {
     const context = loadParserContext();
     assert.equal(

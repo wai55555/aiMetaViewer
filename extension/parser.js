@@ -1605,7 +1605,7 @@ function decodeXmpEntities(value) {
 }
 
 function parseXmpParameters(xmpText) {
-  const paramAttrMatch = xmpText.match(/\bparameters\s*=\s*(?:"([^"]*)"|'([^']*)')/);
+  const paramAttrMatch = xmpText.match(/(?:^|\s)parameters\s*=\s*(?:"([^"]*)"|'([^']*)')/);
   if (paramAttrMatch) {
     return decodeXmpEntities(paramAttrMatch[1] !== undefined ? paramAttrMatch[1] : paramAttrMatch[2]);
   }
