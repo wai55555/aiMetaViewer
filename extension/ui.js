@@ -167,6 +167,10 @@ function detectGenerator(metadata) {
         return 'ComfyUI';
     }
 
+    // InvokeAI / SwarmUI JSON carriers
+    if (source.invokeai_metadata || source['sd-metadata']) return 'InvokeAI';
+    if (source.sui_image_params) return 'SwarmUI';
+
     // Civitai
     // parameters内に「Civitai metadata」がある、または Version: v... がある場合
     if (typeof source.parameters === 'string') {
@@ -558,6 +562,125 @@ function buildDescriptionSections(source, generatorName) {
     return sections;
 }
 
+function parseStructuredMetadata(value) {
+    if (value && typeof value === 'object') return value;
+    if (typeof value !== 'string') return null;
+    try {
+        const parsed = JSON.parse(value);
+        return parsed && typeof parsed === 'object' ? parsed : null;
+    } catch (error) {
+        return null;
+    }
+}
+
+function firstDisplayValue(...values) {
+    for (const value of values) {
+        const text = toDisplayText(value).trim();
+        if (text) return text;
+    }
+    return '';
+}
+
+function getInvokeAiPayload(source) {
+    const parsed = parseStructuredMetadata(source.invokeai_metadata || source['sd-metadata']);
+    if (!parsed) return null;
+    const payload = parsed.invokeai_metadata || parsed.image || parsed;
+    return payload && typeof payload === 'object' ? payload : null;
+}
+
+function getSwarmUiPayload(source) {
+    const parsed = parseStructuredMetadata(source.sui_image_params);
+    if (!parsed) return null;
+    const payload = parsed.sui_image_params || parsed;
+    return payload && typeof payload === 'object' ? payload : null;
+}
+
+function buildInvokeAiSections(source) {
+    const payload = getInvokeAiPayload(source);
+    if (!payload) return buildDescriptionSections(source, 'InvokeAI');
+    const positive = firstDisplayValue(payload.positive_prompt, payload.prompt);
+    const negative = firstDisplayValue(payload.negative_prompt);
+    const sections = [];
+    if (positive) {
+        sections.push(createSectionModel(
+            'positive', 'Positive Prompt', 'positive', true, positive,
+            { dataFields: ['invokeai_metadata'] }
+        ));
+    }
+    if (negative) {
+        sections.push(createSectionModel(
+            'negative', 'Negative Prompt', 'negative', false, negative,
+            { dataFields: ['invokeai_metadata'] }
+        ));
+    }
+    return sections.length > 0 ? sections : buildDescriptionSections(source, 'InvokeAI');
+}
+
+function buildSwarmUiSections(source) {
+    const payload = getSwarmUiPayload(source);
+    if (!payload) return buildDescriptionSections(source, 'SwarmUI');
+    const positive = firstDisplayValue(payload.prompt);
+    const negative = firstDisplayValue(payload.negativeprompt, payload.negative_prompt);
+    const sections = [];
+    if (positive) {
+        sections.push(createSectionModel(
+            'positive', 'Positive Prompt', 'positive', true, positive,
+            { dataFields: ['sui_image_params'] }
+        ));
+    }
+    if (negative) {
+        sections.push(createSectionModel(
+            'negative', 'Negative Prompt', 'negative', false, negative,
+            { dataFields: ['sui_image_params'] }
+        ));
+    }
+    return sections.length > 0 ? sections : buildDescriptionSections(source, 'SwarmUI');
+}
+
+function pushGridRow(rows, key, value) {
+    const text = toDisplayText(value).trim();
+    if (text && text !== 'undefined' && text !== 'null') rows.push({ key, value: text });
+}
+
+function buildInvokeAiGrid(source) {
+    const payload = getInvokeAiPayload(source);
+    if (!payload) return [];
+    const rows = [];
+    pushGridRow(rows, 'Steps', payload.steps);
+    pushGridRow(rows, 'CFG scale', payload.cfg_scale);
+    pushGridRow(rows, 'Sampler', payload.scheduler);
+    pushGridRow(rows, 'Seed', payload.seed);
+    if (payload.width && payload.height) {
+        pushGridRow(rows, 'Size', `${payload.width}x${payload.height}`);
+    }
+    pushGridRow(rows, 'Model', payload.model?.model_name || payload.model);
+    return rows;
+}
+
+function buildSwarmUiGrid(source) {
+    const payload = getSwarmUiPayload(source);
+    if (!payload) return [];
+    const rows = [];
+    pushGridRow(rows, 'Steps', payload.steps);
+    pushGridRow(rows, 'Sampler', payload.sampler);
+    pushGridRow(rows, 'Schedule type', payload.scheduler);
+    pushGridRow(rows, 'CFG scale', payload.cfgscale);
+    pushGridRow(rows, 'Seed', payload.seed);
+    if (payload.width && payload.height) {
+        pushGridRow(rows, 'Size', `${payload.width}x${payload.height}`);
+    }
+    pushGridRow(rows, 'Aspect ratio', payload.aspectratio);
+    pushGridRow(rows, 'Model', payload.model);
+    if (Array.isArray(payload.loras) && payload.loras.length > 0) {
+        const weights = Array.isArray(payload.loraweights) ? payload.loraweights : [];
+        pushGridRow(rows, 'LoRAs', payload.loras.map((name, index) =>
+            weights[index] === undefined ? name : `${name}:${weights[index]}`
+        ).join(', '));
+    }
+    pushGridRow(rows, 'SwarmUI version', payload.swarm_version);
+    return rows;
+}
+
 /**
  * parseMetadataToTabs() を置き換える純粋なセクションモデル構築関数。
  * @param {Object|null} metadata - 生のメタデータ
@@ -573,6 +696,13 @@ function buildSectionsInternal(metadata) {
         .includes(generatorName);
     if (isA1111Family && (typeof source.parameters === 'string' || source.parameters_settings)) {
         return buildA1111Sections(source);
+    }
+
+    if (generatorName === 'InvokeAI') {
+        return buildInvokeAiSections(source);
+    }
+    if (generatorName === 'SwarmUI') {
+        return buildSwarmUiSections(source);
     }
 
     const isComfyMetadata = generatorName === 'ComfyUI';
@@ -943,6 +1073,12 @@ function buildGridInternal(metadata) {
             ? source.parameters
             : source.parameters_settings;
         return parseA1111Grid(parameters);
+    }
+    if (generatorName === 'InvokeAI') {
+        return buildInvokeAiGrid(source);
+    }
+    if (generatorName === 'SwarmUI') {
+        return buildSwarmUiGrid(source);
     }
     if (generatorName === 'ComfyUI' || source.prompt || source.workflow || source.generation_data) {
         const normalized = window.ComfyUIParser?.summarize(source);
