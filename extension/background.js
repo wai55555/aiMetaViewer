@@ -4570,9 +4570,11 @@ async function handleFetchImageMetadata(imageUrl) {
                     }
                 }
             } else {
-                debugLog('[AI Meta Viewer] Range Request skipped for blocked domain:', {
+                debugLog('[AI Meta Viewer] Range Request skipped:', {
                     domain: domain || '(unknown)',
-                    reason: 'domain is already in rangeRequestBlockList'
+                    reason: debugForceFullFetch
+                        ? 'debug-force-full-fetch'
+                        : 'domain is already in rangeRequestBlockList'
                 });
                 const blockedInput = await safeFetchFullInput(imageUrl, getAnalysisContext(imageUrl)?.signal);
                 rangeRepresentationComplete = true;
