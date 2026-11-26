@@ -474,23 +474,6 @@ window.SiteAdapters = [
             return uniqueTargets;
         }
     },
-    // 汎用 (拡張子チェック)
-    {
-        match: () => true,
-        resolve: (img) => {
-            const parentLink = img.closest('a');
-            if (parentLink && parentLink.href) {
-                const href = parentLink.href;
-                const cleanHref = href.split('?')[0];
-                if (/\.(png|jpg|jpeg|webp|avif|gif)$/i.test(cleanHref)) {
-                    return href;
-                }
-            }
-            return null;
-        },
-        deepScan: () => null,
-        getBadgeTargets: () => null
-    }
 ];
 
 /**
@@ -681,3 +664,71 @@ function executeDeepScanAndAddBadges(fetchMetadataCallback = null) {
     }
 }
 
+// --- Civitai の動的サイト用リトライロジック ---
+// content.js から移設。adapters.js は対象ホストでのみ読み込まれる。
+let civitaiRetryCount = 0;
+const MAX_CIVITAI_RETRIES = 7;
+const CIVITAI_RETRY_INTERVAL_MS = 2000;
+let civitaiMetadataFetchSucceeded = false;
+
+const fetchMetadataCallback = (apiUrl) => {
+    return sendMessageToBrave({
+        action: 'fetchImageMetadata',
+        imageUrl: apiUrl
+    }).then(response => {
+        if (response && response.success && response.metadata && Object.keys(response.metadata).length > 0) {
+            debugLog('[AI Meta Viewer] Metadata fetched successfully:', Object.keys(response.metadata).join(', '));
+            return response.metadata;
+        }
+        debugLog('[AI Meta Viewer] Metadata fetch returned empty or failed for:', apiUrl);
+        return null;
+    });
+};
+
+function executeSafetensorsCheck() {
+    debugLog('[AI Meta Viewer] Executing safetensors check');
+    if (typeof executeDeepScanAndAddBadges === 'function') {
+        executeDeepScanAndAddBadges(fetchMetadataCallback);
+    }
+}
+
+function resetCivitaiRetryCheck() {
+    civitaiRetryCount = 0;
+    civitaiMetadataFetchSucceeded = false;
+}
+
+function runCivitaiRetryCheck() {
+    civitaiRetryCount++;
+    debugLog('[AI Meta Viewer] Safetensors retry check', civitaiRetryCount, '/', MAX_CIVITAI_RETRIES);
+
+    if (typeof SiteAdapters !== 'undefined') {
+        for (const adapter of SiteAdapters) {
+            if (adapter.match() && typeof adapter.deepScan === 'function') {
+                const candidates = adapter.deepScan(document);
+                if (candidates && Array.isArray(candidates)) {
+                    const safetensorsCandidates = candidates.filter(c => c.type === 'archive' && c.isCivitaiModel);
+                    const civitaiApiCandidates = safetensorsCandidates.filter(c => c.modelVersionId);
+
+                    if (civitaiApiCandidates.length > 0) {
+                        debugLog('[AI Meta Viewer] Found Civitai API candidates:', civitaiApiCandidates.length);
+                        civitaiMetadataFetchSucceeded = true;
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    if (civitaiMetadataFetchSucceeded || civitaiRetryCount >= MAX_CIVITAI_RETRIES) {
+        if (civitaiMetadataFetchSucceeded) {
+            debugLog('[AI Meta Viewer] Civitai API URL found, executing safetensors check');
+            executeSafetensorsCheck();
+        } else if (civitaiRetryCount >= MAX_CIVITAI_RETRIES) {
+            debugLog('[AI Meta Viewer] WARNING: Max retries reached for safetensors check');
+        }
+        return;
+    }
+
+    debugLog('[AI Meta Viewer] Scheduling next safetensors check in', CIVITAI_RETRY_INTERVAL_MS, 'ms');
+    setTimeout(runCivitaiRetryCheck, CIVITAI_RETRY_INTERVAL_MS);
+}

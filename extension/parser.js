@@ -11,6 +11,10 @@
  */
 const PNG_SIGNATURE = Object.freeze([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]);
 
+const UTF8_DECODER = new TextDecoder('utf-8');
+const UTF8_FATAL_DECODER = new TextDecoder('utf-8', { fatal: true });
+const ASCII_DECODER = new TextDecoder('ascii');
+
 /** ISOBMFFのFileTypeBoxマーカー 'ftyp' */
 const FTYP_MARKER = Object.freeze([0x66, 0x74, 0x79, 0x70]);
 
@@ -192,175 +196,6 @@ function findSequence(array, sequence) {
 }
 
 /**
- * PNGのテキスト系チャンク（tEXt/iTXt）をパースして結果を格納するヘルパー
- * @param {string} type - チャンク型 ('tEXt' or 'iTXt')
- * @param {Uint8Array} chunkData - チャンクのデータ部
- * @param {Object} metadata - 格納先オブジェクト
- */
-function parsePngTextChunk(type, chunkData, metadata) {
-  if (type === 'tEXt') {
-    const nullIndex = chunkData.indexOf(0);
-    if (nullIndex !== -1) {
-      const keyword = new TextDecoder('utf-8').decode(chunkData.slice(0, nullIndex));
-      const text = new TextDecoder('utf-8').decode(chunkData.slice(nullIndex + 1));
-      metadata[keyword] = text;
-    }
-  } else if (type === 'iTXt') {
-    let pos = 0;
-    const keywordEnd = chunkData.indexOf(0, pos);
-    if (keywordEnd === -1) return;
-
-    const keyword = new TextDecoder('utf-8').decode(chunkData.slice(pos, keywordEnd));
-    pos = keywordEnd + 1;
-
-    const compressionFlag = chunkData[pos];
-    pos += 2; // compressionFlag(1) + compressionMethod(1)
-
-    const langEnd = chunkData.indexOf(0, pos);
-    if (langEnd === -1) return;
-    pos = langEnd + 1;
-
-    const transEnd = chunkData.indexOf(0, pos);
-    if (transEnd === -1) return;
-    pos = transEnd + 1;
-
-    if (compressionFlag === 0) {
-      const text = new TextDecoder('utf-8').decode(chunkData.slice(pos));
-      metadata[keyword] = text;
-    } else if (compressionFlag === 1) {
-      // 圧縮された iTXt チャンクのデコード (HANDOVER 指示に基づく)
-      try {
-        if (typeof pako !== 'undefined') {
-          const compressedData = chunkData.slice(pos);
-          const inflated = pako.inflate(compressedData);
-          const text = new TextDecoder('utf-8').decode(inflated);
-          metadata[keyword] = text;
-        } else {
-          console.warn('[AI Meta Viewer] pako.js not loaded, cannot decompress iTXt chunk');
-        }
-      } catch (err) {
-        console.error('[AI Meta Viewer] Failed to decompress iTXt chunk:', err);
-      }
-    }
-  }
-}
-
-/**
- * PNG形式のメタデータを抽出
- * @param {ArrayBuffer} buffer - 画像バイナリデータ
- * @returns {Object} - 抽出されたメタデータ
- */
-function extractPngMetadata(buffer) {
-  const view = new Uint8Array(buffer);
-  const metadata = {};
-
-  // PNGシグネチャをスキップ (8バイト)
-  let offset = 8;
-  let isFirstChunkAfterIHDR = true;
-  let isComfyUIStyle = false;
-  let reachedIend = false;
-
-  while (offset < view.length) {
-    // チャンク長を読み取るための最低4バイトがあるか
-    if (offset + 4 > view.length) break;
-
-    // チャンク長を読み取り (Big Endian)
-    const length = readUint32BE(view, offset);
-
-    // チャンク型を読み取るための8バイトがあるかチェック
-    if (offset + 8 > view.length) break;
-
-    // 興味のあるチャンク（tEXt, iTXt）であれば再取得を指示
-    const typeStr = String.fromCharCode(view[offset + 4], view[offset + 5],
-      view[offset + 6], view[offset + 7]);
-
-    // ComfyUI / Pillow の指紋チェック (IHDRの直後がピッタリ65536bytesのIDAT)
-    if (typeStr !== 'IHDR') {
-      if (isFirstChunkAfterIHDR) {
-        if (typeStr === 'IDAT' && length === 65536) {
-          isComfyUIStyle = true;
-        }
-        isFirstChunkAfterIHDR = false;
-      }
-    }
-
-    // データが不足しているかチェック (チャンク長4 + タイプ4 + データ + CRC4)
-    if (offset + 4 + 4 + length + 4 > view.length) {
-      if (typeStr === 'tEXt' || typeStr === 'iTXt') {
-        return setParserState(metadata, PARSER_STATE_UNRESOLVED, {
-          isIncomplete: true,
-          suggestedSize: offset + 4 + 4 + length + 4 - 1,
-        });
-      }
-      if (typeStr === 'eXIf') {
-        const dataStart = offset + 8;
-        const availableLength = Math.max(0, Math.min(length, view.length - dataStart));
-        const exifResult = extractExifPayload(view.subarray(dataStart, dataStart + availableLength), {
-          declaredLength: length,
-        });
-        Object.assign(metadata, exifResult);
-        if (Object.keys(metadata).length > 0) {
-          return setParserState(metadata, PARSER_STATE_RESOLVED, { metadataPartial: true });
-        }
-        return setParserState(metadata, PARSER_STATE_UNRESOLVED, {
-          isIncomplete: true,
-          suggestedSize: offset + 4 + 4 + length + 4 - 1,
-        });
-      }
-      // ComfyUIスタイルの画像でIDATの途中で切れた場合、ファイル末尾にメタデータがある可能性が高い
-      if (isComfyUIStyle && typeStr === 'IDAT') {
-        Object.assign(metadata, { isIncomplete: true, requiresTailFetch: true });
-        return metadata;
-      }
-      // それ以外（画像データなど）なら単に終了
-      break;
-    }
-
-    offset += 4;
-
-    // チャンク型を読み取り
-    const type = String.fromCharCode(view[offset], view[offset + 1],
-      view[offset + 2], view[offset + 3]);
-    offset += 4;
-
-    // tEXt / iTXt チャンク処理 (共通ヘルパー呼び出し)
-    if (type === 'tEXt' || type === 'iTXt') {
-      const chunkData = view.slice(offset, offset + length);
-      parsePngTextChunk(type, chunkData, metadata);
-    } else if (type === 'eXIf') {
-      const exifResult = extractExifPayload(view.subarray(offset, offset + length), {
-        declaredLength: length,
-      });
-      Object.assign(metadata, exifResult);
-      if (exifResult.parserState === PARSER_STATE_UNRESOLVED ||
-          exifResult.parserState === PARSER_STATE_RESOURCE_LIMIT) {
-        return setParserState(metadata, exifResult.parserState, {
-          isIncomplete: true,
-          parserReason: exifResult.parserReason,
-        });
-      }
-    }
-
-    // IENDチャンクで終了
-    if (type === 'IEND') {
-      reachedIend = true;
-      break;
-    }
-
-    offset += length + 4; // データ + CRC
-  }
-
-  if (Object.keys(metadata).length > 0) {
-    return setParserState(metadata, PARSER_STATE_RESOLVED, {
-      ...(!reachedIend ? { metadataPartial: true } : {}),
-    });
-  }
-  return setParserState(metadata, reachedIend ? PARSER_STATE_EMPTY_CONFIRMED : PARSER_STATE_UNRESOLVED, {
-    ...(!reachedIend ? { isIncomplete: true } : {}),
-  });
-}
-
-/**
  * JPEG/AVIF形式のメタデータを抽出
  * @param {ArrayBuffer} buffer - 画像バイナリデータ
  * @returns {Object} - 抽出されたメタデータ
@@ -528,7 +363,7 @@ function extractExifMetadata(dataValue, options = {}) {
         return incomplete('ifd-entry-truncated');
       }
 
-      if (tag === 0x010E || tag === 0x9286) {
+      if (tag === 0x010E || tag === 0x9286 || tag === 0x0131) {
         const value = readEntryValue(entryOffset, type, count);
         if (value.limited) return resourceLimit('exif-value-size');
         if (!value.valid) return invalid('invalid-exif-value-range');
@@ -538,11 +373,18 @@ function extractExifMetadata(dataValue, options = {}) {
         }
         if (value.bytes.length > 0) {
           if (tag === 0x010E) {
-            const description = new TextDecoder('utf-8').decode(value.bytes).replace(/\0+$/, '');
+            const description = UTF8_DECODER.decode(value.bytes).replace(/\0+$/, '');
             if (description) metadata.Description = description;
-          } else {
+          } else if (tag === 0x9286) {
             const comment = parseExifUserComment(value.bytes, isLittleEndian);
             if (comment) metadata.parameters = comment;
+          } else {
+            let softwareEnd = value.bytes.length;
+            while (softwareEnd > 0 && value.bytes[softwareEnd - 1] === 0) softwareEnd -= 1;
+            if (softwareEnd <= 256) {
+              const software = UTF8_DECODER.decode(value.bytes.subarray(0, softwareEnd));
+              if (software) metadata.Software = software;
+            }
           }
         }
       }
@@ -604,30 +446,75 @@ function extractExifPayload(dataValue, options = {}) {
   });
 }
 
-function scanJpegMarkers(view) {
+const JPEG_XMP_HEADER = 'http://ns.adobe.com/xap/1.0/\0';
+const JPEG_EXTENDED_XMP_HEADER = 'http://ns.adobe.com/xmp/extension/\0';
+
+function startsWithAscii(view, start, end, text) {
+  if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start < 0 || end > view.length) return false;
+  if (end - start < text.length) return false;
+  for (let index = 0; index < text.length; index += 1) {
+    if (view[start + index] !== text.charCodeAt(index)) return false;
+  }
+  return true;
+}
+
+function mergeMissingMetadata(target, source) {
+  for (const [key, value] of Object.entries(source || {})) {
+    if (target[key] === undefined) target[key] = value;
+  }
+}
+
+function isAdoptableJpegCom(text) {
+  const trimmed = text.trim();
+  if (trimmed.startsWith('{')) {
+    try {
+      const parsed = JSON.parse(trimmed);
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed) &&
+          ['prompt', 'workflow', 'parameters'].some(key => Object.prototype.hasOwnProperty.call(parsed, key))) {
+        return true;
+      }
+    } catch (_) {
+      // Not JSON; continue to the A1111 gate.
+    }
+  }
+  if (text.includes('Negative prompt:')) return true;
+  return text.includes('Steps:') &&
+    (text.includes('Sampler:') || text.includes('Seed:') || text.includes('CFG scale:') || text.includes('Size:'));
+}
+
+function scanJpegMarkers(view, options = {}) {
+  const debugCarriers = options.debugAllDetections === true ? [] : null;
+  const result = scanJpegMarkersInternal(view, debugCarriers);
+  if (debugCarriers) result.debugCarriers = debugCarriers;
+  return result;
+}
+
+function scanJpegMarkersInternal(view, debugCarriers) {
   if (view.length < 3 || view[0] !== 0xFF || view[1] !== 0xD8) {
-    return { reachedSos: false, complete: false, metadata: {}, exifIncomplete: false };
+    return { reachedSos: false, complete: false, metadata: {}, exifIncomplete: false, xmpIncomplete: false };
   }
 
   const metadata = {};
   let exifIncomplete = false;
+  let xmpIncomplete = false;
   let exifInvalid = false;
   let metadataPartial = false;
   let suggestedSize = null;
+  let comAdopted = false;
   let offset = 2;
   while (offset < view.length) {
-    if (view[offset] !== 0xFF) return { reachedSos: false, complete: false, metadata, exifIncomplete };
+    if (view[offset] !== 0xFF) return { reachedSos: false, complete: false, metadata, exifIncomplete, xmpIncomplete };
     while (offset < view.length && view[offset] === 0xFF) offset++;
-    if (offset >= view.length) return { reachedSos: false, complete: false, metadata, exifIncomplete };
+    if (offset >= view.length) return { reachedSos: false, complete: false, metadata, exifIncomplete, xmpIncomplete };
 
     const marker = view[offset++];
-    if (marker === 0xDA) return { reachedSos: true, complete: true, metadata, exifIncomplete, exifInvalid, metadataPartial };
-    if (marker === 0xD9) return { reachedSos: false, complete: true, metadata, exifIncomplete, exifInvalid, metadataPartial };
+    if (marker === 0xDA) return { reachedSos: true, complete: true, metadata, exifIncomplete, xmpIncomplete, exifInvalid, metadataPartial };
+    if (marker === 0xD9) return { reachedSos: false, complete: true, metadata, exifIncomplete, xmpIncomplete, exifInvalid, metadataPartial };
     if (marker === 0xD8 || marker === 0x01 || (marker >= 0xD0 && marker <= 0xD7)) continue;
 
-    if (offset + 2 > view.length) return { reachedSos: false, complete: false, metadata, exifIncomplete, metadataPartial };
+    if (offset + 2 > view.length) return { reachedSos: false, complete: false, metadata, exifIncomplete, xmpIncomplete, metadataPartial };
     const segmentLength = (view[offset] << 8) | view[offset + 1];
-    if (segmentLength < 2) return { reachedSos: false, complete: false, metadata, exifIncomplete: true };
+    if (segmentLength < 2) return { reachedSos: false, complete: false, metadata, exifIncomplete: true, xmpIncomplete };
     if (offset + segmentLength > view.length) {
       const payloadStart = offset + 2;
       if (marker === 0xE1 && payloadStart + 6 <= view.length &&
@@ -636,8 +523,12 @@ function scanJpegMarkers(view) {
           view[payloadStart + 4] === 0 && view[payloadStart + 5] === 0) {
         exifIncomplete = true;
         suggestedSize = offset + segmentLength - 1;
+      } else if (marker === 0xE1 &&
+          startsWithAscii(view, payloadStart, view.length, JPEG_XMP_HEADER)) {
+        xmpIncomplete = true;
+        suggestedSize = offset + segmentLength - 1;
       }
-      return { reachedSos: false, complete: false, metadata, exifIncomplete, metadataPartial, suggestedSize };
+      return { reachedSos: false, complete: false, metadata, exifIncomplete, xmpIncomplete, metadataPartial, suggestedSize };
     }
     const payloadStart = offset + 2;
     const payloadEnd = offset + segmentLength;
@@ -649,6 +540,11 @@ function scanJpegMarkers(view) {
         allowExifPrefix: true,
         declaredLength: payloadEnd - payloadStart,
       });
+      if (debugCarriers) {
+        for (const [key, value] of Object.entries(parsed)) {
+          debugCarriers.push({ carrier: 'eXIf', key, value, location: 'jpeg-app1' });
+        }
+      }
       Object.assign(metadata, parsed);
       if (parsed.parserState === PARSER_STATE_UNRESOLVED || parsed.parserState === PARSER_STATE_RESOURCE_LIMIT) {
         exifIncomplete = true;
@@ -658,40 +554,91 @@ function scanJpegMarkers(view) {
       if (Number.isSafeInteger(parsed.suggestedSize)) {
         suggestedSize = Math.max(suggestedSize || 0, payloadStart + parsed.suggestedSize);
       }
+    } else if (marker === 0xFE && payloadStart < payloadEnd) {
+      try {
+        const comment = UTF8_FATAL_DECODER.decode(view.subarray(payloadStart, payloadEnd));
+        debugCarriers?.push({
+          carrier: 'COM',
+          value: comment,
+          location: 'jpeg-com',
+          outcome: isAdoptableJpegCom(comment) ? (comAdopted ? 'suppressed-existing' : 'adopted') : 'suppressed-gate',
+        });
+        if (!comAdopted && isAdoptableJpegCom(comment)) {
+          comAdopted = true;
+          if (metadata.parameters === undefined) metadata.parameters = comment;
+        }
+      } catch (_) {
+        // Decode failure is treated like an unrelated comment.
+      }
+    } else if (marker === 0xE1 &&
+        startsWithAscii(view, payloadStart, payloadEnd, JPEG_XMP_HEADER)) {
+      const xmpStart = payloadStart + JPEG_XMP_HEADER.length;
+      const xmpText = UTF8_DECODER.decode(view.subarray(xmpStart, payloadEnd));
+      const parsedXmp = parseXmpMetadata(xmpText);
+      if (debugCarriers) {
+        for (const [key, value] of Object.entries(parsedXmp)) {
+          debugCarriers.push({ carrier: 'XMP', key, value, location: 'jpeg-app1' });
+        }
+      }
+      mergeMissingMetadata(metadata, parsedXmp);
+    } else if (marker === 0xE1 &&
+        startsWithAscii(view, payloadStart, payloadEnd, JPEG_EXTENDED_XMP_HEADER)) {
+      // Extended XMP is intentionally ignored (CUT-05).
+      debugCarriers?.push({
+        carrier: 'XMP-extended',
+        location: 'jpeg-app1',
+        outcome: 'ignored',
+        length: payloadEnd - payloadStart,
+      });
     }
     offset += segmentLength;
   }
-  return { reachedSos: false, complete: false, metadata, exifIncomplete, metadataPartial, suggestedSize };
+  return { reachedSos: false, complete: false, metadata, exifIncomplete, xmpIncomplete, metadataPartial, suggestedSize };
 }
 
 function extractJpegMetadata(buffer, options = {}) {
-  const markerResult = scanJpegMarkers(new Uint8Array(buffer));
+  const markerResult = scanJpegMarkers(new Uint8Array(buffer), options);
   const metadata = markerResult.metadata;
+  const debug = markerResult.debugCarriers
+    ? {
+        enabled: true,
+        carriers: markerResult.debugCarriers,
+        limited: markerResult.exifIncomplete || markerResult.xmpIncomplete ? 'jpeg-head-incomplete' : null,
+      }
+    : null;
+  const attachDebug = result => {
+    if (debug && result && typeof result === 'object' && Object.keys(result).length > 0 &&
+        !Object.prototype.hasOwnProperty.call(result, '__debugDetection')) {
+      result.__debugDetection = debug;
+    }
+    return result;
+  };
   if (Object.keys(metadata).length > 0) {
-    return setParserState(metadata, PARSER_STATE_RESOLVED, {
-      ...(markerResult.metadataPartial || markerResult.exifIncomplete ||
+    return attachDebug(setParserState(metadata, PARSER_STATE_RESOLVED, {
+      ...(markerResult.metadataPartial || markerResult.exifIncomplete || markerResult.xmpIncomplete ||
           (!markerResult.reachedSos && !markerResult.complete) ? { metadataPartial: true } : {}),
       ...(Number.isSafeInteger(markerResult.suggestedSize) ? { suggestedSize: markerResult.suggestedSize } : {}),
-    });
+    }));
   }
-  if (markerResult.exifIncomplete || (!markerResult.reachedSos && !markerResult.complete)) {
-    return setParserState(metadata, PARSER_STATE_UNRESOLVED, {
+  if (markerResult.exifIncomplete || markerResult.xmpIncomplete ||
+      (!markerResult.reachedSos && !markerResult.complete)) {
+    return attachDebug(setParserState(metadata, PARSER_STATE_UNRESOLVED, {
       isIncomplete: true,
       suggestedSize: Number.isSafeInteger(markerResult.suggestedSize)
         ? markerResult.suggestedSize
         : JPEG_METADATA_HEAD_BUDGET_BYTES - 1,
-    });
+    }));
   }
   if (markerResult.exifInvalid) {
-    return setParserState(metadata, PARSER_STATE_INVALID, { parserReason: 'invalid-exif' });
+    return attachDebug(setParserState(metadata, PARSER_STATE_INVALID, { parserReason: 'invalid-exif' }));
   }
   if (markerResult.reachedSos || markerResult.complete) {
-    return setParserState(metadata, PARSER_STATE_EMPTY_CONFIRMED);
+    return attachDebug(setParserState(metadata, PARSER_STATE_EMPTY_CONFIRMED));
   }
-  return setParserState({}, PARSER_STATE_UNRESOLVED, {
+  return attachDebug(setParserState({}, PARSER_STATE_UNRESOLVED, {
     isIncomplete: true,
     suggestedSize: JPEG_METADATA_HEAD_BUDGET_BYTES - 1,
-  });
+  }));
 }
 
 /**
@@ -789,11 +736,11 @@ function extractWebpMetadata(buffer, options = {}) {
     } else if (chunk.type === 'XMP ') {
       if (!chunkComplete) {
         const payload = view.subarray(chunk.dataOffset, Math.min(chunkDataEnd, availableEnd));
-        const parsed = parseXmpMetadata(new TextDecoder('utf-8').decode(payload));
+        const parsed = parseXmpMetadata(UTF8_DECODER.decode(payload));
         Object.assign(metadata, parsed);
         return unresolved(chunk.nextOffset, 'webp-xmp-chunk-truncated');
       }
-      const xmpText = new TextDecoder('utf-8').decode(view.subarray(chunk.dataOffset, chunkDataEnd));
+      const xmpText = UTF8_DECODER.decode(view.subarray(chunk.dataOffset, chunkDataEnd));
       Object.assign(metadata, parseXmpMetadata(xmpText));
     }
 
@@ -853,7 +800,7 @@ function createWebpMetadataStreamScanner(options = {}) {
         declaredLength: capture.chunkSize,
       });
     } else {
-      const xmpText = new TextDecoder('utf-8').decode(payload);
+      const xmpText = UTF8_DECODER.decode(payload);
       parsed = parseXmpMetadata(xmpText);
       if (!payloadComplete && Object.keys(parsed).length > 0) metadataPartial = true;
     }
@@ -1404,7 +1351,7 @@ function extractSafetensorsMetadataLegacy(buffer) {
 
   try {
     const headerBytes = view.slice(8, 8 + headerSize);
-    const headerStr = new TextDecoder('utf-8').decode(headerBytes);
+    const headerStr = UTF8_DECODER.decode(headerBytes);
     const header = JSON.parse(headerStr);
 
     // Safetensorsは通常 __metadata__ キーにユーザー定義情報が入っている
@@ -1461,11 +1408,11 @@ function parseExifUserComment(data, isLittleEndian) {
         const bom = (textData[0] << 8) | textData[1];
         if (bom === 0xFEFF) {
           // Big Endian UTF-16 (BOMあり)
-          const decoded = new TextDecoder('utf-16be').decode(textData.slice(2));
+          const decoded = new TextDecoder('utf-16be').decode(textData.subarray(2));
           return decoded.replace(/\0+$/, ''); // NULL終端を除去
         } else if (bom === 0xFFFE) {
           // Little Endian UTF-16 (BOMあり)
-          const decoded = new TextDecoder('utf-16le').decode(textData.slice(2));
+          const decoded = new TextDecoder('utf-16le').decode(textData.subarray(2));
           return decoded.replace(/\0+$/, '');
         }
 
@@ -1485,27 +1432,27 @@ function parseExifUserComment(data, isLittleEndian) {
 
     // ASCII/UTF-8
     if (charCodeStr.startsWith('ASCII')) {
-      const decoded = new TextDecoder('utf-8').decode(textData);
+      const decoded = UTF8_DECODER.decode(textData);
       return decoded.replace(/\0+$/, '');
     }
 
     // JIS (ISO-2022-JP)
     if (charCodeStr.startsWith('JIS')) {
       // UTF-8として試行
-      const decoded = new TextDecoder('utf-8').decode(textData);
+      const decoded = UTF8_DECODER.decode(textData);
       return decoded.replace(/\0+$/, '');
     }
 
     // 未定義 (すべて0x00)
     const isAllZero = charCode.every(byte => byte === 0x00);
     if (isAllZero) {
-      const decoded = new TextDecoder('utf-8').decode(textData);
+      const decoded = UTF8_DECODER.decode(textData);
       const trimmed = decoded.replace(/\0+$/, '');
       return trimmed || null; // 空文字列の場合はnull
     }
 
     // デフォルトでUTF-8として試行
-    const decoded = new TextDecoder('utf-8').decode(textData);
+    const decoded = UTF8_DECODER.decode(textData);
     return decoded.replace(/\0+$/, '');
 
   } catch (e) {
@@ -1519,33 +1466,47 @@ function parseExifUserComment(data, isLittleEndian) {
  * @param {string} xmpText - XMP XML 文字列
  * @returns {Object} - 抽出されたメタデータ
  */
+function decodeXmpEntities(value) {
+  return value
+    .replace(/&quot;/g, '"')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&#x([0-9a-f]+);/gi, (match, hex) => {
+      const codePoint = parseInt(hex, 16);
+      return Number.isSafeInteger(codePoint) && codePoint >= 0 && codePoint <= 0x10FFFF
+        ? String.fromCodePoint(codePoint)
+        : match;
+    })
+    .replace(/&apos;/g, "'")
+    .replace(/&amp;/g, '&')
+    .replace(/&#10;/g, '\n')
+    .replace(/&#13;/g, '\r');
+}
+
+function parseXmpParameters(xmpText) {
+  const paramAttrMatch = xmpText.match(/(?:^|\s)parameters\s*=\s*(?:"([^"]*)"|'([^']*)')/);
+  if (paramAttrMatch) {
+    return decodeXmpEntities(paramAttrMatch[1] !== undefined ? paramAttrMatch[1] : paramAttrMatch[2]);
+  }
+
+  const paramTagMatch = xmpText.match(
+    /<(?:[A-Za-z_][\w.-]*:)?parameters(?:\s[^>]*)?>([\s\S]*?)<\/(?:[A-Za-z_][\w.-]*:)?parameters>/i
+  );
+  if (!paramTagMatch) return null;
+  const content = paramTagMatch[1].trim();
+  if (content.includes('<![CDATA[')) {
+    return content.replace(/<!\[CDATA\[/g, '').replace(/\]\]>/g, '').trim();
+  }
+  return decodeXmpEntities(content);
+}
+
 function parseXmpMetadata(xmpText) {
   const metadata = {};
 
-  // XMP は XML なので、簡易的な正規表現で主要なタグを抽出
-  // 1. Stable Diffusion (Automatic1111) 等で使われる parameters 属性/タグ
-  // 属性形式: parameters="..."
-  const paramAttrMatch = xmpText.match(/parameters="([^"]+)"/);
-  if (paramAttrMatch) {
-    // 実体参照をデコード (簡易版: &quot;, &lt;, &gt;, &amp;, &#10;)
-    metadata['parameters'] = paramAttrMatch[1]
-      .replace(/&quot;/g, '"')
-      .replace(/&lt;/g, '<')
-      .replace(/&gt;/g, '>')
-      .replace(/&amp;/g, '&')
-      .replace(/&#10;/g, '\n')
-      .replace(/&#13;/g, '\r');
-  } else {
-    // タグ形式: <...:parameters>...</...:parameters>
-    const paramTagMatch = xmpText.match(/<[^:>]+:parameters>([\s\S]+?)<\/[^:>]+:parameters>/);
-    if (paramTagMatch) {
-      metadata['parameters'] = paramTagMatch[1].trim();
-    }
-  }
+  const parameters = parseXmpParameters(xmpText);
+  if (parameters !== null) metadata['parameters'] = parameters;
 
-  // 2. 他の一般的なメタデータ (Description 等)
   if (!metadata['parameters']) {
-    // dc:description 内の rdf:li
     const descMatch = xmpText.match(/<dc:description>[\s\S]*?<rdf:li[^>]*>([\s\S]+?)<\/rdf:li>[\s\S]*?<\/dc:description>/);
     if (descMatch) {
       metadata['Description'] = descMatch[1].trim();
@@ -1582,137 +1543,89 @@ function extractMetadata(buffer, options = {}) {
     console.log(`[AI Meta Viewer] extractMetadata: format detected: ${detectedFormat}, buffer size: ${buffer.byteLength}`);
   }
 
+  let result;
   switch (detectedFormat) {
     case 'png':
-      return extractPngMetadata(buffer);
+      result = extractPngMetadataWithScanner(buffer, options);
+      break;
     case 'jpeg':
-      return extractJpegMetadata(buffer, { inputComplete });
+      result = extractJpegMetadata(buffer, { inputComplete, debugAllDetections: options.debugAllDetections === true });
+      break;
     case 'webp':
-      return extractWebpMetadata(buffer, { inputComplete });
+      result = extractWebpMetadata(buffer, { inputComplete, debugAllDetections: options.debugAllDetections === true });
+      break;
     case 'avif':
-      return extractAvifMetadata(buffer, { inputComplete });
+      result = extractAvifMetadata(buffer, { inputComplete, debugAllDetections: options.debugAllDetections === true });
+      break;
     case 'safetensors':
-      return extractSafetensorsMetadata(buffer, { inputComplete });
+      result = extractSafetensorsMetadata(buffer, { inputComplete, debugAllDetections: options.debugAllDetections === true });
+      break;
     default:
-      return setParserState({}, PARSER_STATE_UNSUPPORTED_FORMAT);
+      result = setParserState({}, PARSER_STATE_UNSUPPORTED_FORMAT);
   }
+  if (options.debugAllDetections === true && result && typeof result === 'object' &&
+      !Object.prototype.hasOwnProperty.call(result, '__debugDetection') &&
+      Object.keys(result).length > 0) {
+    result.__debugDetection = {
+      enabled: true,
+      carriers: Object.keys(result).map(key => ({
+        carrier: 'metadata',
+        key,
+        value: result[key],
+        location: detectedFormat,
+      })),
+      limited: null,
+    };
+  }
+  return result;
 }
 
 /**
- * PNG IHDR チャンクから ColorType を確認
- * @param {ArrayBuffer} buffer - PNG画像バイナリデータ
- * @returns {boolean} - αチャンネルあり（ColorType 4 or 6）の場合 true
+ * PNG scanner の結果を parser.js の従来 API（metadata + parserState）へ写像する。
+ * PNG の解析実装は png_metadata_scanner.js のみを正とする。
+ * @param {ArrayBuffer|Uint8Array} buffer
+ * @returns {Object}
  */
-function checkPngIHDRHasAlpha(buffer) {
-  const view = new Uint8Array(buffer);
-
-  // PNGシグネチャ確認 (8バイト)
-  if (buffer.byteLength < 33) return false; // IHDR最小サイズ
-
-  // IHDRチャンクは通常、シグネチャ直後（オフセット8）
-  const offset = 8;
-
-  // チャンク長 (4バイト, Big Endian) - IHDRは常に13バイト
-  const length = (view[offset] << 24) | (view[offset + 1] << 16) |
-    (view[offset + 2] << 8) | view[offset + 3];
-
-  if (length !== 13) return false;
-
-  // チャンク型 (4バイト) - "IHDR"
-  const type = String.fromCharCode(view[offset + 4], view[offset + 5],
-    view[offset + 6], view[offset + 7]);
-
-  if (type !== 'IHDR') return false;
-
-  // ColorType (オフセット8+4+4+4+1+1+1 = 17からデータ開始 + 9バイト目)
-  const colorType = view[offset + 4 + 4 + 9];
-
-  // ColorType 4: Grayscale + Alpha, 6: RGB + Alpha
-  return colorType === 4 || colorType === 6;
-}
-
-/**
- * ビットストリームから Stealth PNG Info をデコード
- * @param {string} bitStream - ビットストリーム ('0' と '1' の文字列)
- * @param {string} mode - 'Alpha' または 'RGB'
- * @returns {Object|null} - { data: string, mode: string, compressed: boolean }
- */
-function processStealthStream(bitStream, mode) {
-  const signatures = {
-    'stealth_pnginfo': { mode: 'Alpha', compressed: false },
-    'stealth_pngcomp': { mode: 'Alpha', compressed: true },
-    'stealth_rgbinfo': { mode: 'RGB', compressed: false },
-    'stealth_rgbcomp': { mode: 'RGB', compressed: true },
-  };
-
-  const sigLen = 'stealth_pnginfo'.length * 8; // 128 bits
-
-  // 最小ビットストリーム長チェック (シグネチャ + 長さフィールド32bit)
-  if (bitStream.length < sigLen + 32) return null;
-
-  // シグネチャ抽出
-  const sigBinary = bitStream.substring(0, sigLen);
-  const sigText = binaryToText(sigBinary);
-
-  // シグネチャ確認
-  if (!(sigText in signatures) || signatures[sigText].mode !== mode) {
-    return null;
+function extractPngMetadataWithScanner(buffer, options = {}) {
+  if (typeof scanPngMetadataBuffer !== 'function') {
+    throw new Error('PNG scanner is not loaded.');
   }
-
-  const compressed = signatures[sigText].compressed;
-
-  // データ長を読み取り (32ビット)
-  let currentStream = bitStream.substring(sigLen);
-  const lenBinary = currentStream.substring(0, 32);
-  const paramLen = parseInt(lenBinary, 2);
-  currentStream = currentStream.substring(32);
-
-  // データビット不足チェック
-  if (currentStream.length < paramLen) return null;
-
-  // バイナリデータ抽出
-  const binaryData = currentStream.substring(0, paramLen);
-  const byteArray = new Uint8Array(binaryData.length / 8);
-
-  for (let i = 0; i < byteArray.length; i++) {
-    byteArray[i] = parseInt(binaryData.substring(i * 8, (i + 1) * 8), 2);
+  const result = scanPngMetadataBuffer(buffer, { debugAllDetections: options.debugAllDetections === true });
+  const metadata = { ...(result.metadata || {}) };
+  if (result.debug) metadata.__debugDetection = result.debug;
+  if (result.status === 'normal' || result.status === 'stealth') {
+    return setParserState(metadata, PARSER_STATE_RESOLVED, {
+      ...(result.metadataPartial === true ? { metadataPartial: true } : {}),
+    });
   }
-
-  try {
-    let decodedData;
-
-    if (compressed) {
-      // pako で解凍
-      if (typeof pako === 'undefined') {
-        return { data: '[pako not loaded]', mode: mode, compressed: true };
-      }
-      decodedData = pako.inflate(byteArray, { to: 'string' });
-    } else {
-      // UTF-8 デコード
-      decodedData = new TextDecoder('utf-8', { fatal: true }).decode(byteArray);
+  if (result.status === 'not-found') {
+    return setParserState(metadata, PARSER_STATE_EMPTY_CONFIRMED);
+  }
+  if (result.status === 'unresolved') {
+    return setParserState(metadata, PARSER_STATE_UNRESOLVED, {
+      isIncomplete: true,
+      ...(result.reason ? { parserReason: result.reason } : {}),
+    });
+  }
+  if (result.status === 'invalid-png') {
+    // 既存の head-budget 契約では「入力が途中で切れた」場合は unresolved として
+    // 追加取得を促す。scanner 自体の status / reason は変更しない。
+    if (result.reason === 'truncated') {
+      return setParserState(metadata, PARSER_STATE_UNRESOLVED, {
+        isIncomplete: true,
+        parserReason: 'truncated',
+      });
     }
-
-    return { data: decodedData, mode: mode, compressed: compressed };
-  } catch (e) {
-    return { data: '[decoding error]', mode: mode, compressed: compressed };
+    return setParserState(metadata, PARSER_STATE_INVALID, {
+      parserReason: result.reason || 'invalid-png',
+    });
   }
-}
-
-/**
- * バイナリ文字列をテキストに変換
- * @param {string} binaryStr - '0' と '1' の文字列
- * @returns {string} - デコードされたテキスト
- */
-function binaryToText(binaryStr) {
-  try {
-    const bytes = new Uint8Array(binaryStr.length / 8);
-    for (let i = 0; i < bytes.length; i++) {
-      bytes[i] = parseInt(binaryStr.substr(i * 8, 8), 2);
-    }
-    return new TextDecoder('utf-8', { fatal: false }).decode(bytes);
-  } catch {
-    return '';
+  if (result.status === 'resource-limit') {
+    return setParserState(metadata, PARSER_STATE_RESOURCE_LIMIT, {
+      parserReason: result.limit || result.reason || 'resource-limit',
+    });
   }
+  return setParserState(metadata, PARSER_STATE_UNRESOLVED, { isIncomplete: true });
 }
 
 /**
@@ -1734,7 +1647,7 @@ function writePngMetadata(buffer, text) {
 
   while (offset < bytes.length) {
     const length = new DataView(bytes.buffer, offset, 4).getUint32(0);
-    const type = new TextDecoder('ascii').decode(bytes.slice(offset + 4, offset + 8));
+    const type = ASCII_DECODER.decode(bytes.slice(offset + 4, offset + 8));
 
     // 既存の parameters チャンクがあればスキップ（上書きの代わり）
     if (type === 'tEXt' || type === 'iTXt') {
@@ -1748,7 +1661,7 @@ function writePngMetadata(buffer, text) {
       }
 
       if (keywordEnd !== -1) {
-        const keyword = new TextDecoder('ascii').decode(chunkContent.slice(0, keywordEnd));
+        const keyword = ASCII_DECODER.decode(chunkContent.slice(0, keywordEnd));
         if (keyword === 'parameters') {
           offset += length + 12;
           continue;
@@ -1761,7 +1674,7 @@ function writePngMetadata(buffer, text) {
 
     // IHDR チャンクの直後に新しい parameters チャンクを挿入する
     if (type === 'IHDR' && !inserted) {
-      chunks.push(createPngTextChunk('parameters', text));
+      chunks.push(createPngItxtChunk('parameters', text));
       inserted = true;
     }
 
@@ -1781,33 +1694,41 @@ function writePngMetadata(buffer, text) {
 }
 
 /**
- * PNG tEXt チャンクを生成
+ * UTF-8 の parameters を保持する PNG iTXt チャンクを生成
  */
-function createPngTextChunk(keyword, text) {
+function createPngItxtChunk(keyword, text) {
   const encoder = new TextEncoder();
   const kwBytes = encoder.encode(keyword);
   const textBytes = encoder.encode(text);
 
-  const length = kwBytes.length + 1 + textBytes.length;
+  const length = kwBytes.length + 5 + textBytes.length;
   const buffer = new ArrayBuffer(length + 12);
   const view = new DataView(buffer);
 
-  // Length
   view.setUint32(0, length);
 
-  // Type: tEXt
-  view.setUint8(4, 0x74); // t
-  view.setUint8(5, 0x45); // E
+  // Type: iTXt
+  view.setUint8(4, 0x69); // i
+  view.setUint8(5, 0x54); // T
   view.setUint8(6, 0x58); // X
   view.setUint8(7, 0x74); // t
 
   const bytes = new Uint8Array(buffer);
-  // Keyword + Null separator + Text
-  bytes.set(kwBytes, 8);
-  bytes.set([0], 8 + kwBytes.length);
-  bytes.set(textBytes, 9 + kwBytes.length);
+  let cursor = 8;
+  bytes.set(kwBytes, cursor);
+  cursor += kwBytes.length;
+  bytes[cursor] = 0; // keyword terminator
+  cursor += 1;
+  bytes[cursor] = 0; // compression flag
+  cursor += 1;
+  bytes[cursor] = 0; // compression method
+  cursor += 1;
+  bytes[cursor] = 0; // language tag terminator
+  cursor += 1;
+  bytes[cursor] = 0; // translated keyword terminator
+  cursor += 1;
+  bytes.set(textBytes, cursor);
 
-  // CRC
   const crcData = bytes.slice(4, 8 + length);
   const crc = computeCrc32(crcData);
   view.setUint32(8 + length, crc);

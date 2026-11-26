@@ -8,7 +8,12 @@ const ComfyUIParser = require('../../extension/comfyui_parser.js');
 const repoRoot = path.resolve(__dirname, '../..');
 const uiSource = fs.readFileSync(path.join(repoRoot, 'extension/ui.js'), 'utf8');
 const uiContext = { window: { ComfyUIParser }, console };
-vm.runInNewContext(`${uiSource}\nglobalThis.__uiApi = { buildSections, buildGrid, detectGenerator };`, uiContext);
+vm.runInNewContext(uiSource, uiContext);
+uiContext.__uiApi = {
+    buildSections: uiContext.window.buildSections,
+    buildGrid: uiContext.window.buildGrid,
+    detectGenerator: uiContext.window.detectGenerator,
+};
 
 test('ComfyUI sections show normalized prompts and preserve complete raw JSON sections', () => {
     const metadata = {
@@ -104,4 +109,22 @@ test('source contract disables video editing and metadata-writing while image fl
     const badgeSource = fs.readFileSync(path.join(repoRoot, 'extension/badge_controller.js'), 'utf8');
     assert.match(badgeSource, /createModal\(currentMetadata, badge\._originalUrl, \{ mediaType: badge\._mediaType \}\)/);
     assert.match(uiSource, /mediaType !== 'video' && modalSettings\.advancedModeEnabled/);
+});
+
+
+test('debug detections render as a separate raw section without leaking into normal rows', () => {
+    const metadata = {
+        Description: 'normal metadata',
+        __debugDetection: {
+            enabled: true,
+            carriers: [{ carrier: 'tEXt', key: 'Description', value: 'normal metadata', location: 'body' }],
+            limited: null,
+        },
+    };
+    const sections = uiContext.__uiApi.buildSections(metadata);
+    const debugSection = sections.find(section => section.id === 'debugDetections');
+    assert.ok(debugSection);
+    assert.equal(debugSection.name, 'Debug Detections');
+    assert.match(debugSection.text, /"carrier": "tEXt"/);
+    assert.equal(uiContext.__uiApi.buildGrid(metadata).some(row => row.key === '__debugDetection'), false);
 });

@@ -6,6 +6,7 @@
     "version": "1.8.0",
     "permissions": [
         "activeTab",
+        "scripting",
         "storage",
         "declarativeNetRequest",
         "downloads"
@@ -28,21 +29,30 @@
     "content_scripts": [
         {
             "matches": [
+                "*://discord.com/*",
+                "*://*.discord.com/*",
+                "*://pixiv.net/*",
+                "*://*.pixiv.net/*",
+                "*://civitai.com/*",
+                "*://*.civitai.com/*",
+                "file:///*"
+            ],
+            "js": [
+                "adapters.js"
+            ],
+            "run_at": "document_start",
+            "all_frames": true,
+            "match_about_blank": true
+        },
+        {
+            "matches": [
                 "<all_urls>"
             ],
             "js": [
+                "shared_diagnostics.js",
                 "settings_loader.js",
-                "comfyui_parser.js",
-                "ui.js",
-                "adapters.js",
+                "content_runtime.js",
                 "badge_controller.js",
-                "scanner/utils.js",
-                "scanner/progress-ui.js",
-                "scanner/thumbnail-finder.js",
-                "scanner/core.js",
-                "scanner/ui.js",
-                "scanner/controller.js",
-                "scanner.js",
                 "content.js"
             ],
             "css": [

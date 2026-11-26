@@ -3,6 +3,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
+const zlib = require('node:zlib');
 
 const parserSource = fs.readFileSync(path.join(__dirname, '../../extension/parser.js'), 'utf8');
 
@@ -10,6 +11,12 @@ function parserContext() {
     const context = vm.createContext({ console, TextDecoder, TextEncoder, Uint8Array, ArrayBuffer, DataView });
     context.window = context;
     vm.runInContext(parserSource, context, { filename: 'parser.js' });
+    vm.runInContext(fs.readFileSync(path.join(__dirname, '../../extension/pako.js'), 'utf8'), context, {
+        filename: 'pako.js',
+    });
+    vm.runInContext(fs.readFileSync(path.join(__dirname, '../../extension/png_metadata_scanner.js'), 'utf8'), context, {
+        filename: 'png_metadata_scanner.js',
+    });
     return context;
 }
 
@@ -105,6 +112,21 @@ function pngChunk(context, type, data, crcOverride = null) {
     const crc = Buffer.alloc(4);
     crc.writeUInt32BE(crcValue >>> 0);
     return Buffer.concat([be32(payload.length), typeBytes, payload, crc]);
+}
+
+function makeValidPng(context, { idat = zlib.deflateSync(Buffer.alloc(5)), afterIdat = [], omitIend = false } = {}) {
+    const ihdr = Buffer.alloc(13);
+    ihdr.writeUInt32BE(1, 0);
+    ihdr.writeUInt32BE(1, 4);
+    ihdr[8] = 8;
+    ihdr[9] = 6;
+    return Buffer.concat([
+        Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+        pngChunk(context, 'IHDR', ihdr),
+        pngChunk(context, 'IDAT', idat),
+        ...afterIdat,
+        ...(omitIend ? [] : [pngChunk(context, 'IEND', Buffer.alloc(0))]),
+    ]);
 }
 
 function riffChunk(type, data) {
@@ -224,12 +246,9 @@ test('complete malformed EXIF is terminal and does not hide later valid metadata
     ]);
     assert.equal(context.extractMetadata(exactArrayBuffer(jpeg), { format: 'jpeg' }).Description, 'later valid metadata');
 
-    const png = Buffer.concat([
-        Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
-        pngChunk(context, 'eXIf', malformedTiff),
-        pngChunk(context, 'eXIf', validTiff),
-        pngChunk(context, 'IEND', Buffer.alloc(0)),
-    ]);
+    const png = makeValidPng(context, {
+        afterIdat: [pngChunk(context, 'eXIf', malformedTiff), pngChunk(context, 'eXIf', validTiff)],
+    });
     assert.equal(context.extractMetadata(exactArrayBuffer(png), { format: 'png' }).Description, 'later valid metadata');
 
     const webp = makeWebp([riffChunk('EXIF', malformedTiff), riffChunk('EXIF', validTiff)]);
@@ -252,11 +271,7 @@ test('JPEG APP1, PNG eXIf, WebP EXIF, and AVIF Exif items share the structural T
     ]);
     assert.equal(context.extractMetadata(exactArrayBuffer(app1), { format: 'jpeg' }).Description, 'shared description');
 
-    const png = Buffer.concat([
-        Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
-        pngChunk(context, 'eXIf', tiff),
-        pngChunk(context, 'IEND', Buffer.alloc(0)),
-    ]);
+    const png = makeValidPng(context, { afterIdat: [pngChunk(context, 'eXIf', tiff)] });
     assert.equal(context.extractMetadata(exactArrayBuffer(png), { format: 'png' }).Description, 'shared description');
 
     const webp = makeWebp([riffChunk('EXIF', exifPayload)]);
@@ -354,7 +369,7 @@ test('truncated JPEG, PNG, WebP, and AVIF EXIF containers remain unresolved', ()
     assert.equal(context.extractMetadata(exactArrayBuffer(jpeg), { format: 'jpeg', inputComplete: false }).parserState, 'unresolved');
 
     const pngHead = Buffer.concat([
-        Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+        makeValidPng(context, { omitIend: true }),
         be32(tiff.length),
         Buffer.from('eXIf', 'ascii'),
         tiff.subarray(0, 20),
@@ -389,7 +404,7 @@ test('JPEG ignores EXIF-like bytes in an unrelated comment segment', () => {
 
 test('PNG ignores metadata-looking bytes embedded inside an IDAT chunk', () => {
     const context = parserContext();
-    const innerPayload = Buffer.from('parameters\0forged prompt', 'latin1');
+    const innerPayload = Buffer.from('parameters\0forged prompt' + ' '.repeat(5), 'latin1');
     const fakeTextChunk = Buffer.concat([
         be32(innerPayload.length),
         Buffer.from('tEXt', 'ascii'),
@@ -397,14 +412,14 @@ test('PNG ignores metadata-looking bytes embedded inside an IDAT chunk', () => {
         Buffer.alloc(4),
     ]);
     const ihdr = Buffer.alloc(13);
-    ihdr.writeUInt32BE(1, 0);
+    ihdr.writeUInt32BE(10, 0);
     ihdr.writeUInt32BE(1, 4);
     ihdr[8] = 8;
     ihdr[9] = 6;
     const png = Buffer.concat([
         Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
         pngChunk(context, 'IHDR', ihdr),
-        pngChunk(context, 'IDAT', fakeTextChunk),
+        pngChunk(context, 'IDAT', zlib.deflateSync(fakeTextChunk)),
         pngChunk(context, 'IEND', Buffer.alloc(0)),
     ]);
     const metadata = context.extractMetadata(exactArrayBuffer(png), { format: 'png' });

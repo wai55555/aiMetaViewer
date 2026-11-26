@@ -2,6 +2,10 @@
 (function (root) {
     'use strict';
 
+    if (root.__aiMetaViewerAbortUiModule === true) {
+        throw new Error('AI Meta Viewer UI module aborted by navigation guard');
+    }
+
     const MAX_NODES = 10000;
     const OUTPUT_TYPE = /^(?:SaveImage|PreviewImage|SaveAnimated|VideoCombine|VHS_VideoCombine|SaveVideo|SaveGif)/i;
     const TEXT_TYPE = /(?:CLIPTextEncode|TextEncode)/i;

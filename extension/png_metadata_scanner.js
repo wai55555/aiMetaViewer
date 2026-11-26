@@ -26,8 +26,10 @@
     const MAX_TEXT_CHUNK_BYTES = 8 * 1024 * 1024;
     const MAX_EXIF_CHUNK_PREFIX_BYTES = 64 * 1024;
     const MAX_STEALTH_HEADER_ROWS = 160;
+    const MAX_STEALTH_PIXELS = 1 << 25; // 33,554,432
     const MAX_IDAT_INFLATE_PUSH_BYTES = 4 * 1024;
     const BITS_PER_BYTE = 8;
+    const UTF8_FATAL_DECODER = new TextDecoder('utf-8', { fatal: true });
     const PNG_FILTER_TYPES = Object.freeze([0, 1, 2, 3, 4]);
     const PNG_CHANNEL_COUNTS = Object.freeze({
         0: 1,
@@ -70,7 +72,15 @@
     const CHUNK_IEND = 'IEND';
     const CHUNK_TEXT = 'tEXt';
     const CHUNK_ITXT = 'iTXt';
+    const CHUNK_ZTXT = 'zTXt';
     const CHUNK_EXIF = 'eXIf';
+    const ZTXT_PREVIEW_BYTES = 128;
+    const MAX_ZTXT_COMPRESSED_BYTES = 2 * 1024 * 1024;
+    const MAX_TRAILING_BYTES = 1024 * 1024;
+    const ZTXT_ALLOWED_KEYWORDS = new Set([
+        'parameters', 'prompt', 'workflow', 'generation_data',
+        'Comment', 'Description', 'Software', 'Source',
+    ]);
     const TEXT_INFLATE_CHUNK_SIZE = 16 * 1024;
     const LAYOUTS = Object.freeze({
         '2:8': Object.freeze({ bytesPerPixel: 3, pixelStride: 3, candidates: ['RGB'], offsets: [0, 1, 2] }),
@@ -187,7 +197,7 @@
     }
 
     function decodeUtf8Strict(bytes) {
-        return new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+        return UTF8_FATAL_DECODER.decode(bytes);
     }
 
     function findZero(bytes, start) {
@@ -204,7 +214,7 @@
             const byte = data[index];
             if (byte < 0x20 || (byte > 0x7E && byte < 0xA1)) return null;
         }
-        const keyword = decodeLatin1(data.slice(0, separator));
+        const keyword = decodeLatin1(data.subarray(0, separator));
         return isSafeKeyword(keyword) ? keyword : null;
     }
 
@@ -591,10 +601,13 @@
             this.scanlineOffset = 0;
             this.rowsCompleted = 0;
             this.decodedBytes = 0;
+            this.stopped = false;
         }
 
         consume(output, absoluteOffset) {
+            if (this.stopped) return;
             for (let index = 0; index < output.length; index += 1) {
+                if (this.stopped) return;
                 if (this.rowsCompleted >= this.layout.height) {
                     throw new PngStructuralError(
                         'PNG IDAT has excess decoded scanlines.',
@@ -736,7 +749,7 @@
             addTextDiagnostic(collector, CHUNK_TEXT, offset, 'invalid tEXt keyword grammar');
             return;
         }
-        const keywordBytes = data.slice(0, separator);
+        const keywordBytes = data.subarray(0, separator);
         for (const byte of keywordBytes) {
             if (byte < 0x20 || (byte > 0x7E && byte < 0xA1)) {
                 addTextDiagnostic(collector, CHUNK_TEXT, offset, 'invalid Latin-1 keyword');
@@ -748,7 +761,7 @@
             addTextDiagnostic(collector, CHUNK_TEXT, offset, 'dangerous keyword rejected');
             return;
         }
-        const text = decodeLatin1(data.slice(separator + 1));
+        const text = decodeLatin1(data.subarray(separator + 1));
         metadata[keyword] = text;
     }
 
@@ -758,7 +771,7 @@
             addTextDiagnostic(collector, CHUNK_ITXT, offset, 'invalid iTXt keyword grammar');
             return;
         }
-        const keywordBytes = data.slice(0, keywordEnd);
+        const keywordBytes = data.subarray(0, keywordEnd);
         for (const byte of keywordBytes) {
             if (byte < 0x20 || (byte > 0x7E && byte < 0xA1)) {
                 addTextDiagnostic(collector, CHUNK_ITXT, offset, 'invalid Latin-1 keyword');
@@ -788,7 +801,7 @@
             return;
         }
         try {
-            const language = decodeUtf8Strict(data.slice(cursor, languageEnd));
+            const language = decodeUtf8Strict(data.subarray(cursor, languageEnd));
             if (!/^[A-Za-z0-9-]*$/.test(language)) {
                 addTextDiagnostic(collector, CHUNK_ITXT, offset, 'iTXt language syntax is invalid', keyword);
                 return;
@@ -804,7 +817,7 @@
             return;
         }
         try {
-            decodeUtf8Strict(data.slice(cursor, translatedEnd));
+            decodeUtf8Strict(data.subarray(cursor, translatedEnd));
         } catch (error) {
             addTextDiagnostic(collector, CHUNK_ITXT, offset, 'iTXt translated keyword is not strict UTF-8', keyword);
             return;
@@ -814,11 +827,102 @@
             addTextDiagnostic(collector, CHUNK_ITXT, offset, 'dangerous keyword rejected');
             return;
         }
-        const textBytes = data.slice(cursor);
+        const textBytes = data.subarray(cursor);
         const text = compressionFlag === 0
             ? decodeUncompressedItxt(textBytes, offset, keyword, collector)
             : inflateItxt(textBytes, offset, keyword, collector);
         if (text !== null) metadata[keyword] = text;
+    }
+
+    function addZtxtResourceDiagnostic(collector, offset, limit, observed, keyword) {
+        const entry = { category: 'resource-limit', chunkType: CHUNK_ZTXT, offset, limit, observed };
+        if (keyword && isSafeKeyword(keyword)) entry.keyword = keyword;
+        collector.add(entry);
+    }
+
+    function isValidZtxtKeywordBytes(bytes) {
+        for (const byte of bytes) {
+            if (byte < 0x20 || (byte > 0x7E && byte < 0xA1)) return false;
+        }
+        return true;
+    }
+
+    function inflateZtxt(bytes, offset, keyword, collector) {
+        if (!hasPako()) throw new PngScannerDependencyError('PNG scanner requires pako.Inflate for zTXt.');
+        let outputSize = 0;
+        let overflow = false;
+        const outputParts = [];
+        const inflator = new globalObject.pako.Inflate({ chunkSize: TEXT_INFLATE_CHUNK_SIZE });
+        inflator.onData = (chunk) => {
+            const part = chunk instanceof Uint8Array ? chunk : new Uint8Array(chunk);
+            outputSize += part.length;
+            if (outputSize > MAX_TEXT_CHUNK_BYTES) {
+                overflow = true;
+                return;
+            }
+            outputParts.push(part.slice());
+        };
+        inflator.onEnd = function onZtxtInflateEnd(status) {
+            this.err = status;
+            this.msg = this.strm && this.strm.msg ? this.strm.msg : '';
+        };
+        let inputOffset = 0;
+        let pushed = true;
+        do {
+            const end = Math.min(bytes.length, inputOffset + MAX_IDAT_INFLATE_PUSH_BYTES);
+            pushed = inflator.push(bytes.subarray(inputOffset, end), end >= bytes.length);
+            inputOffset = end;
+            if (overflow || !pushed || inflator.err !== 0) break;
+        } while (inputOffset < bytes.length);
+
+        if (overflow) {
+            addZtxtResourceDiagnostic(collector, offset, 'MAX_TEXT_CHUNK_BYTES', outputSize, keyword);
+            return null;
+        }
+        if (!pushed || inflator.err !== 0 || !inflator.ended) {
+            addTextDiagnostic(collector, CHUNK_ZTXT, offset, 'compressed zTXt stream is invalid', keyword);
+            return null;
+        }
+        const output = new Uint8Array(outputSize);
+        let cursor = 0;
+        for (const part of outputParts) {
+            output.set(part, cursor);
+            cursor += part.length;
+        }
+        return output;
+    }
+
+    function parseZtxt(data, offset, collector, metadata) {
+        const separator = findZero(data, 0);
+        if (separator <= 0 || separator > 79) {
+            addTextDiagnostic(collector, CHUNK_ZTXT, offset, 'invalid zTXt keyword grammar');
+            return;
+        }
+        const keywordBytes = data.subarray(0, separator);
+        if (!isValidZtxtKeywordBytes(keywordBytes)) {
+            addTextDiagnostic(collector, CHUNK_ZTXT, offset, 'invalid Latin-1 keyword');
+            return;
+        }
+        const keyword = decodeLatin1(keywordBytes);
+        if (!isSafeKeyword(keyword) || !ZTXT_ALLOWED_KEYWORDS.has(keyword)) return;
+        if (metadata[keyword] !== undefined) return;
+        if (separator + 2 > data.length) {
+            addTextDiagnostic(collector, CHUNK_ZTXT, offset, 'zTXt compression method is missing', keyword);
+            return;
+        }
+        const compressionMethod = data[separator + 1];
+        if (compressionMethod !== 0) {
+            addTextDiagnostic(collector, CHUNK_ZTXT, offset, 'unsupported zTXt compression method', keyword, null, compressionMethod);
+            return;
+        }
+        const compressedBytes = data.subarray(separator + 2);
+        if (compressedBytes.length > MAX_ZTXT_COMPRESSED_BYTES) {
+            addZtxtResourceDiagnostic(collector, offset, 'MAX_ZTXT_COMPRESSED_BYTES', compressedBytes.length, keyword);
+            return;
+        }
+        const output = inflateZtxt(compressedBytes, offset, keyword, collector);
+        if (output === null) return;
+        metadata[keyword] = decodeLatin1(output);
     }
 
     function decodeUncompressedItxt(bytes, offset, keyword, collector) {
@@ -894,6 +998,8 @@
     class PngChunkScanner {
         constructor(options) {
             this.options = options || {};
+            this.debugEnabled = this.options.debugAllDetections === true;
+            this.debugCarriers = this.debugEnabled ? [] : null;
             this.collector = new DiagnosticCollector();
             this.metadata = Object.create(null);
             this.state = 'SIGNATURE';
@@ -924,6 +1030,7 @@
             this.iendSeen = false;
             this.stealthStopped = false;
             this.stealthSuppressedByNormalMetadata = false;
+            this.idatFramingOnly = false;
             this.analysisEndReason = null;
             this.candidates = [];
             this.stealthResult = null;
@@ -939,6 +1046,7 @@
         feed(input) {
             this.checkAbort();
             const bytes = toUint8Array(input);
+            const startedDone = this.state === 'DONE';
             let cursor = 0;
             while (cursor < bytes.length && this.state !== 'DONE') {
                 this.checkAbort();
@@ -948,6 +1056,9 @@
                 else if (this.state === 'CHUNK_DATA') cursor += this.consumeData(bytes, cursor);
                 else if (this.state === 'CHUNK_CRC') cursor += this.consumeFixed(bytes, cursor, CHUNK_CRC_BYTES, 'CHUNK_COMPLETE');
                 else throw new PngStructuralError(`Unknown PNG parser state: ${this.state}`);
+            }
+            if (!startedDone && this.state === 'DONE' && cursor < bytes.length) {
+                this.scanTrailingBytes(bytes.subarray(cursor), this.offset);
             }
         }
 
@@ -988,6 +1099,7 @@
             this.currentLength = readUint32(lengthBytes, 0);
             this.currentData = null;
             this.currentDataOffset = 0;
+            this.zTxtState = null;
             this.state = 'CHUNK_TYPE';
             this.field = new Uint8Array(CHUNK_TYPE_BYTES);
             this.fieldOffset = 0;
@@ -1061,6 +1173,16 @@
                     this.currentData = null;
                     addTextDiagnostic(this.collector, this.currentType, this.currentChunkOffset, 'text chunk input exceeds limit', null, 'MAX_TEXT_CHUNK_BYTES', this.currentLength);
                 }
+            } else if (this.currentType === CHUNK_ZTXT) {
+                this.currentData = null;
+                this.zTxtState = {
+                    preview: new Uint8Array(Math.min(this.currentLength, ZTXT_PREVIEW_BYTES)),
+                    previewLength: 0,
+                    decided: false,
+                    allowed: false,
+                    skip: false,
+                    keyword: null,
+                };
             } else if (this.currentType === CHUNK_EXIF) {
                 this.currentData = new Uint8Array(Math.min(this.currentLength, MAX_EXIF_CHUNK_PREFIX_BYTES));
             }
@@ -1072,6 +1194,12 @@
         }
 
         ensureIdatProcessor() {
+            if (this.idatFramingOnly) {
+                this.idatInflate = null;
+                this.rowAssembler = null;
+                this.idatStructureValidator = null;
+                return;
+            }
             if (!this.idatInflate) {
                 this.rowAssembler = this.layout
                     ? new RowAssembler(
@@ -1096,37 +1224,49 @@
         consumeData(bytes, cursor) {
             const remaining = this.currentLength - this.currentDataOffset;
             const idatNeedsProcessing = this.currentType === CHUNK_IDAT;
-            const amount = Math.min(
+            let amount = Math.min(
                 bytes.length - cursor,
                 remaining,
                 idatNeedsProcessing ? MAX_IDAT_INFLATE_PUSH_BYTES : remaining,
             );
+            if (this.currentType === CHUNK_ZTXT && this.zTxtState && !this.zTxtState.decided) {
+                amount = Math.min(amount, this.zTxtState.preview.length - this.zTxtState.previewLength);
+            }
             const slice = bytes.subarray(cursor, cursor + amount);
             if (this.currentCrcState) {
                 this.currentCrcState = globalObject.updateCrc32(this.currentCrcState, slice);
             }
-            if (this.currentData && this.currentType !== CHUNK_IDAT && this.currentDataOffset < this.currentData.length) {
+            if (this.currentType === CHUNK_ZTXT) {
+                this.consumeZtxt(slice);
+            } else if (this.currentData && this.currentType !== CHUNK_IDAT && this.currentDataOffset < this.currentData.length) {
                 const copyLength = Math.min(amount, this.currentData.length - this.currentDataOffset);
                 this.currentData.set(slice.subarray(0, copyLength), this.currentDataOffset);
             }
-            if (this.currentType === CHUNK_IDAT && this.idatInflate) {
-                if (this.idatInflate.ended) {
+            if (this.currentType === CHUNK_IDAT && this.idatInflate && !this.idatFramingOnly) {
+                const inflator = this.idatInflate;
+                if (inflator.ended) {
                     throw new PngStructuralError(
                         'PNG IDAT contains data after the zlib stream ended.',
                         this.idatChunkOffset,
                     );
                 }
-                const pushed = this.idatInflate.push(slice, false);
-                if (!pushed || this.idatInflate.err !== 0) {
+                const pushed = inflator.push(slice, false);
+                if (!this.idatFramingOnly && (!pushed || inflator.err !== 0)) {
                     throw new PngStructuralError('PNG IDAT zlib stream is invalid.', this.idatChunkOffset);
                 }
-                if (this.idatInflate.ended && this.idatInflate.strm && this.idatInflate.strm.avail_in > 0) {
+                if (!this.idatFramingOnly && inflator.ended && inflator.strm && inflator.strm.avail_in > 0) {
                     throw new PngStructuralError(
                         'PNG IDAT contains data after the zlib stream ended.',
                         this.idatChunkOffset,
                     );
                 }
                 this.checkStealthStop();
+                if (this.idatFramingOnly) {
+                    if (this.rowAssembler) this.rowAssembler.stopped = true;
+                    this.idatInflate = null;
+                    this.rowAssembler = null;
+                    this.idatStructureValidator = null;
+                }
             }
             this.currentDataOffset += amount;
             this.offset += amount;
@@ -1138,11 +1278,78 @@
             return amount;
         }
 
+        consumeZtxt(slice) {
+            const state = this.zTxtState;
+            if (!state || state.skip) return;
+            if (!state.decided) {
+                state.preview.set(slice, state.previewLength);
+                state.previewLength += slice.length;
+                const preview = state.preview.subarray(0, state.previewLength);
+                const separator = findZero(preview, 0);
+                if (separator > 79 || separator === 0) {
+                    addTextDiagnostic(this.collector, CHUNK_ZTXT, this.currentChunkOffset, 'invalid zTXt keyword grammar');
+                    state.decided = true;
+                    state.skip = true;
+                    return;
+                }
+                if (separator < 0) {
+                    if (state.previewLength >= state.preview.length) {
+                        addTextDiagnostic(this.collector, CHUNK_ZTXT, this.currentChunkOffset, 'invalid zTXt keyword grammar');
+                        state.decided = true;
+                        state.skip = true;
+                    }
+                    return;
+                }
+                if (state.previewLength < separator + 2) return;
+                const keywordBytes = preview.slice(0, separator);
+                if (!isValidZtxtKeywordBytes(keywordBytes)) {
+                    addTextDiagnostic(this.collector, CHUNK_ZTXT, this.currentChunkOffset, 'invalid Latin-1 keyword');
+                    state.decided = true;
+                    state.skip = true;
+                    return;
+                }
+                const keyword = decodeLatin1(keywordBytes);
+                state.keyword = keyword;
+                if (!ZTXT_ALLOWED_KEYWORDS.has(keyword)) {
+                    state.decided = true;
+                    state.skip = true;
+                    return;
+                }
+                const compressionMethod = preview[separator + 1];
+                if (compressionMethod !== 0) {
+                    addTextDiagnostic(this.collector, CHUNK_ZTXT, this.currentChunkOffset, 'unsupported zTXt compression method', keyword, null, compressionMethod);
+                    state.decided = true;
+                    state.skip = true;
+                    return;
+                }
+                const compressedLength = this.currentLength - (separator + 2);
+                if (compressedLength > MAX_ZTXT_COMPRESSED_BYTES) {
+                    addZtxtResourceDiagnostic(this.collector, this.currentChunkOffset, 'MAX_ZTXT_COMPRESSED_BYTES', compressedLength, keyword);
+                    state.decided = true;
+                    state.skip = true;
+                    return;
+                }
+                state.decided = true;
+                state.allowed = true;
+                this.currentData = new Uint8Array(this.currentLength);
+                this.currentData.set(preview.subarray(0, state.previewLength), 0);
+                return;
+            }
+            if (state.allowed && this.currentData) {
+                this.currentData.set(slice, this.currentDataOffset);
+            }
+        }
+
         completeChunk(crcBytes) {
+            if (this.currentType === CHUNK_ZTXT && this.zTxtState && !this.zTxtState.decided) {
+                addTextDiagnostic(this.collector, CHUNK_ZTXT, this.currentChunkOffset, 'invalid zTXt keyword grammar');
+                this.zTxtState.decided = true;
+                this.zTxtState.skip = true;
+            }
             const expectedCrc = readUint32(crcBytes, 0);
             const actualCrc = globalObject.finalizeCrc32(this.currentCrcState) >>> 0;
             if (actualCrc !== expectedCrc) {
-                if (this.currentType === CHUNK_TEXT || this.currentType === CHUNK_ITXT) {
+                if (this.currentType === CHUNK_TEXT || this.currentType === CHUNK_ITXT || this.currentType === CHUNK_ZTXT) {
                     const keyword = this.currentData ? getSafeTextKeyword(this.currentData) : null;
                     addTextDiagnostic(
                         this.collector,
@@ -1164,6 +1371,7 @@
             this.currentData = null;
             this.currentDataOffset = 0;
             this.currentCrcState = null;
+            this.zTxtState = null;
             if (this.state !== 'DONE') this.state = 'CHUNK_LENGTH';
         }
 
@@ -1171,14 +1379,32 @@
             if (this.currentType === CHUNK_IHDR) this.acceptIhdr();
             else if (this.currentType === CHUNK_TEXT || this.currentType === CHUNK_ITXT) {
                 if (this.currentData) {
-                    parseTextChunk(this.currentType, this.currentData, this.currentChunkOffset, this.collector, this.metadata);
-                    if (Object.keys(this.metadata).length > 0) this.suppressStealthForNormalMetadata();
+                    const parsed = Object.create(null);
+                    parseTextChunk(this.currentType, this.currentData, this.currentChunkOffset, this.collector, parsed);
+                    this.captureDebugMetadata(this.currentType, parsed, 'body');
+                    Object.assign(this.metadata, parsed);
+                    if (this.hasStealthSuppressingMetadata()) this.suppressStealthForNormalMetadata();
+                }
+            } else if (this.currentType === CHUNK_ZTXT) {
+                if (this.currentData && this.zTxtState?.allowed) {
+                    if (this.debugEnabled) {
+                        const parsed = Object.create(null);
+                        parseZtxt(this.currentData, this.currentChunkOffset, this.collector, parsed);
+                        this.captureDebugMetadata(this.currentType, parsed, 'body');
+                        for (const [key, value] of Object.entries(parsed)) {
+                            if (this.metadata[key] === undefined) this.metadata[key] = value;
+                        }
+                    } else {
+                        parseZtxt(this.currentData, this.currentChunkOffset, this.collector, this.metadata);
+                    }
+                    if (this.hasStealthSuppressingMetadata()) this.suppressStealthForNormalMetadata();
                 }
             } else if (this.currentType === CHUNK_EXIF) {
                 const parsed = globalObject.extractExifPayload(this.currentData || new Uint8Array(0), {
                     declaredLength: this.currentLength,
                 });
                 if (parsed && Object.keys(parsed).length > 0) {
+                    this.captureDebugMetadata('eXIf', parsed, 'body');
                     Object.assign(this.metadata, parsed);
                     if (parsed.metadataPartial === true) {
                         this.metadataPartial = true;
@@ -1188,7 +1414,7 @@
                             parserState: 'partial',
                         });
                     }
-                    this.suppressStealthForNormalMetadata();
+                    if (this.hasStealthSuppressingMetadata()) this.suppressStealthForNormalMetadata();
                 } else if (parsed?.parserState === 'unresolved' || parsed?.parserState === 'resource-limit') {
                     this.metadataChunkIncomplete = true;
                     this.collector.add({
@@ -1204,11 +1430,28 @@
             }
         }
 
+        addDebugCarrier(carrier, data) {
+            if (!this.debugEnabled) return;
+            this.debugCarriers.push(Object.assign({ carrier }, data));
+        }
+
+        captureDebugMetadata(carrier, parsed, location) {
+            if (!this.debugEnabled || !parsed) return;
+            for (const [key, value] of Object.entries(parsed)) {
+                this.addDebugCarrier(carrier, { key, value, location });
+            }
+        }
+
+        hasStealthSuppressingMetadata() {
+            return !this.debugEnabled && Object.keys(this.metadata).some(key => key !== 'Software');
+        }
+
         suppressStealthForNormalMetadata() {
             if (this.stealthSuppressedByNormalMetadata) return;
             this.stealthSuppressedByNormalMetadata = true;
             this.stealthStopped = true;
             this.stealthResult = null;
+            this.idatFramingOnly = true;
             const diagnosticOffset = this.idatChunkOffset === null ? this.offset : this.idatChunkOffset;
             releaseCandidates(this.candidates, diagnosticOffset);
             for (const candidate of this.candidates) {
@@ -1216,7 +1459,13 @@
                 candidate.releaseDiagnosticPending = false;
                 candidate.releaseDiagnosticEmitted = true;
             }
-            if (this.rowAssembler) this.rowAssembler.candidates = [];
+            if (this.rowAssembler) {
+                this.rowAssembler.candidates = [];
+                this.rowAssembler.stopped = true;
+            }
+            this.idatInflate = null;
+            this.idatStructureValidator = null;
+            this.rowAssembler = null;
         }
 
         acceptIhdr() {
@@ -1234,6 +1483,25 @@
             }
             this.ihdr = { width, height, bitDepth, colorType, interlace };
             this.layout = makeLayout(width, height, bitDepth, colorType, interlace, this.collector, this.currentChunkOffset);
+            const pixelCount = width * height;
+            if (pixelCount > MAX_STEALTH_PIXELS && !this.debugEnabled) {
+                addUnsupportedDiagnostic(this.collector, 'unsupported-stealth-pixel-limit', {
+                    width,
+                    height,
+                    pixelCount,
+                    limit: MAX_STEALTH_PIXELS,
+                });
+                this.candidates = [];
+                this.structureLayout = null;
+                this.idatFramingOnly = true;
+                return;
+            }
+            if (!this.layout) {
+                this.candidates = [];
+                this.structureLayout = null;
+                this.idatFramingOnly = true;
+                return;
+            }
             this.structureLayout = makeStructureLayout(
                 width,
                 height,
@@ -1242,14 +1510,13 @@
                 interlace,
                 this.currentChunkOffset,
             );
-            if (this.layout) {
-                const totalRgbBits = width * height * 3;
-                const totalAlphaBits = width * height;
-                this.candidates = [];
-                for (const mode of this.layout.candidates) {
-                    this.candidates.push(makeCandidate(mode, width, height, mode === 'RGB' ? totalRgbBits : totalAlphaBits));
-                }
+            this.candidates = [];
+            const totalRgbBits = width * height * 3;
+            const totalAlphaBits = width * height;
+            for (const mode of this.layout.candidates) {
+                this.candidates.push(makeCandidate(mode, width, height, mode === 'RGB' ? totalRgbBits : totalAlphaBits));
             }
+            this.idatFramingOnly = false;
         }
 
         checkStealthStop() {
@@ -1259,23 +1526,49 @@
             if (completed) {
                 this.stealthResult = completed.result;
                 this.stealthStopped = true;
+                this.addDebugCarrier('stealth', {
+                    mode: completed.mode,
+                    signature: completed.signature,
+                    compressed: completed.compressed === true,
+                    value: completed.result.value,
+                    location: 'IDAT',
+                    outcome: 'matched',
+                });
                 releaseCandidates(this.candidates, diagnosticOffset, completed);
                 if (this.rowAssembler) this.rowAssembler.candidates = [];
                 return;
             }
             if (allCandidatesRejected(this.candidates)) {
                 this.stealthStopped = true;
+                this.idatFramingOnly = true;
                 this.analysisEndReason = END_INTENTIONAL_STOP;
-                this.collector.add({ category: 'intentional-stealth-stop', offset: diagnosticOffset });
+                this.collector.add({
+                    category: 'intentional-stealth-stop',
+                    offset: diagnosticOffset,
+                    decodedRows: this.rowAssembler ? this.rowAssembler.rowsCompleted : 0,
+                });
+                for (const candidate of this.candidates) {
+                    this.addDebugCarrier('stealth', {
+                        mode: candidate.mode,
+                        signature: candidate.signature,
+                        outcome: 'rejected',
+                        reason: candidate.rejectionDetail || 'signature-mismatch',
+                        location: 'IDAT',
+                    });
+                }
                 releaseCandidates(this.candidates, diagnosticOffset);
-                if (this.rowAssembler) this.rowAssembler.candidates = [];
+                if (this.rowAssembler) {
+                    this.rowAssembler.candidates = [];
+                    this.rowAssembler.stopped = true;
+                }
             }
         }
 
         finishIdat() {
             this.idatEnded = true;
             this.idatOpen = false;
-            if (!this.idatInflate) {
+            if (this.idatFramingOnly || !this.idatInflate) {
+                this.idatInflate = null;
                 this.rowAssembler = null;
                 this.idatStructureValidator = null;
                 return;
@@ -1312,7 +1605,130 @@
             return this.makeResult();
         }
 
+        mergeTrailingMetadata(source) {
+            if (!source || typeof source !== 'object') return;
+            let merged = false;
+            for (const key of Object.keys(source)) {
+                const adopted = this.metadata[key] === undefined;
+                this.addDebugCarrier('trailing', {
+                    key,
+                    value: source[key],
+                    location: 'after-IEND',
+                    outcome: adopted ? 'adopted' : 'suppressed-existing',
+                });
+                if (adopted) {
+                    this.metadata[key] = source[key];
+                    merged = true;
+                }
+            }
+            if (merged && source.metadataPartial === true) this.metadataPartial = true;
+        }
+
+        scanTrailingBytes(bytes, absoluteStart) {
+            if (!bytes || bytes.length < 12) return;
+            const end = Math.min(bytes.length, MAX_TRAILING_BYTES);
+            let cursor = 0;
+            while (cursor + 12 <= end) {
+                const length = readUint32(bytes, cursor);
+                const typeBytes = bytes.subarray(cursor + 4, cursor + 8);
+                if (!typeBytes.every(isChunkTypeByte)) return;
+                const type = ascii(typeBytes);
+                const dataStart = cursor + 8;
+                const dataEnd = dataStart + length;
+                const chunkEnd = dataEnd + 4;
+                if (!Number.isSafeInteger(chunkEnd) || chunkEnd > end) return;
+                const data = bytes.subarray(dataStart, dataEnd);
+                const storedCrc = readUint32(bytes, dataEnd);
+                const isTargetType = type === CHUNK_TEXT || type === CHUNK_ITXT ||
+                    type === CHUNK_ZTXT || type === CHUNK_EXIF;
+
+                if (!isTargetType) {
+                    cursor = chunkEnd;
+                    continue;
+                }
+
+                if (type === CHUNK_ZTXT) {
+                    const separator = findZero(data, 0);
+                    if (separator <= 0 || separator > 79) {
+                        addTextDiagnostic(this.collector, CHUNK_ZTXT, absoluteStart + cursor, 'invalid zTXt keyword grammar');
+                        cursor = chunkEnd;
+                        continue;
+                    }
+                    const keywordBytes = data.subarray(0, separator);
+                    if (!isValidZtxtKeywordBytes(keywordBytes)) {
+                        addTextDiagnostic(this.collector, CHUNK_ZTXT, absoluteStart + cursor, 'invalid Latin-1 keyword');
+                        cursor = chunkEnd;
+                        continue;
+                    }
+                    const keyword = decodeLatin1(keywordBytes);
+                    if (!ZTXT_ALLOWED_KEYWORDS.has(keyword)) {
+                        cursor = chunkEnd;
+                        continue;
+                    }
+                    if (separator + 2 > data.length) {
+                        addTextDiagnostic(this.collector, CHUNK_ZTXT, absoluteStart + cursor, 'zTXt compression method is missing', keyword);
+                        cursor = chunkEnd;
+                        continue;
+                    }
+                    if (data[separator + 1] !== 0) {
+                        addTextDiagnostic(this.collector, CHUNK_ZTXT, absoluteStart + cursor, 'unsupported zTXt compression method', keyword, null, data[separator + 1]);
+                        cursor = chunkEnd;
+                        continue;
+                    }
+                    const compressedLength = data.length - separator - 2;
+                    if (compressedLength > MAX_ZTXT_COMPRESSED_BYTES) {
+                        addZtxtResourceDiagnostic(this.collector, absoluteStart + cursor, 'MAX_ZTXT_COMPRESSED_BYTES', compressedLength, keyword);
+                        cursor = chunkEnd;
+                        continue;
+                    }
+                }
+
+                let crcState = globalObject.createCrc32State();
+                crcState = globalObject.updateCrc32(crcState, typeBytes);
+                crcState = globalObject.updateCrc32(crcState, data);
+                const actualCrc = globalObject.finalizeCrc32(crcState) >>> 0;
+                if (actualCrc !== storedCrc) {
+                    cursor = chunkEnd;
+                    continue;
+                }
+
+                if (type === CHUNK_TEXT) {
+                    const parsed = {};
+                    parseTtext(data, absoluteStart + cursor, this.collector, parsed);
+                    this.mergeTrailingMetadata(parsed);
+                } else if (type === CHUNK_ITXT) {
+                    const parsed = {};
+                    parseItxt(data, absoluteStart + cursor, this.collector, parsed);
+                    this.mergeTrailingMetadata(parsed);
+                } else if (type === CHUNK_ZTXT) {
+                    const parsed = {};
+                    parseZtxt(data, absoluteStart + cursor, this.collector, parsed);
+                    this.mergeTrailingMetadata(parsed);
+                } else if (type === CHUNK_EXIF) {
+                    const parsed = globalObject.extractExifPayload(
+                        data.subarray(0, Math.min(data.length, MAX_EXIF_CHUNK_PREFIX_BYTES)),
+                        { declaredLength: data.length },
+                    );
+                    this.mergeTrailingMetadata(parsed);
+                }
+                cursor = chunkEnd;
+            }
+        }
+
         makeResult() {
+            const result = this.makeResultInternal();
+            if (!this.debugEnabled) return result;
+            result.debug = {
+                enabled: true,
+                carriers: this.debugCarriers.slice(),
+                limited: this.idatSeen
+                    ? (this.idatFramingOnly ? 'png-idat-framing-only' : null)
+                    : 'png-idat-not-acquired',
+            };
+            return result;
+        }
+
+        makeResultInternal() {
             const diagnosticOffset = this.idatChunkOffset === null ? this.offset : this.idatChunkOffset;
             if (this.iendSeen && this.analysisEndReason === END_VALID_IEND) {
                 flushCandidateReleaseDiagnostics(
@@ -1332,10 +1748,19 @@
                 return { status: STATUS_RESOURCE_LIMIT, limit: this.resourceLimit, observed: this.resourceObserved, diagnostics };
             }
             if (!this.iendSeen) return { status: STATUS_INVALID, reason: 'truncated', diagnostics };
-            if (Object.keys(this.metadata).length > 0) {
+            const metadataKeys = Object.keys(this.metadata);
+            const hasNonSoftwareMetadata = metadataKeys.some(key => key !== 'Software');
+            if (hasNonSoftwareMetadata) {
+                let metadata = this.metadata;
+                if (this.debugEnabled && this.stealthResult) {
+                    metadata = Object.assign(Object.create(null), this.metadata);
+                    if (metadata[this.stealthResult.key] === undefined) {
+                        metadata[this.stealthResult.key] = this.stealthResult.value;
+                    }
+                }
                 return {
                     status: STATUS_NORMAL,
-                    metadata: this.metadata,
+                    metadata,
                     ...(this.metadataPartial || this.metadataChunkIncomplete ? { metadataPartial: true } : {}),
                     diagnostics,
                 };
@@ -1347,6 +1772,14 @@
                     status: STATUS_STEALTH,
                     metadata,
                     ...(this.metadataChunkIncomplete ? { metadataPartial: true } : {}),
+                    diagnostics,
+                };
+            }
+            if (metadataKeys.length > 0) {
+                return {
+                    status: STATUS_NORMAL,
+                    metadata: this.metadata,
+                    ...(this.metadataPartial || this.metadataChunkIncomplete ? { metadataPartial: true } : {}),
                     diagnostics,
                 };
             }
@@ -1517,6 +1950,10 @@
         MAX_STEALTH_COMPRESSED_BYTES,
         MAX_STEALTH_METADATA_BYTES,
         MAX_TEXT_CHUNK_BYTES,
+        MAX_STEALTH_HEADER_ROWS,
+        MAX_STEALTH_PIXELS,
+        MAX_ZTXT_COMPRESSED_BYTES,
+        MAX_TRAILING_BYTES,
         ANALYSIS_END_REASONS: Object.freeze([
             END_VALID_IEND,
             END_TRUNCATED,

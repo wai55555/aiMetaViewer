@@ -36,6 +36,26 @@ let debugLogContainer = null;
 const MAX_DEBUG_LOGS = 20; // 最大保持ログ数
 let contentSettingsReady = false;
 
+// 遅延 A（ui.js + ui.css）は Service Worker に注入を要求する。
+// 応答が success になるまで loaded にしないため、失敗時は次の操作で再試行できる。
+const lazyUiModule = createLazyModuleClient({
+    moduleName: 'ui',
+    sendMessage: (message) => sendMessageToBrave(message),
+    isReady: () => window.__aiMetaViewerUiModuleReady === true,
+});
+
+function ensureLazyUiModule() {
+    return lazyUiModule.ensure().catch((error) => {
+        debugLog({
+            category: 'message',
+            phase: 'content',
+            errorType: 'import',
+            retryable: true,
+        });
+        throw error;
+    });
+}
+
 const CONTENT_SAFE_ENUMS = Object.freeze({
     category: Object.freeze([
         'acquisition', 'file-access', 'representation-mismatch', 'resource-limit',
@@ -63,6 +83,8 @@ const CONTENT_SAFE_ENUMS = Object.freeze({
     ]),
     scheme: Object.freeze(['file', 'http', 'https'])
 });
+
+const sharedDiagnostics = window.SafeDiagnostics;
 
 const TRANSIENT_EXTENSION_CONTEXT_ERROR_CODE = 'transient-extension-context';
 const TRANSIENT_EXTENSION_CONTEXT_ERROR_PATTERNS = Object.freeze([
@@ -96,16 +118,6 @@ function createTransientExtensionContextError() {
     return error;
 }
 
-function readSafeContentProperty(value, key) {
-    try {
-        return value !== null && value !== undefined && Object.prototype.hasOwnProperty.call(value, key)
-            ? value[key]
-            : undefined;
-    } catch (_) {
-        return undefined;
-    }
-}
-
 function setSafeContentField(diagnostic, key, value) {
     if (Object.prototype.hasOwnProperty.call(CONTENT_SAFE_ENUMS, key) && CONTENT_SAFE_ENUMS[key].includes(value)) {
         diagnostic[key] = value;
@@ -122,48 +134,11 @@ function setSafeContentField(diagnostic, key, value) {
     }
 }
 
-function classifySafeContentString(value, diagnostic) {
-    const normalized = value.toLowerCase();
-    const categoryKeywords = [
-        ['fatal-initialization', ['fatal-initialization', 'importscripts']],
-        ['acquisition', ['acquisition', 'fetch', 'download', 'image']],
-        ['parser', ['parser', 'metadata', 'format']],
-        ['scanner', ['scanner', 'scan', 'candidate']],
-        ['message', ['message', 'response', 'send']],
-        ['cache', ['cache']],
-        ['storage', ['storage']],
-        ['settings', ['setting', 'wildcard', 'excluded']]
-    ];
-    for (const [category, keywords] of categoryKeywords) {
-        if (keywords.some(keyword => normalized.includes(keyword))) {
-            diagnostic.category = category;
-            break;
-        }
-    }
-    if (normalized.includes('background')) diagnostic.phase = 'background';
-    else if (normalized.includes('content')) diagnostic.phase = 'content';
-    else if (normalized.includes('initial')) diagnostic.phase = 'initialization';
-    else if (normalized.includes('download')) diagnostic.phase = 'download';
-    else if (normalized.includes('setting')) diagnostic.phase = 'settings';
-    if (normalized.includes('timeout')) diagnostic.errorType = 'timeout';
-    else if (normalized.includes('abort')) diagnostic.errorType = 'abort';
-    else if (normalized.includes('network')) diagnostic.errorType = 'network';
-    else if (normalized.includes('invalid') && normalized.includes('response')) diagnostic.errorType = 'invalid-response';
-
-    if (/^file:\/\//i.test(value)) diagnostic.scheme = 'file';
-    else if (/^https?:\/\//i.test(value)) diagnostic.scheme = value.slice(0, 5).toLowerCase() === 'https' ? 'https' : 'http';
-    if (/^(?:data|blob):/i.test(value) || /^(?:https?|file):\/\//i.test(value) ||
-        /(?:password|passwd|secret|token|authorization|cookie|api[_-]?key)/i.test(value) ||
-        /(?:^[A-Z]:[\\/]|^\\\\|\/Users\/|\/home\/|\/var\/|\\AppData\\)/i.test(value)) {
-        diagnostic.redacted = true;
-    }
-}
-
 function toSafeContentDiagnostic(args) {
     const diagnostic = { redacted: false };
     for (const value of args) {
         if (typeof value === 'string') {
-            classifySafeContentString(value, diagnostic);
+            sharedDiagnostics.classifyString(value, diagnostic);
         } else if (typeof value === 'number') {
             setSafeContentField(diagnostic, 'status', value);
         } else if (value && (typeof value === 'object' || typeof value === 'function')) {
@@ -175,7 +150,7 @@ function toSafeContentDiagnostic(args) {
                 diagnostic.redacted = true;
             }
             if (errorLike) {
-                const errorName = readSafeContentProperty(value, 'name');
+                const errorName = sharedDiagnostics.readOwnProperty(value, 'name');
                 const normalizedName = typeof errorName === 'string' ? errorName.toLowerCase() : '';
                 diagnostic.errorType = normalizedName.includes('abort') ? 'abort' :
                     normalizedName.includes('timeout') ? 'timeout' :
@@ -191,7 +166,7 @@ function toSafeContentDiagnostic(args) {
                     'event', 'cacheState', 'analysisOutcome', 'reason', 'urlId', 'imageId', 'runId',
                     'candidateIndex', 'imageIndex', 'width', 'height', 'processed', 'activeRequest', 'sameSrc', 'running', 'cancelled',
                 ]) {
-                    setSafeContentField(diagnostic, key, readSafeContentProperty(value, key));
+                    setSafeContentField(diagnostic, key, sharedDiagnostics.readOwnProperty(value, key));
                 }
             }
             diagnostic.redacted = true;
@@ -204,16 +179,15 @@ function toSafeContentDiagnostic(args) {
 }
 
 function formatSafeContentDiagnostic(diagnostic) {
-    const fields = [];
-    for (const key of [
-        'category', 'phase', 'event', 'imageId', 'runId', 'imageIndex', 'candidateIndex', 'urlId',
-        'cacheState', 'analysisOutcome', 'reason', 'activeRequest', 'processed', 'running', 'sameSrc',
-        'width', 'height', 'cancelled', 'errorType', 'status', 'bodyPresent', 'scannerStatus', 'retryable', 'scheme',
-    ]) {
-        if (diagnostic[key] !== undefined) fields.push(`${key}=${diagnostic[key]}`);
-    }
-    fields.push(`redacted=${diagnostic.redacted === true}`);
-    return `[SafeDiagnostic ${fields.join(' ')}]`.slice(0, 240);
+    return sharedDiagnostics.formatSafeDiagnostic(diagnostic, {
+        orderedKeys: [
+            'category', 'phase', 'event', 'imageId', 'runId', 'imageIndex', 'candidateIndex', 'urlId',
+            'cacheState', 'analysisOutcome', 'reason', 'activeRequest', 'processed', 'running', 'sameSrc',
+            'width', 'height', 'cancelled', 'errorType', 'status', 'bodyPresent', 'scannerStatus', 'retryable', 'scheme',
+        ],
+        trusted: true,
+        maxLength: 240,
+    });
 }
 
 // settings_loader.js で定義された window.debugLog を拡張
@@ -341,13 +315,23 @@ function init() {
 
     if (isDirectImageView()) {
         debugLog('[AI Meta Viewer] Direct image view detected');
-        handleDirectImageView();
+        ensureLazyUiModule().then(() => {
+            if (typeof handleDirectImageView === 'function') handleDirectImageView();
+            else {
+                const img = document.querySelector('img');
+                if (img) checkImageMetadata(img);
+            }
+        }).catch(() => {
+            const img = document.querySelector('img');
+            if (img) checkImageMetadata(img);
+        });
     } else {
         debugLog('[AI Meta Viewer] Normal page view, starting image observation');
         observeImages();
         observeSiteSpecificElements();
     }
-    observeVideoMetadata();
+    startLazyVideoObservation();
+    startSpaUrlTracking();
 
     extensionInitialized = true;
 }
@@ -548,6 +532,7 @@ async function checkImageMetadata(img, requestOptions = {}) {
     debugLog(`[AI Meta Viewer] checkImageMetadata called for: ${getImageSource().substring(0, 60)}...`);
 
     const src = getImageSource();
+    const debugAllDetections = settings.debugAllDetections === true;
     if (!src) {
         logImageDiagnostic('analysis-skip', img, { reason: 'no-src' });
         debugLog('[AI Meta Viewer] No src, skipping');
@@ -563,24 +548,36 @@ async function checkImageMetadata(img, requestOptions = {}) {
     let targetUrl = src;
     let isLinkedImage = false;
 
-    // アダプターを使ってオリジナル画像を探索
-    for (const adapter of SiteAdapters) {
-        if (adapter.match()) {
-            if (adapter.isAnalysisExcluded?.(img)) {
-                logImageDiagnostic('analysis-skip', img, { reason: 'site-excluded' });
-                debugLog('[AI Meta Viewer] Image is excluded by site adapter:', src.substring(0, 80));
-                return;
+    // アダプターを使ってオリジナル画像を探索（対象ホストでのみ adapters.js が読み込まれる）
+    if (Array.isArray(window.SiteAdapters)) {
+        for (const adapter of SiteAdapters) {
+            if (adapter.match()) {
+                if (adapter.isAnalysisExcluded?.(img)) {
+                    logImageDiagnostic('analysis-skip', img, { reason: 'site-excluded' });
+                    debugLog('[AI Meta Viewer] Image is excluded by site adapter:', src.substring(0, 80));
+                    return;
+                }
+                const resolvedUrl = adapter.resolve(img);
+                if (resolvedUrl) {
+                    targetUrl = resolvedUrl;
+                    isLinkedImage = true;
+                    debugLog('[AI Meta Viewer] Adapter resolved URL:', {
+                        originalSrc: src.substring(0, 80),
+                        resolvedUrl: Array.isArray(resolvedUrl) ? resolvedUrl.map(u => u.substring(0, 80)) : resolvedUrl.substring(0, 80)
+                    });
+                    break; // 最初に見つかったものを採用
+                }
             }
-            const resolvedUrl = adapter.resolve(img);
-            if (resolvedUrl) {
-                targetUrl = resolvedUrl;
-                isLinkedImage = true;
-                debugLog('[AI Meta Viewer] Adapter resolved URL:', {
-                    originalSrc: src.substring(0, 80),
-                    resolvedUrl: Array.isArray(resolvedUrl) ? resolvedUrl.map(u => u.substring(0, 80)) : resolvedUrl.substring(0, 80)
-                });
-                break; // 最初に見つかったものを採用
-            }
+        }
+    }
+
+    // 汎用アダプター（全サイト共通）は常駐側のフォールバックとして維持する。
+    if (!isLinkedImage) {
+        const parentLink = img.closest('a');
+        const href = parentLink?.href;
+        if (href && /\.(png|jpg|jpeg|webp|avif|gif)$/i.test(href.split('?')[0])) {
+            targetUrl = href;
+            isLinkedImage = true;
         }
     }
 
@@ -601,12 +598,12 @@ async function checkImageMetadata(img, requestOptions = {}) {
     let isTooSmall = false;
 
     // リンク画像でない場合（直接表示など）は、設定された最小画素数でチェック
-    if (!isLinkedImage && pixelCount < settings.minPixelCount) {
+    if (!debugAllDetections && !isLinkedImage && pixelCount < settings.minPixelCount) {
         isTooSmall = true;
     }
 
     // リンク画像の場合でも、設定された最小サイズ未満は除外（デフォルト200x200）
-    if (isLinkedImage && (actualWidth < settings.minImageSize || actualHeight < settings.minImageSize)) {
+    if (!debugAllDetections && isLinkedImage && (actualWidth < settings.minImageSize || actualHeight < settings.minImageSize)) {
         isTooSmall = true;
     }
 
@@ -618,7 +615,7 @@ async function checkImageMetadata(img, requestOptions = {}) {
 
     // [Discord専用: ユーザーアイコン対策]
     // リンク解決の有無に関わらず、表示サイズが極端に小さいものやAvatar画像は除外する
-    if (isDiscord) {
+    if (!debugAllDetections && isDiscord) {
         const displayWidth = img.width || img.clientWidth || actualWidth;
         const displayHeight = img.height || img.clientHeight || actualHeight;
 
@@ -628,7 +625,7 @@ async function checkImageMetadata(img, requestOptions = {}) {
         }
     }
 
-    if (isTooSmall) {
+    if (!debugAllDetections && isTooSmall) {
         logImageDiagnostic('analysis-skip', img, { reason: 'too-small' });
         debugLog('[AI Meta Viewer] Image too small, skipping:', {
             src: src.substring(0, 80),
@@ -717,7 +714,7 @@ async function checkImageMetadata(img, requestOptions = {}) {
             }
 
             // キャッシュチェック
-            if (contentMetadataCache.has(url)) {
+            if (!debugAllDetections && contentMetadataCache.has(url)) {
                 const cachedMetadata = contentMetadataCache.get(url);
                 logImageDiagnostic('cache-hit', img, {
                     candidateIndex,
@@ -778,14 +775,18 @@ async function checkImageMetadata(img, requestOptions = {}) {
                 });
                 if (responseState === 'resolved') {
                     metadata = response.metadata;
-                    contentMetadataCache.set(url, metadata);
+                    if (debugAllDetections && response.debug && metadata && typeof metadata === 'object' &&
+                        metadata.__debugDetection === undefined) {
+                        metadata.__debugDetection = response.debug;
+                    }
+                    if (!debugAllDetections) contentMetadataCache.set(url, metadata);
                     successUrl = url;
                     analysisOutcome = 'resolved';
                     break; // 成功したらループを抜ける
                 }
                 if (responseState === 'confirmed-empty') {
                     // 完了確認済みの空結果だけを候補の empty として扱う。
-                    contentMetadataCache.set(url, {});
+                    if (!debugAllDetections) contentMetadataCache.set(url, {});
                     analysisOutcome = 'confirmed-empty';
                     continue;
                 }
@@ -864,32 +865,34 @@ async function checkImageMetadata(img, requestOptions = {}) {
         // --- メタデータフィルタリング (除外判定) ---
 
         if (analysisOutcome === 'resolved') {
-            // 1. キーによる除外 (Ignored Metadata Keys)
-            if (settings.ignoredMetadataKeys && Array.isArray(settings.ignoredMetadataKeys) && settings.ignoredMetadataKeys.length > 0) {
-                const hasIgnoredKey = Object.keys(metadata).some(key =>
-                    settings.ignoredMetadataKeys.includes(key)
-                );
+            if (!debugAllDetections) {
+                // 1. キーによる除外 (Ignored Metadata Keys)
+                if (settings.ignoredMetadataKeys && Array.isArray(settings.ignoredMetadataKeys) && settings.ignoredMetadataKeys.length > 0) {
+                    const hasIgnoredKey = Object.keys(metadata).some(key =>
+                        settings.ignoredMetadataKeys.includes(key)
+                    );
 
-                if (hasIgnoredKey) {
-                    if (settings.debugMode) {
-                        debugLog('[AI Meta Viewer] Ignored image due to ignored metadata key');
+                    if (hasIgnoredKey) {
+                        if (settings.debugMode) {
+                            debugLog('[AI Meta Viewer] Ignored image due to ignored metadata key');
+                        }
+                        removeBadge(img); // バッジがあれば削除
+                        return;
                     }
-                    removeBadge(img); // バッジがあれば削除
-                    return;
                 }
-            }
 
-            // 2. ソフトウェア名による除外 (Ignored Software)
-            if (metadata['Software'] && settings.ignoredSoftware && Array.isArray(settings.ignoredSoftware) && settings.ignoredSoftware.length > 0) {
-                const software = metadata['Software'];
-                const isIgnoredSoftware = settings.ignoredSoftware.some(s => software.includes(s));
+                // 2. ソフトウェア名による除外 (Ignored Software)
+                if (metadata['Software'] && settings.ignoredSoftware && Array.isArray(settings.ignoredSoftware) && settings.ignoredSoftware.length > 0) {
+                    const software = metadata['Software'];
+                    const isIgnoredSoftware = settings.ignoredSoftware.some(s => software.includes(s));
 
-                if (isIgnoredSoftware) {
-                    if (settings.debugMode) {
-                        debugLog('[AI Meta Viewer] Ignored software:', software);
+                    if (isIgnoredSoftware) {
+                        if (settings.debugMode) {
+                            debugLog('[AI Meta Viewer] Ignored software:', software);
+                        }
+                        removeBadge(img); // バッジがあれば削除
+                        return;
                     }
-                    removeBadge(img); // バッジがあれば削除
-                    return;
                 }
             }
 
@@ -965,289 +968,159 @@ function logContentAnalysisFailure(response) {
 }
 
 
-// --- Civitai などの動的サイト用リトライロジック ---
-let civitaiRetryCount = 0;
-const MAX_CIVITAI_RETRIES = 7;
-const CIVITAI_RETRY_INTERVAL_MS = 2000;
-let civitaiMetadataFetchSucceeded = false;
-
-/**
- * 実際のメタデータ取得コールバック
- */
-const fetchMetadataCallback = (apiUrl) => {
-    return sendMessageToBrave({
-        action: 'fetchImageMetadata',
-        imageUrl: apiUrl
-    }).then(response => {
-        if (response && response.success && response.metadata && Object.keys(response.metadata).length > 0) {
-            debugLog('[AI Meta Viewer] Metadata fetched successfully:', Object.keys(response.metadata).join(', '));
-            return response.metadata;
-        }
-        debugLog('[AI Meta Viewer] Metadata fetch returned empty or failed for:', apiUrl);
-        return null;
-    });
-};
-
-/**
- * safetensors のチェックを実行（深いスキャンとバッジ付与）
- */
-function executeSafetensorsCheck() {
-    debugLog('[AI Meta Viewer] Executing safetensors check');
-    if (typeof executeDeepScanAndAddBadges === 'function') {
-        executeDeepScanAndAddBadges(fetchMetadataCallback);
-    }
-}
-
-/**
- * Civitai の API データが利用可能になるまで待機して実行するリトライループ
- */
-function runCivitaiRetryCheck() {
-    civitaiRetryCount++;
-    debugLog('[AI Meta Viewer] Safetensors retry check', civitaiRetryCount, '/', MAX_CIVITAI_RETRIES);
-
-    // deepScan を実行して、Civitai API URL が配置されるまで待つ
-    if (typeof SiteAdapters !== 'undefined') {
-        for (const adapter of SiteAdapters) {
-            if (adapter.match() && typeof adapter.deepScan === 'function') {
-                const candidates = adapter.deepScan(document);
-                if (candidates && Array.isArray(candidates)) {
-                    const safetensorsCandidates = candidates.filter(c => c.type === 'archive' && c.isCivitaiModel);
-                    const civitaiApiCandidates = safetensorsCandidates.filter(c => c.modelVersionId);
-
-                    if (civitaiApiCandidates.length > 0) {
-                        debugLog('[AI Meta Viewer] Found Civitai API candidates:', civitaiApiCandidates.length);
-                        civitaiMetadataFetchSucceeded = true;
-                        break;
-                    }
-                }
-            }
-        }
-    }
-
-    if (civitaiMetadataFetchSucceeded || civitaiRetryCount >= MAX_CIVITAI_RETRIES) {
-        if (civitaiMetadataFetchSucceeded) {
-            debugLog('[AI Meta Viewer] Civitai API URL found, executing safetensors check');
-            executeSafetensorsCheck();
-        } else if (civitaiRetryCount >= MAX_CIVITAI_RETRIES) {
-            debugLog('[AI Meta Viewer] WARNING: Max retries reached for safetensors check');
-        }
-        return;
-    }
-
-    // 次の試行をスケジュール
-    debugLog('[AI Meta Viewer] Scheduling next safetensors check in', CIVITAI_RETRY_INTERVAL_MS, 'ms');
-    setTimeout(runCivitaiRetryCheck, CIVITAI_RETRY_INTERVAL_MS);
-}
-
 /**
  * サイト別のアダプターからターゲットを取得してメタデータをチェック
  */
 function observeSiteSpecificElements() {
-    // Civitai等のサイトでは初回読み込み時にリトライチェックを開始
-    if (typeof executeDeepScanAndAddBadges === 'function') {
+    // Civitai の deepScan は adapters.js 側に移した。Civitai 以外では実行しない。
+    const isCivitai = window.location.hostname.includes('civitai.com') || document.title.includes('Civitai');
+    if (isCivitai && typeof runCivitaiRetryCheck === 'function' && typeof executeDeepScanAndAddBadges === 'function') {
+        const startRetry = () => {
+            if (typeof resetCivitaiRetryCheck === 'function') resetCivitaiRetryCheck();
+            runCivitaiRetryCheck();
+        };
         if (document.readyState === 'loading') {
-            document.addEventListener('DOMContentLoaded', () => {
-                setTimeout(() => {
-                    debugLog('[AI Meta Viewer] DOMContentLoaded - starting safetensors check');
-                    civitaiRetryCount = 0;
-                    civitaiMetadataFetchSucceeded = false;
-                    runCivitaiRetryCheck();
-                }, 1000);
-            });
+            document.addEventListener('DOMContentLoaded', () => setTimeout(startRetry, 1000));
         } else {
-            setTimeout(() => {
-                debugLog('[AI Meta Viewer] Page already loaded - starting safetensors check');
-                civitaiRetryCount = 0;
-                civitaiMetadataFetchSucceeded = false;
-                runCivitaiRetryCheck();
-            }, 1000);
+            setTimeout(startRetry, 1000);
         }
     }
 
-    // 汎用的なsafetensorsリンク検知（全サイト対応）
-    // 初回のみ実行（無限ループ防止）
-    // 注意：deepScan処理の後に実行する（observeGenericSafetensorsLinks()がscanner.jsを起動させるため）
-    for (const adapter of SiteAdapters) {
-        if (adapter.match() && typeof adapter.getBadgeTargets === 'function') {
-            const targets = adapter.getBadgeTargets(document);
-            if (targets) {
-                targets.forEach(el => checkMetadataForElement(el));
-            }
-        }
-    }
-
-    observeGenericSafetensorsLinks();
-}
-
-/**
- * SPA ナビゲーション検出 (ポーリング方式)
- * Civitai 等の SPA では DOM 変更と URL 変更のタイミングが一致しないことがある。
- * 200ms ごとの定期監視によって確実に URL 変化を捕捉し、一括処理を行う。
- */
-function startSpaUrlPolling() {
-    let lastKnownUrl = window.location.href;
-    debugLog('[AI Meta Viewer] SPA URL Polling Monitor started. Current URL:', lastKnownUrl);
-
-    const checkUrlChange = () => {
-        const currentUrl = window.location.href;
-        if (currentUrl !== lastKnownUrl) {
-            debugLog('[AI Meta Viewer] SPA URL CHANGE DETECTED (Polling)');
-            debugLog('  Old URL:', lastKnownUrl);
-            debugLog('  New URL:', currentUrl);
-
-            lastKnownUrl = currentUrl;
-
-            debugLog('[AI Meta Viewer] Triggering batch cleanup for new version components...');
-
-            const beforeMapSize = typeof processedImages !== 'undefined' ? processedImages.size : 0;
-
-            // 1. 全てのバッジ（解析中含む）をDOMから削除
-            const existingBadges = document.querySelectorAll('.ai-meta-badge, .ai-meta-badge-analyzing');
-            existingBadges.forEach(b => {
-                try { b.remove(); } catch (e) { debugLog('Error removing badge:', e); }
-            });
-
-            // 2. 処理済み管理マップをクリア（これにより新しい要素として認識させる）
-            if (typeof processedImages !== 'undefined') {
-                // Remove stale position listeners and ResizeObserver registrations
-                // before dropping records for badges whose DOM nodes were removed.
-                for (const element of Array.from(processedImages.keys())) removeBadge(element);
-                processedImages.clear();
-                debugLog('[AI Meta Viewer] processedImages Map cleared.');
-            }
-            // A video element can survive SPA navigation while its old badge is removed.
-            // Invalidate its per-source result so the new page state is analyzed again.
-            for (const element of videoSelectedSources.keys()) {
-                cancelVideoElement(element);
-                videoAnalyzedSources.delete(element);
-                if (element.isConnected) {
-                    videoMetadataIntersectionObserver?.unobserve(element);
-                    videoMetadataIntersectionObserver?.observe(element);
+    // アダプターが提供するバッジ対象（Civitai のダウンロードボタン等）は
+    // リンク取得に ui.js の checkMetadataForElement を使うため、UI を遅延注入する。
+    if (Array.isArray(window.SiteAdapters)) {
+        for (const adapter of SiteAdapters) {
+            if (adapter.match() && typeof adapter.getBadgeTargets === 'function') {
+                const targets = adapter.getBadgeTargets(document);
+                if (targets && targets.length > 0) {
+                    ensureLazyUiModule().then(() => {
+                        if (typeof checkMetadataForElement !== 'function') return;
+                        targets.forEach(el => checkMetadataForElement(el));
+                    }).catch(() => {});
                 }
             }
-
-            debugLog(`[AI Meta Viewer] Cleanup complete. Badges removed: ${existingBadges.length} (Current in DOM: ${document.querySelectorAll('.ai-meta-badge').length}), Map entries cleared: ${beforeMapSize}`);
-
-            // 3. Civitai の再スキャンプロセスを開始 (少し待ってDOMが新しいURLに対応するのを待つ)
-            setTimeout(() => {
-                debugLog('[AI Meta Viewer] Triggering runCivitaiRetryCheck for updated page content...');
-                civitaiRetryCount = 0;
-                civitaiMetadataFetchSucceeded = false;
-                runCivitaiRetryCheck();
-            }, 800);
         }
-    };
+    }
 
-    if (window.aiMetaUrlInterval) clearInterval(window.aiMetaUrlInterval);
-    window.aiMetaUrlInterval = setInterval(checkUrlChange, 200);
+    startSafetensorsLinkDetection();
 }
 
 /**
- * 汎用的なsafetensorsリンクを監視
+ * SPA の URL 変化を popstate / hashchange / MutationObserver と
+ * 800ms の安全弁で検出する。200ms 周期のポーリングは行わない。
  */
-let safetensorsObserver = null; // グローバル変数でObserverを管理
+let spaUrlTracker = null;
 
-function observeGenericSafetensorsLinks() {
-    // 既にObserverが作成されている場合は何もしない
-    if (safetensorsObserver) {
-        debugLog('[AI Meta Viewer] Safetensors observer already exists, skipping');
-        return;
-    }
+function handleSpaUrlChange(currentUrl, previousUrl) {
+    debugLog('[AI Meta Viewer] SPA URL change detected');
+    debugLog('  Old URL:', previousUrl);
+    debugLog('  New URL:', currentUrl);
 
-    debugLog('[AI Meta Viewer] Starting generic safetensors link observation');
-
-    // 既存のsafetensorsリンクをチェック
-    const checkExistingLinks = () => {
-        const safetensorsLinks = document.querySelectorAll('a[href*=".safetensors"]');
-        safetensorsLinks.forEach(link => {
-            if (!processedImages.has(link)) {
-                debugLog('[AI Meta Viewer] Found safetensors link:', link.href);
-                checkMetadataForElement(link);
-            }
-        });
-    };
-
-    // 初回チェック
-    checkExistingLinks();
-
-    // ページ読み込み完了後に再度チェック（遅延実行）
-    if (document.readyState === 'loading') {
-        document.addEventListener('DOMContentLoaded', () => {
-            setTimeout(() => {
-                debugLog('[AI Meta Viewer] DOMContentLoaded - rechecking safetensors links');
-                checkExistingLinks();
-            }, 500);
-        });
-    } else {
-        // ページが既に読み込まれている場合
-        setTimeout(() => {
-            debugLog('[AI Meta Viewer] Delayed recheck - safetensors links');
-            checkExistingLinks();
-        }, 1000);
-    }
-
-    // SPA ナビゲーション検出を開始
-    startSpaUrlPolling();
-
-    // 新しく追加されるsafetensorsリンクを監視
-    let debounceTimer = null;
-    safetensorsObserver = new MutationObserver((mutations) => {
-        // ノードの追加・削除の監視 (URLチェックは setInterval 側に任せる)
-        mutations.forEach((mutation) => {
-            if (mutation.addedNodes.length > 0) {
-                mutation.addedNodes.forEach((node) => {
-                    if (node.nodeType === Node.ELEMENT_NODE) {
-                        const links = [];
-                        if (node.tagName === 'A' && node.href && node.href.includes('.safetensors')) links.push(node);
-                        const innerLinks = node.querySelectorAll?.('a[href*=".safetensors"]');
-                        if (innerLinks) innerLinks.forEach(l => links.push(l));
-
-                        links.forEach(link => {
-                            if (!processedImages.has(link)) {
-                                debugLog('[AI Meta Viewer] New link added to DOM:', link.href);
-                                checkMetadataForElement(link);
-                            }
-                        });
-                    }
-                });
-            }
-
-            if (mutation.removedNodes.length > 0) {
-                mutation.removedNodes.forEach((node) => {
-                    if (node.nodeType === Node.ELEMENT_NODE) {
-                        const links = [];
-                        if (node.tagName === 'A' && node.href && node.href.includes('.safetensors')) links.push(node);
-                        const innerLinks = node.querySelectorAll?.('a[href*=".safetensors"]');
-                        if (innerLinks) innerLinks.forEach(l => links.push(l));
-                        links.forEach(link => processedImages.delete(link));
-                    }
-                });
-            }
-        });
-
-        // デバウンス処理（safetensorsリンクの再チェック用）
-        if (debounceTimer) clearTimeout(debounceTimer);
-        debounceTimer = setTimeout(() => {
-            checkExistingLinks();
-        }, 500);
+    const beforeMapSize = typeof processedImages !== 'undefined' ? processedImages.size : 0;
+    const existingBadges = document.querySelectorAll('.ai-meta-badge, .ai-meta-badge-analyzing');
+    existingBadges.forEach(b => {
+        try { b.remove(); } catch (e) { debugLog('Error removing badge:', e); }
     });
 
-    if (!document.body) {
-        debugLog('[AI Meta Viewer] document.body not found, waiting for DOMContentLoaded to start safetensors observer');
-        document.addEventListener('DOMContentLoaded', () => {
-            if (!document.body) return; // R5: DOMContentLoaded後もbodyがない場合（リダイレクトページ等）は中断
-            safetensorsObserver.observe(document.body, { childList: true, subtree: true });
-            debugLog('[AI Meta Viewer] Generic safetensors link observer started (deferred)');
-        }, { once: true });
-        return;
+    if (typeof processedImages !== 'undefined') {
+        for (const element of Array.from(processedImages.keys())) removeBadge(element);
+        processedImages.clear();
+        document.querySelectorAll('img').forEach((img) => {
+            viewportAnalysisQueue.observer?.observe(img);
+        });
+    }
+    for (const element of videoSelectedSources.keys()) {
+        cancelVideoElement(element);
+        videoAnalyzedSources.delete(element);
+        if (element.isConnected) {
+            videoMetadataIntersectionObserver?.unobserve(element);
+            videoMetadataIntersectionObserver?.observe(element);
+        }
     }
 
-    safetensorsObserver.observe(document.body, {
-        childList: true,
-        subtree: true
-    });
+    debugLog(`[AI Meta Viewer] Cleanup complete. Badges removed: ${existingBadges.length} (Current in DOM: ${document.querySelectorAll('.ai-meta-badge').length}), Map entries cleared: ${beforeMapSize}`);
 
-    debugLog('[AI Meta Viewer] Generic safetensors link observer started');
+    setTimeout(() => {
+        const isCivitai = window.location.hostname.includes('civitai.com') || document.title.includes('Civitai');
+        if (isCivitai && typeof runCivitaiRetryCheck === 'function') {
+            if (typeof resetCivitaiRetryCheck === 'function') resetCivitaiRetryCheck();
+            runCivitaiRetryCheck();
+        }
+    }, 800);
+}
+
+function startSpaUrlTracking() {
+    if (spaUrlTracker) return;
+    spaUrlTracker = createSpaUrlTracker({
+        getUrl: () => window.location.href,
+        onChange: handleSpaUrlChange,
+    });
+    window.addEventListener('popstate', () => spaUrlTracker.schedule());
+    window.addEventListener('hashchange', () => spaUrlTracker.schedule());
+    spaUrlTracker.start();
+}
+
+/**
+ * safetensors リンクの存在だけを常駐側で監視し、実際のリンク解析
+ * （checkMetadataForElement / observeGenericSafetensorsLinks）は ui.js に任せる。
+ */
+let safetensorsLinkDetectionStarted = false;
+let safetensorsLinkDetectionActivated = false;
+let safetensorsLinkObserver = null;
+let safetensorsRetryTimer = null;
+let safetensorsRetryAttempts = 0;
+const SAFETENSORS_RETRY_LIMIT = 3;
+const SAFETENSORS_RETRY_DELAY_MS = 1000;
+
+function scheduleSafetensorsRetry() {
+    if (safetensorsRetryTimer !== null || safetensorsRetryAttempts >= SAFETENSORS_RETRY_LIMIT) return;
+    safetensorsRetryTimer = setTimeout(() => {
+        safetensorsRetryTimer = null;
+        safetensorsRetryAttempts += 1;
+        activateSafetensorsLinkDetection();
+    }, SAFETENSORS_RETRY_DELAY_MS);
+}
+
+function activateSafetensorsLinkDetection() {
+    if (safetensorsLinkDetectionActivated) return false;
+    if (!document.querySelector || !document.querySelector('a[href*=".safetensors"]')) return false;
+    safetensorsLinkDetectionActivated = true;
+    ensureLazyUiModule().then(() => {
+        if (typeof observeGenericSafetensorsLinks !== 'function') {
+            safetensorsLinkDetectionActivated = false;
+            scheduleSafetensorsRetry();
+            return;
+        }
+        observeGenericSafetensorsLinks();
+        safetensorsRetryAttempts = 0;
+        if (safetensorsLinkObserver) {
+            safetensorsLinkObserver.disconnect();
+            safetensorsLinkObserver = null;
+        }
+    }).catch(() => {
+        safetensorsLinkDetectionActivated = false;
+        scheduleSafetensorsRetry();
+    });
+    return true;
+}
+
+function startSafetensorsLinkDetection() {
+    if (safetensorsLinkDetectionStarted) return;
+    safetensorsLinkDetectionStarted = true;
+    const observer = new MutationObserver(() => {
+        activateSafetensorsLinkDetection();
+    });
+    safetensorsLinkObserver = observer;
+    const root = document.documentElement || document;
+    if (root) {
+        observer.observe(root, {
+            childList: true,
+            subtree: true,
+            attributes: true,
+            attributeFilter: ['href'],
+        });
+    }
+    activateSafetensorsLinkDetection();
 }
 
 /**
@@ -1308,104 +1181,6 @@ async function sendMessageToBrave(message) {
             reject(isTransientExtensionContextError(e) ? createTransientExtensionContextError() : e);
         }
     });
-}
-
-async function checkMetadataForElement(el) {
-    // 拡張機能のコンテキストが無効化されている場合は処理を停止
-    if (!isExtensionContextValid()) {
-        // すでに読み込まれている設定があればデバッグログを表示
-        if (window.settings && window.settings.debugMode) {
-            debugLog({ category: 'message', phase: 'content', errorType: 'unknown', retryable: false });
-        }
-        return;
-    }
-
-    if (processedImages.has(el)) {
-        const data = processedImages.get(el);
-        if (data) return; // 既に処理済み
-    }
-
-    // 抽出対象URLの特定
-    let url = null;
-    if (el.tagName === 'A') {
-        url = el.href;
-        // ローカルファイルテスト時の相対パス解決
-        if (window.location.protocol === 'file:' && document.title.includes('Civitai')) {
-            const href = el.getAttribute('href');
-            if (href && href.startsWith('/')) {
-                url = 'https://civitai.com' + href;
-            }
-        }
-    } else {
-        return;
-    }
-
-    if (!url) return;
-    if (isVideoMetadataUrl(url)) return;
-
-    // 処理済みフラグを一時的に立てる
-    processedImages.set(el, { processing: true });
-
-    const classifyResponse = (response) => {
-        const explicitState = response?.analysisState;
-        if (['resolved', 'confirmed-empty', 'unresolved', 'failure'].includes(explicitState)) {
-            if (explicitState === 'resolved') {
-                const hasMetadata = response?.success === true && response.metadata &&
-                    typeof response.metadata === 'object' && Object.keys(response.metadata).length > 0;
-                if (response?.metadataPartial === true || response?.metadata?.metadataPartial === true) {
-                    return 'unresolved';
-                }
-                return hasMetadata ? 'resolved' : 'failure';
-            }
-            if (explicitState === 'confirmed-empty') {
-                const hasUnexpectedMetadata = response?.metadata &&
-                    typeof response.metadata === 'object' && Object.keys(response.metadata).length > 0;
-                return response?.success === true && !hasUnexpectedMetadata
-                    ? 'confirmed-empty'
-                    : 'failure';
-            }
-            return response?.success === false ? explicitState : 'failure';
-        }
-        if (response?.success === true && response.metadata && typeof response.metadata === 'object') {
-            if (response.metadataPartial === true || response.metadata.metadataPartial === true) return 'unresolved';
-            return Object.keys(response.metadata).length > 0 ? 'resolved' : 'confirmed-empty';
-        }
-        return 'failure';
-    };
-
-    try {
-        const response = await sendMessageToBrave({
-            action: 'fetchImageMetadata',
-            imageUrl: url
-        });
-
-        const responseState = classifyResponse(response);
-        if (responseState === 'resolved') {
-            addBadgeToElement(el, response.metadata, url);
-        } else if (responseState === 'confirmed-empty') {
-            // confirmed-emptyは既存のリンク解析契約どおりバッジを除去する。
-            removeBadge(el);
-        } else {
-            // failure/unresolvedはempty処理へ降格させず、再解析可能にする。
-            logContentAnalysisFailure(response && typeof response === 'object'
-                ? { ...response, success: false, analysisState: responseState }
-                : { success: false, analysisState: responseState, diagnostics: { category: 'response-contract', phase: 'content' } });
-            processedImages.delete(el);
-        }
-    } catch (e) {
-        // 切断系は通常の診断ログへ出さず、markerだけを解除して再解析可能にする。
-        if (!isTransientExtensionContextError(e)) {
-            logContentAnalysisFailure({
-                success: false,
-                diagnostics: {
-                    category: 'message',
-                    phase: 'content',
-                    errorType: 'unknown'
-                }
-            });
-        }
-        processedImages.delete(el);
-    }
 }
 
 // バッジ生成機能(addAnalyzingBadge, addBadgeToImage)などは badge_controller.js に移動しました
@@ -1733,227 +1508,70 @@ function cleanupVideoElement(element) {
     if (element.tagName === 'IMG') imageAnalyzedSources.delete(element);
 }
 
-function refreshVideoElement(element, reobserve = false) {
-    const oldSource = videoSelectedSources.get(element);
-    const newSource = getVideoMetadataSource(element);
-    if (oldSource === newSource) {
-        if (reobserve && newSource && element.isConnected) {
-            videoMetadataIntersectionObserver?.unobserve(element);
-            videoMetadataIntersectionObserver?.observe(element);
-        }
-        return;
-    }
 
-    if (oldSource) {
-        cancelVideoElement(element);
-        videoAnalyzedSources.delete(element);
-        const badge = processedImages.get(element)?.badge;
-        if (badge?._mediaType === 'video' || element.tagName === 'IMG') removeBadge(element);
-        processedImages.delete(element);
-    }
-    if (newSource) videoSelectedSources.set(element, newSource);
-    else videoSelectedSources.delete(element);
+// 動画 observation は ui.js 側に移した。動画候補が現れた時だけ UI を遅延注入する。
+let lazyVideoObservationStarted = false;
+let lazyVideoObservationActivated = false;
+let lazyVideoDiscoveryObserver = null;
+let lazyVideoRetryTimer = null;
+let lazyVideoRetryAttempts = 0;
+const VIDEO_OBSERVATION_RETRY_LIMIT = 3;
+const VIDEO_OBSERVATION_RETRY_DELAY_MS = 1000;
 
-    if (element.tagName === 'IMG') {
-        if (newSource) {
-            viewportAnalysisQueue.cancel(element, 'video-linked-thumbnail');
-            if (processedImages.get(element)?.badge?._mediaType === 'image') removeBadge(element);
-            processedImages.delete(element);
-        } else if (oldSource && element.isConnected) {
-            // Re-enter the existing image viewport observer after a link stops targeting video.
-            viewportAnalysisQueue.observer?.unobserve(element);
-            viewportAnalysisQueue.observer?.observe(element);
-        }
-    }
-
-    if (reobserve && newSource && element.isConnected) {
-        videoMetadataIntersectionObserver?.unobserve(element);
-        videoMetadataIntersectionObserver?.observe(element);
-    } else if (reobserve && element.tagName === 'IMG' && !newSource) {
-        videoMetadataIntersectionObserver?.unobserve(element);
-        observedVideoElements.delete(element);
-    }
+function hasVideoCandidate() {
+    if (!document.querySelector) return false;
+    if (document.querySelector('video')) return true;
+    return Array.from(document.querySelectorAll('a[href] img')).some(img => isVideoLinkedThumbnail(img));
 }
 
-function enqueueVideoAnalysis(element) {
-    refreshVideoElement(element);
-    const url = videoSelectedSources.get(element);
-    if (!url || videoAnalyzedSources.get(element) === url || !element.isConnected) return;
-    pendingVideoAnalyses.set(element, { url });
-    drainVideoAnalyses();
+function scheduleLazyVideoRetry() {
+    if (lazyVideoRetryTimer !== null || lazyVideoRetryAttempts >= VIDEO_OBSERVATION_RETRY_LIMIT) return;
+    lazyVideoRetryTimer = setTimeout(() => {
+        lazyVideoRetryTimer = null;
+        lazyVideoRetryAttempts += 1;
+        activateLazyVideoObservation();
+    }, VIDEO_OBSERVATION_RETRY_DELAY_MS);
 }
 
-function drainVideoAnalyses() {
-    for (const [element, entry] of pendingVideoAnalyses) {
-        if (!element.isConnected || videoSelectedSources.get(element) !== entry.url ||
-            videoAnalyzedSources.get(element) === entry.url) {
-            pendingVideoAnalyses.delete(element);
+function activateLazyVideoObservation() {
+    if (lazyVideoObservationActivated) return false;
+    if (!hasVideoCandidate()) return false;
+    lazyVideoObservationActivated = true;
+    ensureLazyUiModule().then(() => {
+        if (typeof observeVideoMetadata !== 'function') {
+            lazyVideoObservationActivated = false;
+            scheduleLazyVideoRetry();
+            return;
         }
-    }
-    while (runningVideoAnalyses.size < VIDEO_ANALYSIS_MAX_CONCURRENT) {
-        const candidates = Array.from(pendingVideoAnalyses.entries())
-            .filter(([element, entry]) => !runningVideoAnalyses.has(element) && element.isConnected &&
-                videoSelectedSources.get(element) === entry.url && videoAnalyzedSources.get(element) !== entry.url)
-            .sort(([a], [b]) => distanceFromViewportCenter(a) - distanceFromViewportCenter(b));
-        if (candidates.length === 0) return;
-        const [element, entry] = candidates[0];
-        pendingVideoAnalyses.delete(element);
-        runVideoAnalysis(element, entry.url);
-    }
-}
-
-async function runVideoAnalysis(element, url) {
-    if (!isExtensionContextValid()) return;
-    const state = { url, cancelled: false };
-    activeVideoAnalysisStates.set(element, state);
-    runningVideoAnalyses.add(element);
-    try {
-        const response = await sendMessageToBrave({ action: 'fetchVideoMetadata', videoUrl: url });
-        if (state.cancelled || activeVideoAnalysisStates.get(element) !== state ||
-            !element.isConnected || getVideoMetadataSource(element) !== url) return;
-
-        const hasMetadata = response?.success === true && response.metadata &&
-            typeof response.metadata === 'object' && Object.keys(response.metadata).length > 0;
-        if (response?.analysisState === 'resolved' && hasMetadata) {
-            if (addBadgeToElement(element, response.metadata, url, { mediaType: 'video' })) {
-                videoAnalyzedSources.set(element, url);
-            }
-        } else if (response?.analysisState === 'confirmed-empty' && response.success === true) {
-            videoAnalyzedSources.set(element, url);
-            if (processedImages.get(element)?.badge?._mediaType === 'video') removeBadge(element);
-        } else {
-            logContentAnalysisFailure(response && typeof response === 'object'
-                ? { ...response, success: false, analysisState: response?.analysisState || 'unresolved' }
-                : { success: false, analysisState: 'unresolved', diagnostics: { category: 'response-contract', phase: 'content' } });
+        observeVideoMetadata();
+        lazyVideoRetryAttempts = 0;
+        if (lazyVideoDiscoveryObserver) {
+            lazyVideoDiscoveryObserver.disconnect();
+            lazyVideoDiscoveryObserver = null;
         }
-    } catch (error) {
-        if (!isTransientExtensionContextError(error)) {
-            logContentAnalysisFailure({
-                success: false,
-                analysisState: 'unresolved',
-                diagnostics: { category: 'message', phase: 'content', errorType: 'unknown' }
-            });
-        }
-    } finally {
-        if (activeVideoAnalysisStates.get(element) === state) activeVideoAnalysisStates.delete(element);
-        runningVideoAnalyses.delete(element);
-        drainVideoAnalyses();
-    }
-}
-
-function collectVideoElements(rootNode, output = new Set()) {
-    if (!rootNode || rootNode.nodeType !== Node.ELEMENT_NODE) return output;
-    if (rootNode.tagName === 'VIDEO') output.add(rootNode);
-    if (rootNode.tagName === 'SOURCE') {
-        const parentVideo = rootNode.closest('video');
-        if (parentVideo) output.add(parentVideo);
-    }
-    if (rootNode.tagName === 'IMG' && isVideoLinkedThumbnail(rootNode)) output.add(rootNode);
-    rootNode.querySelectorAll?.('video, a[href] img').forEach(element => {
-        if (element.tagName === 'VIDEO' || isVideoLinkedThumbnail(element)) output.add(element);
+    }).catch(() => {
+        lazyVideoObservationActivated = false;
+        scheduleLazyVideoRetry();
     });
-    return output;
+    return true;
 }
 
-function observeVideoCandidate(element) {
-    if (!element || !['VIDEO', 'IMG'].includes(element.tagName)) return;
-    if (element.tagName === 'IMG' && !isVideoLinkedThumbnail(element) && !videoSelectedSources.has(element)) return;
-    const wasObserved = observedVideoElements.has(element);
-    refreshVideoElement(element, wasObserved);
-    if (element.tagName === 'IMG' && !videoSelectedSources.has(element)) {
-        videoMetadataIntersectionObserver?.unobserve(element);
-        observedVideoElements.delete(element);
-        return;
-    }
-    if (!observedVideoElements.has(element)) {
-        observedVideoElements.add(element);
-        videoMetadataIntersectionObserver?.observe(element);
-    }
-}
-
-function observeVideoMetadata() {
-    if (typeof IntersectionObserver === 'undefined' || typeof MutationObserver === 'undefined') return;
-    if (!videoMetadataIntersectionObserver) {
-        videoMetadataIntersectionObserver = new IntersectionObserver(entries => {
-            for (const entry of entries) {
-                const element = entry.target;
-                refreshVideoElement(element);
-                if (entry.isIntersecting) enqueueVideoAnalysis(element);
-                else {
-                    pendingVideoAnalyses.delete(element);
-                    cancelVideoElement(element);
-                }
-            }
-        }, { rootMargin: '100px' });
-    }
-
-    const discover = rootNode => {
-        if (rootNode?.tagName === 'A') {
-            rootNode.querySelectorAll?.('img').forEach(img => {
-                if (isVideoLinkedThumbnail(img) || videoSelectedSources.has(img)) observeVideoCandidate(img);
-            });
-        }
-        for (const element of collectVideoElements(rootNode)) observeVideoCandidate(element);
-    };
-    discover(document.documentElement);
-
-    if (!videoMetadataMutationObserver && document.documentElement) {
-        videoMetadataMutationObserver = new MutationObserver(mutations => {
-            for (const mutation of mutations) {
-                if (mutation.type === 'attributes') {
-                    const target = mutation.target;
-                    if (target.tagName === 'VIDEO' || target.tagName === 'IMG' || target.tagName === 'A') {
-                        if (target.tagName === 'VIDEO' || target.tagName === 'IMG') {
-                            refreshVideoElement(target, true);
-                            observeVideoCandidate(target);
-                        }
-                        discover(target);
-                    } else if (target.tagName === 'SOURCE') {
-                        const video = target.closest('video');
-                        if (video) {
-                            refreshVideoElement(video, true);
-                            observeVideoCandidate(video);
-                        }
-                    }
-                }
-                for (const node of mutation.addedNodes || []) discover(node);
-                for (const node of mutation.removedNodes || []) {
-                    for (const element of collectVideoElements(node)) cleanupVideoElement(element);
-                }
-                if (mutation.type === 'childList') {
-                    const target = mutation.target?.nodeType === Node.ELEMENT_NODE
-                        ? mutation.target
-                        : mutation.target?.parentElement;
-                    const video = target?.tagName === 'VIDEO' ? target : target?.closest?.('video');
-                    if (video) {
-                        refreshVideoElement(video, true);
-                        observeVideoCandidate(video);
-                    }
-                }
-            }
-        });
-        videoMetadataMutationObserver.observe(document.documentElement, {
+function startLazyVideoObservation() {
+    if (lazyVideoObservationStarted) return;
+    lazyVideoObservationStarted = true;
+    const observer = new MutationObserver(() => {
+        activateLazyVideoObservation();
+    });
+    lazyVideoDiscoveryObserver = observer;
+    if (document.documentElement) {
+        observer.observe(document.documentElement, {
             childList: true,
             subtree: true,
             attributes: true,
-            attributeFilter: ['src', 'href', 'srcset', 'type']
+            attributeFilter: ['href', 'src', 'type'],
         });
     }
-
-    if (!videoMediaEventsRegistered) {
-        const refreshFromMediaEvent = event => {
-            const target = event.target;
-            const video = target?.tagName === 'VIDEO' ? target : target?.closest?.('video');
-            if (video) {
-                refreshVideoElement(video, true);
-                observeVideoCandidate(video);
-            }
-        };
-        for (const eventName of ['loadstart', 'loadedmetadata', 'emptied', 'error']) {
-            document.addEventListener(eventName, refreshFromMediaEvent, true);
-        }
-        videoMediaEventsRegistered = true;
-    }
+    activateLazyVideoObservation();
 }
 
 /**
@@ -2159,6 +1777,8 @@ function observeImages() {
                 window.forceUpdateAllBadges();
             }
         }, 150); // processPendingNodesより少し後に実行
+
+        spaUrlTracker?.schedule();
     };
 
     const setupObserver = () => {
@@ -2203,39 +1823,6 @@ function isDirectImageView() {
     return false;
 }
 
-/**
- * 直接表示画像の処理
- */
-function handleDirectImageView() {
-    debugLog('[AI Meta Viewer] handleDirectImageView() called');
-    if (!document.body) {
-        debugLog('[AI Meta Viewer] No document.body, returning');
-        return;
-    }
-
-    const img = document.querySelector('img');
-    if (!img) {
-        debugLog('[AI Meta Viewer] No img element found');
-        return;
-    }
-
-    debugLog('[AI Meta Viewer] Found img element:', img.currentSrc || img.src);
-
-    // スタイル調整
-    document.body.style.backgroundColor = '#0e0e0e';
-    document.body.style.display = 'flex';
-    document.body.style.justifyContent = 'center';
-    document.body.style.alignItems = 'center';
-    document.body.style.minHeight = '100vh';
-    document.body.style.margin = '0';
-
-    img.style.maxWidth = '100%';
-    img.style.height = 'auto';
-    img.style.boxShadow = '0 0 20px rgba(0,0,0,0.5)';
-
-    debugLog('[AI Meta Viewer] Calling checkImageMetadata()');
-    checkImageMetadata(img);
-}
 
 
 /**
@@ -2252,7 +1839,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         // 拡張機能アイコンクリック時のスキャン実行
         debugLog('[AI Meta Viewer] Trigger scan requested');
         observeImages();
-        observeVideoMetadata();
+        startLazyVideoObservation();
         observeSiteSpecificElements();
         sendResponse({ success: true });
         return true;

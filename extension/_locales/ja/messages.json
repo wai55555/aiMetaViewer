@@ -113,6 +113,12 @@
     "descDebugMode": {
         "message": "ブラウザのコンソールに詳細なログを出力します（開発者向け）"
     },
+    "labelDebugAllDetections": {
+        "message": "全検知デバッグを有効化"
+    },
+    "descDebugAllDetections": {
+        "message": "論理的な検知抑制を外し、観測した全担体を表示します。追加取得は行わず、結果はキャッシュしません。"
+    },
     "btnSave": {
         "message": "💾 保存"
     },

@@ -119,6 +119,12 @@
   "descDebugMode": {
     "message": "Output detailed logs to browser console (for developers)"
   },
+  "labelDebugAllDetections": {
+    "message": "Enable Full-Detection Debug"
+  },
+  "descDebugAllDetections": {
+    "message": "Disable logical detection suppressions and show all observed carriers. No extra network fetch; results are not cached."
+  },
   "btnSave": {
     "message": "💾 Save"
   },

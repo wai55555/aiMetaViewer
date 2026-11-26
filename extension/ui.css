@@ -1,0 +1,448 @@
+/* ui.css - lazy-injected modal and scanner UI styles */
+
+/* エラー通知（デフォルト非表示） */
+.ai-meta-error-notification {
+  position: fixed;
+  bottom: 20px;
+  right: 20px;
+  background-color: #f44336;
+  color: white;
+  padding: 10px 20px;
+  border-radius: 4px;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.3);
+  z-index: 2147483647;
+  font-family: sans-serif;
+  font-size: 12px;
+  animation: slideIn 0.0s forwards;
+}
+
+@keyframes slideIn {
+  from {
+    transform: translateX(100%);
+    opacity: 0;
+  }
+
+  to {
+    transform: translateX(0);
+    opacity: 1;
+  }
+}
+
+
+/* モーダルオーバーレイ */
+.ai-meta-modal-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  background-color: rgba(0, 0, 0, 0.6);
+  z-index: 2147483645;
+  pointer-events: auto;
+}
+
+/* backdrop-filterはChromeなど対応ブラウザのみ適用 */
+@supports (backdrop-filter: blur(2px)) {
+  .ai-meta-modal-overlay {
+    background-color: rgba(0, 0, 0, 0.5);
+    backdrop-filter: blur(2px);
+  }
+}
+
+/* モーダル本体 */
+.ai-meta-modal {
+  position: fixed;
+  background-color: #1e1e1e;
+  color: #e0e0e0;
+  width: 600px;
+  max-width: 95vw;
+  max-height: 95vh;
+  border-radius: 8px;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.7);
+  display: flex;
+  flex-direction: column;
+  font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+  border: 1px solid #444;
+  z-index: 2147483647;
+  overflow: hidden;
+  user-select: none;
+}
+
+/* ヘッダー */
+.ai-meta-modal-header {
+  padding: 12px 16px;
+  border-bottom: 1px solid #333;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  cursor: move;
+  background-color: #2d2d2d;
+  flex-shrink: 0;
+}
+
+.ai-meta-modal-header h2 {
+  margin: 0;
+  font-size: 18px;
+  font-weight: 600;
+}
+
+.ai-meta-close-btn {
+  background: none;
+  border: none;
+  color: #aaa;
+  font-size: 24px;
+  cursor: pointer;
+  padding: 0 8px;
+  line-height: 1;
+}
+
+.ai-meta-close-btn:hover {
+  color: white;
+}
+
+/* コンテンツエリア */
+.ai-meta-modal-content {
+  flex: 1;
+  overflow-y: auto;
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  user-select: text;
+}
+
+/* セクション */
+.ai-meta-section {
+  background-color: #252526;
+  border-radius: 6px;
+  border: 1px solid #333;
+  display: flex;
+  flex-direction: column;
+}
+
+.ai-meta-section-header {
+  padding: 8px 12px;
+  background-color: #2d2d2d;
+  border-bottom: 1px solid #333;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  border-top-left-radius: 5px;
+  border-top-right-radius: 5px;
+}
+
+.ai-meta-section-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: #aaa;
+  text-transform: uppercase;
+}
+
+/* コピーボタン */
+.ai-meta-copy-btn,
+.ai-meta-copy-all-btn {
+  background-color: #3e3e42;
+  border: 1px solid #555;
+  color: #e0e0e0;
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: all 0.2s;
+  position: relative;
+}
+
+.ai-meta-copy-btn:hover,
+.ai-meta-copy-all-btn:hover {
+  background-color: #505055;
+  border-color: #666;
+}
+
+.ai-meta-copy-btn.copied,
+.ai-meta-copy-all-btn.copied {
+  background-color: #2ea043;
+  border-color: #2ea043;
+  color: white;
+}
+
+/* テキストエリア */
+.ai-meta-text-area {
+  padding: 12px;
+  font-family: 'Consolas', 'Monaco', monospace;
+  font-size: 13px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-all;
+  color: #d4d4d4;
+  flex: 1;
+  overflow-y: auto;
+  border: 1px solid transparent;
+  outline: none;
+  background: transparent;
+}
+
+.ai-meta-text-area[contenteditable="true"] {
+  background: #1a1a1b;
+  border-color: #444;
+  cursor: text;
+  user-select: text;
+}
+
+.ai-meta-text-area[contenteditable="true"]:focus {
+  border-color: #4a9eff;
+  box-shadow: inset 0 0 5px rgba(74, 158, 255, 0.2);
+}
+
+.ai-meta-text-area.empty {
+  color: #666;
+  font-style: italic;
+}
+
+/* フッター */
+.ai-meta-modal-footer {
+  padding: 12px 16px;
+  border-top: 1px solid #333;
+  display: flex;
+  justify-content: flex-end;
+  background-color: #252526;
+  gap: 8px;
+}
+
+.ai-meta-copy-all-btn {
+  font-size: 12px;
+  padding: 6px 12px;
+  font-weight: 600;
+}
+
+/* スクロールバーのカスタマイズ */
+.ai-meta-modal-content::-webkit-scrollbar,
+.ai-meta-text-area::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+.ai-meta-modal-content::-webkit-scrollbar-track,
+.ai-meta-text-area::-webkit-scrollbar-track {
+  background: #1e1e1e;
+}
+
+.ai-meta-modal-content::-webkit-scrollbar-thumb,
+.ai-meta-text-area::-webkit-scrollbar-thumb {
+  background: #424242;
+  border-radius: 4px;
+}
+
+/* ダウンロードFAB */
+.ai-meta-download-fab {
+  width: 50px;
+  height: 50px;
+  background-color: #4a9eff;
+  border-radius: 50%;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  box-shadow: 0 4px 10px rgba(0, 0, 0, 0.4);
+  cursor: pointer;
+  transition: transform 0.2s, background-color 0.2s;
+}
+
+.ai-meta-download-fab:hover {
+  transform: scale(1.1);
+  background-color: #3b8ceb;
+}
+
+.ai-meta-download-fab:active {
+  transform: scale(0.95);
+}
+
+/* ダウンローダーモーダル */
+.ai-meta-downloader-modal {
+  width: 800px;
+  height: 80vh;
+}
+
+.ai-meta-downloader-grid {
+  padding: 16px;
+  background-color: #111;
+}
+
+.ai-meta-downloader-item {
+  transition: transform 0.1s;
+}
+
+.ai-meta-downloader-item:hover {
+  transform: scale(1.02);
+  z-index: 1;
+}
+
+/* リサイズハンドル */
+.ai-meta-resize-handle {
+  position: absolute;
+  z-index: 2147483647;
+  background: transparent;
+}
+
+.ai-meta-resize-handle:hover {
+  background: rgba(74, 158, 255, 0.1);
+}
+
+.ai-meta-resize-n {
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 6px;
+  cursor: n-resize;
+}
+
+.ai-meta-resize-s {
+  bottom: 0;
+  left: 0;
+  width: 100%;
+  height: 6px;
+  cursor: s-resize;
+}
+
+.ai-meta-resize-e {
+  top: 0;
+  right: 0;
+  width: 6px;
+  height: 100%;
+  cursor: e-resize;
+}
+
+.ai-meta-resize-w {
+  top: 0;
+  left: 0;
+  width: 6px;
+  height: 100%;
+  cursor: w-resize;
+}
+
+.ai-meta-resize-ne {
+  top: 0;
+  right: 0;
+  width: 10px;
+  height: 10px;
+  cursor: ne-resize;
+}
+
+.ai-meta-resize-nw {
+  top: 0;
+  left: 0;
+  width: 10px;
+  height: 10px;
+  cursor: nw-resize;
+}
+
+.ai-meta-resize-se {
+  bottom: 0;
+  right: 0;
+  width: 10px;
+  height: 10px;
+  cursor: se-resize;
+}
+
+.ai-meta-resize-sw {
+  bottom: 0;
+  left: 0;
+  width: 10px;
+  height: 10px;
+  cursor: sw-resize;
+}
+
+/* 再設計モーダルの折りたたみ・NovelAI 子ブロック・Generation Grid */
+.ai-meta-section-header {
+  cursor: pointer;
+  gap: 8px;
+  transition: background-color 0.15s ease;
+}
+
+.ai-meta-section-header:hover {
+  background-color: #38383a;
+}
+
+.ai-meta-chevron {
+  display: inline-block;
+  flex: 0 0 14px;
+  width: 14px;
+  height: 14px;
+  color: #aaa;
+  transition: transform 0.18s ease;
+  transform-origin: center;
+  overflow: visible;
+}
+
+.ai-meta-section.collapsed .ai-meta-chevron {
+  transform: rotate(-90deg);
+}
+
+.ai-meta-section-body {
+  display: block;
+}
+
+.ai-meta-section.collapsed .ai-meta-section-body {
+  display: none;
+}
+
+.ai-meta-section-label {
+  flex: 1;
+}
+
+.ai-meta-section-tally {
+  min-width: 1.4em;
+  padding: 1px 6px;
+  border-radius: 99px;
+  background: #3e3e42;
+  color: #bbb;
+  font-size: 10px;
+  line-height: 1.4;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+
+.ai-meta-char-block {
+  margin: 10px 12px;
+  border-left: 2px solid #4a9eff;
+}
+
+.ai-meta-char-label {
+  padding: 2px 10px 4px;
+  color: #aaa;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.ai-meta-char-block .ai-meta-text-area {
+  margin-left: 8px;
+}
+
+.ai-meta-grid-body {
+  padding: 6px 10px;
+}
+
+.ai-meta-grid-row {
+  display: grid;
+  grid-template-columns: 120px minmax(0, 1fr);
+  gap: 8px;
+  padding: 3px 0;
+  border-bottom: 1px solid #333;
+  line-height: 1.25;
+}
+
+.ai-meta-grid-row:last-child {
+  border-bottom: 0;
+}
+
+.ai-meta-grid-key {
+  color: #999;
+  font-size: 11px;
+  font-weight: 400;
+}
+
+.ai-meta-grid-val {
+  min-width: 0;
+  color: #e0e0e0;
+  font-size: 13px;
+  overflow-wrap: anywhere;
+  user-select: text;
+}

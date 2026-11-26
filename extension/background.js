@@ -194,38 +194,43 @@ function toSafeDiagnostic(...args) {
 }
 
 function formatSafeDiagnostic(diagnostic) {
-    const fields = [
-        ['category', getSafeEnum(diagnostic?.category, SAFE_CATEGORIES)],
-        ['phase', getSafeEnum(diagnostic?.phase, SAFE_PHASES)],
-        ['errorType', getSafeEnum(diagnostic?.errorType, SAFE_ERROR_TYPES)],
-        ['status', Number.isInteger(diagnostic?.status) ? diagnostic.status : undefined],
-        ['bodyPresent', typeof diagnostic?.bodyPresent === 'boolean' ? diagnostic.bodyPresent : undefined],
-        ['scannerStatus', getSafeEnum(diagnostic?.scannerStatus, SAFE_SCANNER_STATUSES)],
-        ['retryable', typeof diagnostic?.retryable === 'boolean' ? diagnostic.retryable : undefined],
-        ['scheme', getSafeEnum(diagnostic?.scheme, SAFE_SCHEMES)],
-        ['event', SAFE_DEBUG_EVENTS.includes(diagnostic?.event) ? diagnostic.event : undefined],
-        ['urlId', typeof diagnostic?.urlId === 'string' && /^[a-f0-9]{16}$/.test(diagnostic.urlId) ? diagnostic.urlId : undefined],
-        ['cacheState', SAFE_CACHE_STATES.includes(diagnostic?.cacheState) ? diagnostic.cacheState : undefined],
-        ['analysisOutcome', SAFE_ANALYSIS_OUTCOMES.includes(diagnostic?.analysisOutcome) ? diagnostic.analysisOutcome : undefined],
-        ['imageId', Number.isSafeInteger(diagnostic?.imageId) ? diagnostic.imageId : undefined],
-        ['runId', Number.isSafeInteger(diagnostic?.runId) ? diagnostic.runId : undefined],
-        ['imageIndex', Number.isSafeInteger(diagnostic?.imageIndex) ? diagnostic.imageIndex : undefined],
-        ['candidateIndex', Number.isSafeInteger(diagnostic?.candidateIndex) ? diagnostic.candidateIndex : undefined],
-        ['reason', SAFE_DEBUG_REASONS.includes(diagnostic?.reason) ? diagnostic.reason : undefined],
-        ['activeRequest', typeof diagnostic?.activeRequest === 'boolean' ? diagnostic.activeRequest : undefined],
-        ['processed', typeof diagnostic?.processed === 'boolean' ? diagnostic.processed : undefined],
-        ['running', typeof diagnostic?.running === 'boolean' ? diagnostic.running : undefined],
-        ['sameSrc', typeof diagnostic?.sameSrc === 'boolean' ? diagnostic.sameSrc : undefined],
-        ['cancelled', typeof diagnostic?.cancelled === 'boolean' ? diagnostic.cancelled : undefined],
-        ['width', Number.isSafeInteger(diagnostic?.width) ? diagnostic.width : undefined],
-        ['height', Number.isSafeInteger(diagnostic?.height) ? diagnostic.height : undefined],
-        ['redacted', true],
-    ];
-    return fields
-        .filter(([, value]) => value !== undefined && value !== 'unknown')
-        .map(([key, value]) => `${key}=${value}`)
-        .join(' ')
-        .slice(0, SAFE_DIAGNOSTIC_MAX_LENGTH);
+    const booleanValidator = (value) => typeof value === 'boolean';
+    const safeIntegerValidator = (value) => Number.isSafeInteger(value);
+    return globalThis.SafeDiagnostics.formatSafeDiagnostic(diagnostic, {
+        orderedKeys: [
+            'category', 'phase', 'errorType', 'status', 'bodyPresent', 'scannerStatus',
+            'retryable', 'scheme', 'event', 'urlId', 'cacheState', 'analysisOutcome',
+            'imageId', 'runId', 'imageIndex', 'candidateIndex', 'reason',
+            'activeRequest', 'processed', 'running', 'sameSrc', 'cancelled', 'width', 'height',
+        ],
+        enums: {
+            category: SAFE_CATEGORIES,
+            phase: SAFE_PHASES,
+            errorType: SAFE_ERROR_TYPES,
+            scannerStatus: SAFE_SCANNER_STATUSES,
+            scheme: SAFE_SCHEMES,
+            event: SAFE_DEBUG_EVENTS,
+            cacheState: SAFE_CACHE_STATES,
+            analysisOutcome: SAFE_ANALYSIS_OUTCOMES,
+            reason: SAFE_DEBUG_REASONS,
+        },
+        validators: {
+            urlId: (value) => typeof value === 'string' && /^[a-f0-9]{16}$/.test(value),
+            imageId: safeIntegerValidator,
+            runId: safeIntegerValidator,
+            imageIndex: safeIntegerValidator,
+            candidateIndex: safeIntegerValidator,
+            width: safeIntegerValidator,
+            height: safeIntegerValidator,
+            activeRequest: booleanValidator,
+            processed: booleanValidator,
+            running: booleanValidator,
+            sameSrc: booleanValidator,
+            cancelled: booleanValidator,
+        },
+        omitUnknown: true,
+        maxLength: SAFE_DIAGNOSTIC_MAX_LENGTH,
+    });
 }
 
 function debugLog(...args) {
@@ -244,7 +249,13 @@ function emitFatalInitializationFailure() {
         retryable: false,
         redacted: true,
     };
-    console.error(`[AI Meta Viewer] ${formatSafeDiagnostic(diagnostic)}`);
+    let formatted = 'category=fatal-initialization phase=initialization errorType=import retryable=false redacted=true';
+    try {
+        formatted = formatSafeDiagnostic(diagnostic);
+    } catch (_) {
+        // shared_diagnostics.js 自体のロード失敗時も、この固定診断だけは必ず出す。
+    }
+    console.error(`[AI Meta Viewer] ${formatted}`);
 }
 
 function createInitializationUnavailableResult() {
@@ -262,7 +273,7 @@ function createInitializationUnavailableResult() {
 }
 
 try {
-    importScripts('pako.js', 'jszip.min.js', 'parser.js', 'video_parser.js', 'video_range_reader.js', 'png_metadata_scanner.js');
+    importScripts('shared_diagnostics.js', 'pako.js', 'jszip.min.js', 'parser.js', 'video_parser.js', 'video_range_reader.js', 'png_metadata_scanner.js');
     initializationState = INITIALIZATION_STATES.READY;
 } catch (error) {
     emitFatalInitializationFailure();
@@ -279,17 +290,35 @@ const browserAPI = (() => {
 
         // Chrome APIをPromise化
         if (chrome.storage && chrome.storage.local) {
+            const callbackPromise = (method, args) => new Promise((resolve, reject) => {
+                try {
+                    method(...args, (result) => {
+                        if (chrome.runtime.lastError) {
+                            reject(new Error(chrome.runtime.lastError.message));
+                        } else {
+                            resolve(result);
+                        }
+                    });
+                } catch (error) {
+                    reject(error);
+                }
+            });
             chromeAPI.storage = {
                 local: {
-                    get: (keys) => new Promise(resolve => chrome.storage.local.get(keys, resolve)),
-                    set: (items) => new Promise(resolve => chrome.storage.local.set(items, resolve)),
-                    remove: (keys) => new Promise(resolve => chrome.storage.local.remove(keys, resolve)),
-                    clear: () => new Promise(resolve => chrome.storage.local.clear(resolve)),
-                    getBytesInUse: (keys) => new Promise(resolve => chrome.storage.local.getBytesInUse(keys, resolve))
+                    get: (keys) => callbackPromise(chrome.storage.local.get.bind(chrome.storage.local), [keys]),
+                    set: (items) => callbackPromise(chrome.storage.local.set.bind(chrome.storage.local), [items]),
+                    remove: (keys) => callbackPromise(chrome.storage.local.remove.bind(chrome.storage.local), [keys]),
+                    clear: () => callbackPromise(chrome.storage.local.clear.bind(chrome.storage.local), []),
+                    getBytesInUse: (keys) => callbackPromise(chrome.storage.local.getBytesInUse.bind(chrome.storage.local), [keys]),
+                    ...(typeof chrome.storage.local.getKeys === 'function'
+                        ? {
+                            getKeys: () => callbackPromise(chrome.storage.local.getKeys.bind(chrome.storage.local), []),
+                        }
+                        : {}),
                 },
                 sync: {
-                    get: (keys) => new Promise(resolve => chrome.storage.sync.get(keys, resolve)),
-                    set: (items) => new Promise(resolve => chrome.storage.sync.set(items, resolve))
+                    get: (keys) => callbackPromise(chrome.storage.sync.get.bind(chrome.storage.sync), [keys]),
+                    set: (items) => callbackPromise(chrome.storage.sync.set.bind(chrome.storage.sync), [items])
                 }
             };
         }
@@ -318,7 +347,7 @@ const browserAPI = (() => {
 // 環境検出
 const isFirefox = typeof browser !== 'undefined';
 const isChrome = typeof chrome !== 'undefined' && !isFirefox;
-const PNG_SCANNER_CACHE_VERSION = 'png-scanner-v2';
+const PNG_SCANNER_CACHE_VERSION = 'png-scanner-v5';
 const CACHE_ENTRY_MARKER = 'aiMetaViewerCacheEntry';
 
 // 永続化LRUキャッシュクラス (browserAPI.storage.local使用)
@@ -336,6 +365,15 @@ class PersistentLRUCache {
 
         // initを待機可能にするためPromiseを保持
         this.initPromise = this.init();
+        // set/clear を直列化し、clear のキー列挙中に set が割り込まないようにする。
+        this.operationChain = Promise.resolve();
+        this.cacheGeneration = 0;
+    }
+
+    _runExclusive(operation) {
+        const next = this.operationChain.then(operation, operation);
+        this.operationChain = next.catch(() => {});
+        return next;
     }
 
     async init() {
@@ -359,10 +397,13 @@ class PersistentLRUCache {
 
     async saveIndex() {
         if (this.saveTimer) clearTimeout(this.saveTimer);
+        const generation = this.cacheGeneration;
+        const snapshot = Array.from(this.index.entries());
 
         this.saveTimer = setTimeout(async () => {
+            if (generation !== this.cacheGeneration) return;
             try {
-                await this.storage.set({ [this.metaKey]: Array.from(this.index.entries()) });
+                await this.storage.set({ [this.metaKey]: snapshot });
             } catch (e) {
                 debugLog('Cache index save error', e);
             }
@@ -371,6 +412,7 @@ class PersistentLRUCache {
 
     async get(url) {
         await this.initPromise;
+        if (typeof settings !== 'undefined' && settings?.debugAllDetections === true) return undefined;
         const entry = this.index.get(url);
         if (!entry) return undefined;
 
@@ -409,6 +451,11 @@ class PersistentLRUCache {
 
     async set(url, metadata, options = {}) {
         await this.initPromise;
+        return this._runExclusive(() => this._writeCache(url, metadata, options));
+    }
+
+    async _writeCache(url, metadata, options = {}) {
+        if (typeof settings !== 'undefined' && settings?.debugAllDetections === true) return { stored: false, reason: 'debug' };
         const key = this.cacheKeyPrefix + url;
 
         // JSON文字列をUTF-8へ変換した実byte数をキャッシュ容量として扱う。
@@ -459,9 +506,50 @@ class PersistentLRUCache {
 
     async clear() {
         await this.initPromise;
-        await this.storage.clear();
+        return this._runExclusive(() => this._clearInternal());
+    }
+
+    async _clearInternal() {
+        this.cacheGeneration += 1;
+        if (this.saveTimer) {
+            clearTimeout(this.saveTimer);
+            this.saveTimer = null;
+        }
+        let keys = null;
+        let enumerationSucceeded = false;
+        try {
+            if (typeof this.storage.getKeys === 'function') {
+                keys = await this.storage.getKeys();
+            } else {
+                const all = await this.storage.get(null);
+                keys = Object.keys(all || {});
+            }
+            enumerationSucceeded = Array.isArray(keys);
+        } catch (error) {
+            debugLog('Cache clear key enumeration error', error);
+            try {
+                const all = await this.storage.get(null);
+                keys = Object.keys(all || {});
+                enumerationSucceeded = true;
+            } catch (fallbackError) {
+                debugLog('Cache clear fallback enumeration error', fallbackError);
+            }
+        }
+        if (Array.isArray(keys)) {
+            keys = keys.filter(key => key === this.metaKey || key.startsWith(this.cacheKeyPrefix));
+        } else {
+            // 列挙APIが使えない場合も、全体 clear() は使わず既知のキーだけを消す。
+            keys = [
+                ...new Set([
+                    ...Array.from(this.index.keys(), url => this.cacheKeyPrefix + url),
+                    this.metaKey,
+                ]),
+            ];
+        }
+        if (keys.length > 0) await this.storage.remove(keys);
         this.index.clear();
         this.totalBytes = 0;
+        return { success: true, full: enumerationSucceeded, removed: keys.length };
     }
 
     async ensureCapacity(newSize = 0) {
@@ -469,19 +557,14 @@ class PersistentLRUCache {
         if (this.index.size >= this.limit || (this.totalBytes + newSize) > this.byteLimit) {
             debugLog(`[Cache] Capacity check: count=${this.index.size}, totalBytes=${this.totalBytes}, adding=${newSize}`);
 
-            // 古い順にソート (t: timestamp が小さい順)
-            const sorted = Array.from(this.index.entries())
-                .sort((a, b) => {
-                    const timeA = typeof a[1] === 'object' ? a[1].t : a[1];
-                    const timeB = typeof b[1] === 'object' ? b[1].t : b[1];
-                    return timeA - timeB;
-                });
-
             const keysToRemove = [];
             const targetBytes = this.byteLimit * 0.7; // 70%まで空ける
             const targetCount = this.limit * 0.9;     // 90%まで空ける
 
-            for (const [url, value] of sorted) {
+            // Map の挿入順（最も古いエントリが先頭）をそのまま使う。
+            // アクセス時は get() が delete/set するため、現行の FIFO/LRU 相当の
+            // 追い出し順を維持する。
+            for (const [url, value] of this.index) {
                 // 削除条件を満たさなくなるまでループ
                 if (this.index.size < targetCount && this.totalBytes < targetBytes) break;
 
@@ -811,7 +894,7 @@ const HTTP_OK_STATUS = 200;
 const HTTP_PARTIAL_CONTENT_STATUS = 206;
 
 // --- 解析の集約予算 ---
-const PARSER_CACHE_VERSION = 'parser-v1';
+const PARSER_CACHE_VERSION = 'parser-v2';
 // PNGの単一ファイルサイズ上限は撤廃したままにする。制御対象は同時性である。
 // content script は複数frame・複数tabから要求を送るため、Service Worker が
 // 唯一の集約点となる。以下の上限は必ずここで適用する。
@@ -1256,7 +1339,7 @@ async function runGatedPngStreamScan({ charge, context, openStream }) {
         if (!stream) return null;
         const result = await scanPngMetadataStream(
             withStallTimeout(stream, onStall, controller.signal),
-            { signal: controller.signal }
+            { signal: controller.signal, debugAllDetections: context?.debugAllDetections === true }
         );
         if (stalled) {
             const stallError = new Error(
@@ -1298,7 +1381,10 @@ async function runGatedPngBufferScan({ buffer, charge, context }) {
         signal: context?.signal ?? null,
     });
     try {
-        const result = scanPngMetadataBuffer(buffer, { signal: context?.signal ?? null });
+        const result = scanPngMetadataBuffer(buffer, {
+            signal: context?.signal ?? null,
+            debugAllDetections: context?.debugAllDetections === true,
+        });
         if (context?.signal?.aborted) throw createAnalysisAbortError();
         return result;
     } finally {
@@ -1368,6 +1454,7 @@ function requestImageMetadata(imageUrl, { tabId = null, priority = ANALYSIS_PRIO
         order,
         tabId,
         tabIds: new Set(tabId === null ? [] : [tabId]),
+        debugAllDetections: settings?.debugAllDetections === true,
         promise: null,
     };
     inFlightAnalyses.set(imageUrl, entry);
@@ -1689,6 +1776,7 @@ function isStructuralRangeFailure(error, status) {
 // デフォルト設定
 const DEFAULT_SETTINGS = {
     debugMode: false,
+    debugAllDetections: false,
     errorNotification: false,
     minPixelCount: 250000,
     downloaderFolderMode: 'id_pageTitle', // 'id_pageTitle', 'pageTitle', 'domain', 'none'
@@ -1777,7 +1865,259 @@ chrome.runtime.onInstalled.addListener(async (details) => {
 /**
  * Content Scriptからのメッセージを処理
  */
+// --- 遅延注入（Phase 1） ---
+// module の値はこの固定対応表のキーとしてのみ解釈する。
+// リクエスト内のファイル名・パスは一切使用しない。
+const LAZY_MODULE_FILES = Object.freeze({
+    ui: Object.freeze({
+        scripts: Object.freeze(['ui_guard.js', 'comfyui_parser.js', 'ui.js']),
+        styles: Object.freeze(['ui.css']),
+    }),
+});
+const SCANNER_SCRIPT_FILES = Object.freeze([
+    'scanner/utils.js',
+    'scanner/progress-ui.js',
+    'scanner/thumbnail-finder.js',
+    'scanner/core.js',
+    'scanner/ui.js',
+    'scanner/controller.js',
+    'scanner.js',
+]);
+const LAZY_INJECTION_PROMISES = new Map();
+const SCANNER_INJECTION_PROMISES = new Map();
+const LAZY_MODULE_STYLE_READY = new Set();
+
+function toHashlessUrl(value) {
+    if (typeof value !== 'string') return '';
+    const hashIndex = value.indexOf('#');
+    return hashIndex === -1 ? value : value.slice(0, hashIndex);
+}
+
+function matchesExcludedSitePattern(pattern, hostname, url) {
+    if (typeof pattern !== 'string' || pattern.length === 0) return false;
+    try {
+        const regex = new RegExp(
+            '^' + pattern
+                .replace(/[.+^${}()|[\]\\]/g, '\\$&')
+                .replace(/\*/g, '.*')
+                .replace(/\?/g, '.') + '$',
+            'i',
+        );
+        return regex.test(hostname) || regex.test(url);
+    } catch (_) {
+        return false;
+    }
+}
+
+async function isUrlExcludedBySettings(url) {
+    if (typeof url !== 'string' || url.length === 0) return false;
+    try {
+        const stored = await chrome.storage.sync.get({ excludedSites: [] });
+        const excludedSites = Array.isArray(stored?.excludedSites) ? stored.excludedSites : [];
+        if (excludedSites.length === 0) return false;
+        const hostname = new URL(url).hostname;
+        return excludedSites.some((pattern) => matchesExcludedSitePattern(pattern, hostname, url));
+    } catch (error) {
+        debugLog({
+            category: 'settings',
+            phase: 'background',
+            errorType: 'storage',
+        });
+        return false;
+    }
+}
+
+async function injectLazyModule(moduleName, sender) {
+    const config = LAZY_MODULE_FILES[moduleName];
+    const tabId = sender?.tab?.id;
+    const frameId = Number.isInteger(sender?.frameId) ? sender.frameId : 0;
+    const senderUrl = typeof sender?.url === 'string' ? sender.url : '';
+    if (!config || !Number.isInteger(tabId) || senderUrl.length === 0) {
+        return { success: false, error: 'invalid-module-request' };
+    }
+    if (!chrome.scripting?.executeScript) {
+        return { success: false, error: 'scripting-unavailable' };
+    }
+    if (await isUrlExcludedBySettings(senderUrl)) {
+        return { success: false, error: 'site-excluded' };
+    }
+
+    const target = { tabId, frameIds: [frameId] };
+    const expectedUrl = toHashlessUrl(senderUrl);
+    const styleKey = `${tabId}:${frameId}:${moduleName}`;
+    const moduleReadyProbe = () => chrome.scripting.executeScript({
+        target,
+        world: 'ISOLATED',
+        func: () => window.__aiMetaViewerUiModuleReady === true &&
+            typeof window.observeVideoMetadata === 'function' &&
+            typeof window.observeGenericSafetensorsLinks === 'function',
+    });
+    const ensureStyles = async () => {
+        if (!config.styles || config.styles.length === 0) return true;
+        if (LAZY_MODULE_STYLE_READY.has(styleKey)) return true;
+        try {
+            await chrome.scripting.insertCSS({ target, files: config.styles });
+            LAZY_MODULE_STYLE_READY.add(styleKey);
+            return true;
+        } catch (error) {
+            LAZY_MODULE_STYLE_READY.delete(styleKey);
+            debugLog({ category: 'message', phase: 'background', errorType: 'import' });
+            return false;
+        }
+    };
+    try {
+        const alreadyReady = await moduleReadyProbe();
+        if (Array.isArray(alreadyReady) && alreadyReady.some((entry) => entry.result === true)) {
+            if (!(await ensureStyles())) {
+                return { success: false, error: 'style-injection-failed' };
+            }
+            return { success: true, cached: true };
+        }
+        LAZY_MODULE_STYLE_READY.delete(styleKey);
+        await chrome.scripting.executeScript({
+            target,
+            world: 'ISOLATED',
+            func: (expected) => {
+                window.__aiMetaViewerExpectedLazyUrl = expected;
+                window.__aiMetaViewerAbortUiModule = false;
+                window.__aiMetaViewerUiModuleReady = false;
+            },
+            args: [expectedUrl],
+        });
+        await chrome.scripting.executeScript({
+            target,
+            world: 'ISOLATED',
+            files: config.scripts,
+        });
+        const ready = await moduleReadyProbe();
+        if (!Array.isArray(ready) || !ready.some((entry) => entry.result === true)) {
+            return { success: false, error: 'navigation-mismatch' };
+        }
+        if (!(await ensureStyles())) {
+            return { success: false, error: 'style-injection-failed' };
+        }
+        return { success: true };
+    } catch (error) {
+        debugLog({ category: 'message', phase: 'background', errorType: 'import' });
+        return { success: false, error: 'module-script-failed' };
+    }
+}
+
+async function injectScannerIntoFrames(tabId) {
+    if (!Number.isInteger(tabId) || !chrome.scripting?.executeScript) {
+        return { success: false, error: 'scripting-unavailable', frames: [] };
+    }
+    let probe = [];
+    try {
+        probe = await chrome.scripting.executeScript({
+            target: { tabId, allFrames: true },
+            world: 'ISOLATED',
+            func: () => ({
+                loaded: window.__aiMetaViewerScannerLoaded === true,
+                isTop: window.top === window,
+            }),
+        });
+    } catch (error) {
+        debugLog({ category: 'message', phase: 'background', errorType: 'import' });
+        return { success: false, error: 'frame-probe-failed', frames: [] };
+    }
+    const frames = (Array.isArray(probe) ? probe : [])
+        .filter((entry) => Number.isInteger(entry.frameId))
+        .map((entry) => ({
+            frameId: entry.frameId,
+            loaded: entry.result?.loaded === true,
+            isTop: entry.result?.isTop === true,
+        }));
+    if (frames.length === 0) {
+        return { success: false, error: 'no-injectable-frames', frames: [] };
+    }
+
+    const injectableFrames = [];
+    for (const frame of frames) {
+        if (frame.loaded) {
+            injectableFrames.push(frame);
+            continue;
+        }
+        const target = { tabId, frameIds: [frame.frameId] };
+        try {
+            await chrome.scripting.insertCSS({ target, files: ['ui.css'] });
+        } catch (error) {
+            // CSS 失敗だけでスキャン機能を落とさない。
+            debugLog({ category: 'message', phase: 'background', errorType: 'import' });
+        }
+        try {
+            await chrome.scripting.executeScript({
+                target,
+                world: 'ISOLATED',
+                files: SCANNER_SCRIPT_FILES,
+            });
+            injectableFrames.push(frame);
+        } catch (error) {
+            debugLog({ category: 'message', phase: 'background', errorType: 'import' });
+        }
+    }
+    if (!injectableFrames.some((frame) => frame.frameId === 0)) {
+        return {
+            success: false,
+            error: 'top-frame-injection-failed',
+            frames: injectableFrames,
+        };
+    }
+    return {
+        success: true,
+        error: null,
+        frames: injectableFrames,
+    };
+}
+
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
+    if (request.action === 'ensureModule') {
+        const moduleName = typeof request.module === 'string' ? request.module : '';
+        if (!Object.prototype.hasOwnProperty.call(LAZY_MODULE_FILES, moduleName)) {
+            debugLog({ category: 'message', phase: 'background', errorType: 'invalid-response' });
+            sendResponse({ success: false, error: 'unknown-module' });
+            return false;
+        }
+        const tabId = sender?.tab?.id;
+        const frameId = Number.isInteger(sender?.frameId) ? sender.frameId : 0;
+        if (!Number.isInteger(tabId)) {
+            sendResponse({ success: false, error: 'invalid-sender' });
+            return false;
+        }
+        const key = `${tabId}:${frameId}:${moduleName}`;
+        if (!LAZY_INJECTION_PROMISES.has(key)) {
+            const promise = injectLazyModule(moduleName, sender)
+                .finally(() => LAZY_INJECTION_PROMISES.delete(key));
+            LAZY_INJECTION_PROMISES.set(key, promise);
+        }
+        LAZY_INJECTION_PROMISES.get(key)
+            .then((result) => sendResponse(result))
+            .catch(() => sendResponse({ success: false, error: 'module-injection-failed' }));
+        return true;
+    }
+
+    if (request.action === 'scannerFrameResults') {
+        const tabId = sender?.tab?.id;
+        const frameId = sender?.frameId;
+        if (!Number.isInteger(tabId) || !Number.isInteger(frameId) || frameId === 0 ||
+            typeof request.scanId !== 'string') {
+            sendResponse({ success: false, error: 'invalid-frame-result' });
+            return false;
+        }
+        const candidates = Array.isArray(request.candidates) ? request.candidates : [];
+        chrome.tabs.sendMessage(tabId, {
+            action: 'scannerFrameResults',
+            scanId: request.scanId,
+            frameId,
+            success: request.success === true,
+            error: typeof request.error === 'string' ? request.error : null,
+            candidates,
+            context: request.context && typeof request.context === 'object' ? request.context : {},
+        }, { frameId: 0 }).catch(() => {});
+        sendResponse({ success: true });
+        return false;
+    }
+
     // Content Script の画像診断ログを Service Worker の DevTools に集約する。
     // background 側で再度 allowlist を通すため、任意文字列や URL は出力されない。
     if (request.action === 'contentDiagnostic') {
@@ -1904,9 +2244,16 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
 
     if (request.action === 'clearCache') {
         // キャッシュをクリア
-        metadataCache.clear().then(() => {
+        metadataCache.clear().then((result) => {
             debugLog('[AI Meta Viewer] Cache cleared');
-            sendResponse({ success: true });
+            sendResponse({
+                success: true,
+                full: result?.full !== false,
+                removed: result?.removed || 0,
+            });
+        }).catch((error) => {
+            debugLog('Cache clear error', error);
+            sendResponse({ success: false, error: error.message });
         });
         return true;
     }
@@ -2083,6 +2430,8 @@ async function handleGetMediaSize(url) {
 chrome.action.onClicked.addListener(async (tab) => {
     debugLog('[AI Meta Viewer] Extension icon clicked on tab:', tab.id);
 
+    if (!Number.isInteger(tab?.id)) return;
+
     // スキャン機能が無効化されている場合は何もしない
     // (Service Worker 再起動直後でも確実に判定できるよう、ストレージから直接読み込む)
     try {
@@ -2096,9 +2445,37 @@ chrome.action.onClicked.addListener(async (tab) => {
         return;
     }
 
-    chrome.tabs.sendMessage(tab.id, { action: 'scanPage' }).catch(err => {
-        debugLog('[AI Meta Viewer] Failed to send scanPage message', err);
-    });
+    if (await isUrlExcludedBySettings(tab.url || '')) {
+        debugLog('[AI Meta Viewer] Scanner is disabled on an excluded site');
+        return;
+    }
+
+    const injection = await injectScannerIntoFrames(tab.id);
+    if (!injection.success) {
+        debugLog({
+            category: 'message',
+            phase: 'background',
+            errorType: 'import',
+            retryable: true,
+        });
+        return;
+    }
+
+    const scanId = (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function')
+        ? crypto.randomUUID()
+        : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    const frames = [...injection.frames].sort((left, right) => Number(right.isTop) - Number(left.isTop));
+    const frameIds = frames.map((frame) => frame.frameId);
+    for (const frame of frames) {
+        chrome.tabs.sendMessage(tab.id, {
+            action: 'scanPage',
+            scanId,
+            frameIds,
+            isTopFrame: frame.isTop,
+        }, { frameId: frame.frameId }).catch(err => {
+            debugLog('[AI Meta Viewer] Failed to send scanPage message', err);
+        });
+    }
 });
 
 /**
@@ -2640,6 +3017,10 @@ async function handleFetchImageMetadata(imageUrl) {
         // 後続の既存取得経路で従来どおり失敗分類するため、schemeは空のままにする。
     }
     const isFileScheme = imageScheme === 'file:';
+    const requestContext = getAnalysisContext(imageUrl);
+    const debugAllDetections = requestContext
+        ? requestContext.debugAllDetections === true
+        : settings?.debugAllDetections === true;
     const urlId = getSafeUrlId(imageUrl);
 
     debugLog('[AI Meta Viewer] Fetching metadata for:', imageUrl);
@@ -2800,6 +3181,7 @@ async function handleFetchImageMetadata(imageUrl) {
         metadataPartial = false,
         reason,
         error,
+        debug = null,
         cached = false,
     }) => {
         const analysisState = state === 'empty-confirmed' || state === 'unsupported-format'
@@ -2853,6 +3235,7 @@ async function handleFetchImageMetadata(imageUrl) {
             ...(parserReason ? { parserReason: normalizeSafeReason(parserReason, safeReason) } : {}),
             ...(scannerStatus ? { scannerStatus: normalizeSafeScannerStatus(scannerStatus) } : {}),
             ...(metadataPartial ? { metadataPartial: true } : {}),
+            ...(debug ? { debug } : {}),
             reason: safeReason,
             ...(cached ? { cached: true } : {}),
             diagnostics: diagnostic,
@@ -4310,7 +4693,7 @@ async function handleFetchImageMetadata(imageUrl) {
                 });
             } else if (completeRepresentation) {
                 // 初期206は要求Range上限で有界化されているため、保持済みbytesをbufferで渡す。
-                scanResult = scanPngMetadataBuffer(buffer, { signal: analysisSignal });
+                scanResult = scanPngMetadataBuffer(buffer, { signal: analysisSignal, debugAllDetections });
             } else {
                 // partial headは後続断片へ接続せず、byte 0からのstreamだけを解析する。
                 buffer = null;
@@ -4345,6 +4728,7 @@ async function handleFetchImageMetadata(imageUrl) {
                         metadata: scanResult.metadata,
                         scannerStatus: scanResult.status,
                         metadataPartial: scanResult.metadataPartial === true,
+                        debug: scanResult.debug || null,
                         reason: 'found',
                     });
                 }
@@ -4352,6 +4736,7 @@ async function handleFetchImageMetadata(imageUrl) {
                     success: true,
                     metadata: scanResult.metadata,
                     ...(scanResult.metadataPartial === true ? { metadataPartial: true } : {}),
+                    ...(scanResult.debug ? { debug: scanResult.debug } : {}),
                     diagnostics: scanResult.diagnostics,
                 };
             }
@@ -4438,6 +4823,7 @@ async function handleFetchImageMetadata(imageUrl) {
             metadata = extractMetadata(fullBuffer, {
                 format: detectedFormat,
                 inputComplete: true,
+                debugAllDetections,
             });
             return metadata;
         };
@@ -4445,6 +4831,7 @@ async function handleFetchImageMetadata(imageUrl) {
             metadata = extractMetadata(buffer, {
                 format: detectedFormat,
                 inputComplete: rangeRepresentationComplete,
+                debugAllDetections,
             });
 
             if (detectedFormat === 'webp' && webpStreamResult) {
@@ -4475,6 +4862,7 @@ async function handleFetchImageMetadata(imageUrl) {
                     metadata = extractMetadata(buffer, {
                         format: detectedFormat,
                         inputComplete: rangeRepresentationComplete,
+                        debugAllDetections,
                     });
                     metadata = mergeWebpStreamMetadata(metadata, webpStreamResult);
                     isRangeRequest = false;
@@ -4569,6 +4957,7 @@ async function handleFetchImageMetadata(imageUrl) {
                                 const nextMetadata = extractMetadata(newBuffer, {
                                     format: detectedFormat,
                                     inputComplete: retryComplete,
+                                    debugAllDetections,
                                 });
                                 const retryState = getMetadataState(nextMetadata);
                                 const budgetReached = isBoundedMetadataFormat(detectedFormat) &&
@@ -4598,6 +4987,7 @@ async function handleFetchImageMetadata(imageUrl) {
                                 metadata = extractMetadata(buffer, {
                                     format: detectedFormat,
                                     inputComplete: rangeRepresentationComplete,
+                                    debugAllDetections,
                                 });
                             } else {
                                 const retryFailure = new Error(`HTTP ${retryResponse.status}`);
@@ -4735,6 +5125,7 @@ async function handleFetchImageMetadata(imageUrl) {
                     parserState: metadataState,
                     parserReason,
                     metadataPartial: metadata.metadataPartial === true,
+                    debug: metadata.__debugDetection || null,
                     reason: 'found',
                 });
             }
@@ -4773,6 +5164,7 @@ async function handleFetchImageMetadata(imageUrl) {
             success: true,
             metadata,
             ...(metadata.metadataPartial === true ? { metadataPartial: true } : {}),
+            ...(metadata.__debugDetection ? { debug: metadata.__debugDetection } : {}),
         };
 
     } catch (error) {

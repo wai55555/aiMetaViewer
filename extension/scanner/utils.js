@@ -13,7 +13,13 @@ function resolveOriginalUrls(img) {
 
     // SiteAdapters が定義されているかチェック
     if (typeof SiteAdapters === 'undefined' || !Array.isArray(SiteAdapters)) {
-        // フォールバック: img.src を返す
+        // adapters.js は対象ホストでのみ読み込まれる。それ以外では
+        // 旧汎用アダプターと同じ親リンク解決をここで行う。
+        const parentLink = img.closest?.('a');
+        const href = parentLink?.href;
+        if (href && /\.(png|jpg|jpeg|webp|avif|gif)$/i.test(href.split('?')[0])) {
+            return href;
+        }
         return img.src || img.currentSrc || null;
     }
 
