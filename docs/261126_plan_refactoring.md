@@ -1001,6 +1001,37 @@ Chrome Web Store への公開手順は本計画の対象外である。
 
 ---
 
+## §15 デバッグ全検知モード（Level 1）
+
+ユーザー報告の「検出できない画像」を調査するための、明示的なデバッグ機能。
+通常の検出・キャッシュ・性能には影響させない。
+
+- **FR-DBG-01**: 設定 `debugAllDetections`（既定 `false`）を追加する。オプション画面の
+  Debug セクションから有効化できる。Level 2（追加取得を強制するモード）は本節の
+  対象外とし、実装しない。
+- **FR-DBG-02**: 有効時は、取得済みバイト列に対する**論理的な抑制**を外す。
+  - 通常メタデータによる Stealth 抑制
+  - Stealth 候補の画素数上限（33.5MP）
+  - content 側の `ignoredSoftware` / `ignoredMetadataKeys`
+  - content 側の最小画素数・最小サイズ・アバター等の表示除外
+  - JPEG COM / EXIF / XMP の「先頭のみ」「既存優先」による表示上の握りつぶし
+    （デバッグ情報に全担体を残す。通常の `metadata` の優先順位は変えない）
+- **FR-DBG-03**: 追加のネットワーク取得は行わない。取得済みデータの範囲で検査し、
+  IDAT が未取得で Stealth を検査できない場合は
+  `debug.limited = "png-idat-not-acquired"` のように明示する。
+- **FR-DBG-04**: 資源安全の上限は維持する。`MAX_DECODED_BYTES`、text / zTXt /
+  eXIf prefix、trailing 1MiB、JPEG head budget / SOS 打ち切り、取得ゲートは
+  デバッグでも変更しない。
+- **FR-DBG-05**: デバッグ結果は通常の `metadata` を壊さず、別枠の
+  `debug`（担体一覧・抑制理由・limited）として返す。値は UI で `textContent`
+  経由で表示し、コンソールへ生値を出さない。バッジには `DEBUG` を付ける。
+- **FR-DBG-06**: デバッグ時は永続キャッシュと content のメモリキャッシュを
+  bypass する。デバッグ結果を通常キャッシュへ保存しない。
+- **FR-DBG-07**: 通常モードの検出結果・優先順位・キャッシュ版数を変更しない。
+  §11.2 にデバッグ用の回帰テストを追加する。
+
+---
+
 ## 付録 A：要件 ID 一覧
 
 - 原則：P-1〜P-7（§2）
@@ -1014,6 +1045,7 @@ Chrome Web Store への公開手順は本計画の対象外である。
 - Stealth：FR-STL-01〜07（04b を含む）（§7）
 - 保守：FR-UNI-01〜03、FR-CACHE-01〜03、FR-DUP-01〜02、FR-BG-01（§8）
 - 生成元解釈：FR-GEN-01〜04（§9）
+- デバッグ全検知：FR-DBG-01〜07（§15）
 - Phase 0 計測：B-01〜B-06（§10）
 
 ## 付録 B：判断の経緯（要約）
