@@ -63,6 +63,6 @@ trailing-bytes を比較した。代表的な差異は次のとおり。
 - 本検証は Node.js の `DecompressionStream` 実装で行った。Chrome 95+ の
   実装でも形式（deflate/gzip）は同じだが、エラーメッセージの文字列は
   環境依存であり、診断カテゴリの一致を前提にしない。
-- pako の遅延ロード（FR-SW-02 の scanner との組ロード）は、Phase 2 の
-  Service Worker 遅延ロード方式そのものが §5.2 の制約で保留になったため、
-  現時点では未適用。方式決定後に再評価する。
+- pako の遅延ロード（FR-SW-02 の scanner との組ロード）は、Phase 2 で
+  案B（現行の起動時 importScripts 維持）を採用したため、v2.0.0 では行わない。
+  将来案A（offscreen document）を起案した場合に再評価する。

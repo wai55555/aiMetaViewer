@@ -303,28 +303,28 @@ SOS 以後の探索、PNG trailing のための追加ネットワーク取得、
 
 ### 5.2 Service Worker の遅延ロード（Phase 2）
 
-> **2026-11-26 仕様改訂（Phase 2 保留）**: Chrome MV3 の Service Worker は、
+> **2026-11-26 決定（Phase 2 / 案B）**: Chrome MV3 の Service Worker は、
 > 初期評価後の `importScripts()` と動的 `import()` を実行できない。
 > Chromium 158 で、`fetch(chrome.runtime.getURL('parser.js'))` は 200 を返す一方、
 > 起動後の `importScripts(chrome.runtime.getURL('parser.js'))` は
 > `NetworkError: ... failed to load` になった。web.dev の Service Worker
 > 仕様でも dynamic `importScripts()` は不可と明記されている。
 >
-> したがって、本節の FR-SW-01/02 が前提とする「起動後に importScripts で
-> 遅延ロードする」方式は、本書のままでは実装不能である。
-> **Phase 2 は方式決定まで保留**し、現行の起動時 `importScripts` を
-> 暫定維持する。代替方式の詳細比較は
-> `docs/phase2-sw-lazy-options.md` を正とする。
+> また、現行の起動時評価を計測した結果は **中央値 42.0 ms**
+> （うち importScripts 39.0 ms、background-only 2.7 ms）だった
+> （`docs/phase2-sw-cold-start.md`、新規プロファイル 6 run、初回破棄、
+> 5 run 中央値）。数百 ms 級ではなく、取得層を offscreen へ移す案Aの
+> 実装リスクには見合わない。
 >
-> - **案 A**: offscreen document へ取得・解析を移す。SW を薄いルーターに
->   でき、FR-SW-01 の 250KB 目標を達成できる可能性がある。ただし
->   `offscreen` 権限、最低 Chrome 109、取得層の移設、Phase 2 の分割が必要。
-> - **案 B**: SW 遅延ロードを v2.0.0 の対象から外し、現行の起動時
->   `importScripts` を維持する。実装リスクは低いが、起動時ロードは
->   765,954 bytes のまま。
+> したがって **案B（現行の起動時 importScripts を維持）を採用**し、
+> FR-SW-01/02 は **v2.0.0 の対象外**として §14 将来課題へ送る。
+> 案Aは、`docs/phase2-sw-cold-start.md` の再評価条件（評価時間中央値
+> 100 ms 以上、または p95 150 ms 以上）を満たした場合にだけ独立計画として
+> 起案する。案Aの実装前検証（offscreen の ZIP / Blob URL / downloads 等）は
+> `docs/phase2-sw-lazy-options.md` の A-8 を必須とする。
 >
-> 仕様改訂 PR ではこの保留と比較を記録し、実装は行わない。案の決定後に
-> §4.2、FR-SW-01〜04、§13.1 を改訂する。
+> 以下 FR-SW-01〜04 は将来の案A採用時の要件として残す。v2.0.0 では
+> 実装・テストを行わない。
 
 要件：
 
@@ -834,7 +834,7 @@ PR には適用しない。
 | フェーズ | 追加テストの要点 |
 |---|---|
 | Phase 1 | 遅延対象ファイルが未注入の状態では対象機能が呼ばれないこと（注入フラグの単体検証が可能な範囲）、同一フレームへの二重注入がないこと（FR-CS-05）、location 照合が不一致の場合に初期化されず注入済みフラグが立たず次回操作で再試行できること、URL 変化検出の単体テスト（ポーリングに依存しない検出ロジック部分）。FR-CS-01 のバイト目標は自動テストではなく `wc -c` の実測値を PR に記録して確認する（FR-SW-01、FR-SW-03 の棚卸し表も同様に PR レビューで確認する項目とする）。FR-CS-02（遅延区分が対象場面まで読み込まれないこと）は §11.4 Phase 1 の DevTools 確認で、NFR-CS-01 は PR レビューで、それぞれ確認する |
-| Phase 2 | 遅延ロードの冪等性（並行呼び出しで `importScripts` 相当が 1 回だけ走ること）を、ロード関数をモック可能な形で検証する。pako 移行を行った場合は、移行後も従来と同等の検証密度で Stealth／iTXt の展開結果が不変であること（非同期化した場合はテスト側も追随させる。§11.3-4）。FR-SW-01 は `wc -c` 実測値を PR に記録し、FR-SW-03 は棚卸し表を PR レビューで確認する項目とする。実ブラウザでの初回利用は §11.4 の手動確認に委ねる |
+| Phase 2 | 案B採用により、遅延ロードの冪等性テストは将来計画へ送る。pako は CUT-13（移行中止）を記録する。コールドスタートは `tests/phase2/measure_sw_startup.cjs` で実測し、`docs/phase2-sw-cold-start.md` に記録する。実ブラウザでの初回利用は §11.4 の手動確認に委ねる |
 | Phase 3（zTXt） | 許可キーワードの zTXt が読めること、許可外キーワードは inflate されずスキップされること（inflate 回数の計測で示す）、大きな許可外 zTXt でチャンク全体のバッファが確保されないこと（FR-ZTXT-02 の先読み設計の検証）、圧縮方法 ≠ 0 の棄却、上限超過時の診断、CRC 不一致時の既存規則との一致。FR-DET-00f の `PNG_SCANNER_CACHE_VERSION` 更新は PR レビューで差分を確認する（trailing も同じ版数のため、この行で PNG 側を代表させる） |
 | Phase 3（COM） | ゲート通過 COM（A1111 形式・JSON 形式）が採用されること、非 ASCII（日本語）を含む A1111 形式 COM が文字化けせずデコードされて採用されること、無関係な COM が従来どおり無視されること（既存テスト維持）、EXIF と COM の両方がある場合に EXIF が優先されること、複数 COM では最初にゲートを通ったものだけが採用されること（FR-COM-04）、`writeJpegMetadata` で書いた JPEG を読み直して COM が採用されること（ラウンドトリップ）。FR-DET-00f のキャッシュ版数更新は PR レビューで差分を確認する（非 PNG 側の `PARSER_CACHE_VERSION` はこの行で代表させる） |
 | Phase 3（JPEG XMP） | APP1 XMP から `parameters` が読めること、EXIF の APP1 と混同しないこと、Extended XMP のみの場合に `unresolved` へ倒れないこと、切り取り時の partial 規則 |
@@ -930,7 +930,7 @@ Chrome Web Store への公開手順は本計画の対象外である。
 |---|---|---|---|
 | Phase 0 | §10 の計測と記録（プロダクトコードの変更なし） | `phase/0-baseline` | `docs/perf-baseline-1.8.md` が提出され、B-01〜B-06 が埋まっている |
 | Phase 1 | §5.1 content script 分割 | `phase/1-content-split` | §4.1 の権限判断ゲートの記録があり、FR-CS-01〜05 と NFR-CS-01 を満たし、§11.4 Phase 1 の手動確認が完了 |
-| Phase 2 | §5.2 SW 遅延ロード + §5.3 pako ゲート | `phase/2-sw-lazy` | FR-SW-01〜04、FR-PAKO-01〜03 のいずれかの結末（移行または中止の記録）が完了 |
+| Phase 2 | §5.3 pako ゲート + §5.2 SW遅延ロードの方式決定（案B） | `phase/2-sw-lazy` | FR-PAKO-01〜03 の結論と CUT-13、コールドスタート実測、案B採用・案A起案条件の記録が完了。FR-SW-01〜04 は将来課題へ |
 | Phase 3 | §6 検知追加（zTXt / COM / JPEG XMP / trailing / EXIF Software / XMP 改善） | `phase/3-detection` | §6 の全 FR（FR-DET-00f のキャッシュ版数更新を含む）と §11.2 Phase 3 のテストが緑。サブ項目ごとにコミットを分けること（§13.2） |
 | Phase 4 | §8 一本化・キャッシュ・重複整理 | `phase/4-unify` | FR-UNI / FR-CACHE / FR-DUP が完了し、FR-UNI-02 の等価性が再確認でき、FR-BG-01（分割を行わないこと）が守られ、FR-CS-01 / FR-SW-01 の再計測が目標内である |
 | Phase 5 | §7 Stealth 二段化と切り捨て | `phase/5-stealth` | §7.3 の決定ゲートを通過し、FR-STL-01〜07（04b を含む）と §11.2 Phase 5 のテストが緑 |
@@ -942,9 +942,9 @@ Chrome Web Store への公開手順は本計画の対象外である。
 「作ってすぐ消す」無駄を避ける。Phase 5 は Phase 4 の後とする
 （scanner が唯一の PNG 実装になってから Stealth に手を入れる）。
 
-> **Phase 2 の状態**: §5.2 の 2026-11-26 追記により、SW 遅延ロード方式の
-> 決定まで Phase 2 は保留。Phase 3 以降の実装は、Phase 2 の代替方式決定後に
-> 着手する（フェーズ順序は変更しない）。pako の移行中止（CUT-13）は決定済み。
+> **Phase 2 の状態**: 2026-11-26 に案Bを採用。pako は CUT-13 により中止、
+> SW 遅延ロード（FR-SW-01/02）は §14 将来課題へ送る。Phase 2 は実測・判断の
+> 記録をもって完了とし、Phase 3 以降へ進む。
 
 ### 13.2 コミット規約
 
@@ -969,10 +969,15 @@ Chrome Web Store への公開手順は本計画の対象外である。
   ここに記録すること。
 - キャッシュキーの URL 正規化（FR-CACHE-03 で見送ったもの）。
 - `background.js` のファイル分割（FR-BG-01 で見送ったもの）。
-- Service Worker の遅延解析方式（§5.2 の Phase 2 保留）。案 A（offscreen
-  document、Chrome 109+、`offscreen` 権限、取得層の移設）と案 B（起動時
-  importScripts の維持）を `docs/phase2-sw-lazy-options.md` で比較し、別計画で
-  決定する。案 A を採る場合は最低対応 Chrome を 109 以上へ改訂する。
+- Service Worker の遅延解析方式（§5.2 の案A）。offscreen document
+  （Chrome 109+、`offscreen` 権限、取得層の移設）へ移す案は、以下を全て
+  満たした場合にだけ独立計画として起案する。
+  1. `docs/phase2-sw-cold-start.md` と同じプロトコルで、現行の SW 評価時間
+     中央値が **100 ms 以上**、または p95 が **150 ms 以上**。
+  2. ユーザー体感のコールドスタート起因遅延が **100 ms 以上**実測される。
+  3. 起動時ロードが 1MB 超へ増え、同じ測定で 100 ms 以上の悪化が確認される。
+  起案時は `docs/phase2-sw-lazy-options.md` の A-8（offscreen の ZIP /
+  Blob URL / downloads / ライフサイクル）を実装前に検証する。
 - pako から DecompressionStream への移行（CUT-13）。scanner API の非同期化を
   認める別計画が前提。
 - 取得経路（Range／full fetch／file）の共通化（`BoundedFetcher` 的な抽象）。
