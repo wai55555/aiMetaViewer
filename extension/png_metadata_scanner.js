@@ -1378,12 +1378,12 @@
             else if (this.currentType === CHUNK_TEXT || this.currentType === CHUNK_ITXT) {
                 if (this.currentData) {
                     parseTextChunk(this.currentType, this.currentData, this.currentChunkOffset, this.collector, this.metadata);
-                    if (Object.keys(this.metadata).length > 0) this.suppressStealthForNormalMetadata();
+                    if (this.hasStealthSuppressingMetadata()) this.suppressStealthForNormalMetadata();
                 }
             } else if (this.currentType === CHUNK_ZTXT) {
                 if (this.currentData && this.zTxtState?.allowed) {
                     parseZtxt(this.currentData, this.currentChunkOffset, this.collector, this.metadata);
-                    if (Object.keys(this.metadata).length > 0) this.suppressStealthForNormalMetadata();
+                    if (this.hasStealthSuppressingMetadata()) this.suppressStealthForNormalMetadata();
                 }
             } else if (this.currentType === CHUNK_EXIF) {
                 const parsed = globalObject.extractExifPayload(this.currentData || new Uint8Array(0), {
@@ -1399,7 +1399,7 @@
                             parserState: 'partial',
                         });
                     }
-                    this.suppressStealthForNormalMetadata();
+                    if (this.hasStealthSuppressingMetadata()) this.suppressStealthForNormalMetadata();
                 } else if (parsed?.parserState === 'unresolved' || parsed?.parserState === 'resource-limit') {
                     this.metadataChunkIncomplete = true;
                     this.collector.add({
@@ -1413,6 +1413,10 @@
                 this.analysisEndReason = END_VALID_IEND;
                 this.state = 'DONE';
             }
+        }
+
+        hasStealthSuppressingMetadata() {
+            return Object.keys(this.metadata).some(key => key !== 'Software');
         }
 
         suppressStealthForNormalMetadata() {
@@ -1680,7 +1684,9 @@
                 return { status: STATUS_RESOURCE_LIMIT, limit: this.resourceLimit, observed: this.resourceObserved, diagnostics };
             }
             if (!this.iendSeen) return { status: STATUS_INVALID, reason: 'truncated', diagnostics };
-            if (Object.keys(this.metadata).length > 0) {
+            const metadataKeys = Object.keys(this.metadata);
+            const hasNonSoftwareMetadata = metadataKeys.some(key => key !== 'Software');
+            if (hasNonSoftwareMetadata) {
                 return {
                     status: STATUS_NORMAL,
                     metadata: this.metadata,
@@ -1695,6 +1701,14 @@
                     status: STATUS_STEALTH,
                     metadata,
                     ...(this.metadataChunkIncomplete ? { metadataPartial: true } : {}),
+                    diagnostics,
+                };
+            }
+            if (metadataKeys.length > 0) {
+                return {
+                    status: STATUS_NORMAL,
+                    metadata: this.metadata,
+                    ...(this.metadataPartial || this.metadataChunkIncomplete ? { metadataPartial: true } : {}),
                     diagnostics,
                 };
             }

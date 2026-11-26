@@ -53,7 +53,7 @@ function splitIdatPng(context, {
     ]);
 }
 
-function stealthPng(context, text = '{"prompt":"phase5 stealth"}') {
+function stealthPng(context, text = '{"prompt":"phase5 stealth"}', beforeIdat = []) {
     const width = 64;
     const height = 64;
     const rowBytes = width * 4;
@@ -72,7 +72,7 @@ function stealthPng(context, text = '{"prompt":"phase5 stealth"}') {
         const offset = y * (rowBytes + 1) + 1 + x * 4 + 3;
         raw[offset] = (raw[offset] & 0xfe) | value;
     }
-    return makePng(context, { width, height, colorType: 6, idat: zlib.deflateSync(raw) });
+    return makePng(context, { width, height, colorType: 6, idat: zlib.deflateSync(raw), beforeIdat });
 }
 
 test('rejected Stealth candidates stop pixel work within the first-stage rows', () => {
@@ -97,6 +97,47 @@ test('matched Stealth candidates still decode and return metadata', () => {
     const result = context.scanPngMetadataBuffer(exactArrayBuffer(stealthPng(context)));
     assert.equal(result.status, 'stealth');
     assert.equal(result.metadata['Stealth PNG Info (Alpha)'], '{"prompt":"phase5 stealth"}');
+});
+
+test('Software-only metadata does not suppress Stealth and Stealth becomes the primary result', () => {
+    const context = loadScannerContext();
+    const withTextSoftware = stealthPng(context, 'NovelAI Diffusion V4.5 test payload', [
+        textChunk(context, 'Software', 'Paint.NET'),
+    ]);
+    const textResult = context.scanPngMetadataBuffer(exactArrayBuffer(withTextSoftware));
+    assert.equal(textResult.status, 'stealth');
+    assert.deepEqual(Object.keys(textResult.metadata), ['Stealth PNG Info (Alpha)']);
+    assert.match(textResult.metadata['Stealth PNG Info (Alpha)'], /NovelAI Diffusion V4\.5/);
+
+    const withExifSoftware = stealthPng(context, 'NovelAI Diffusion V4.5 test payload', [
+        pngChunk(context, 'eXIf', tiffWithTags({ software: 'Paint.NET' })),
+    ]);
+    const exifResult = context.scanPngMetadataBuffer(exactArrayBuffer(withExifSoftware));
+    assert.equal(exifResult.status, 'stealth');
+    assert.deepEqual(Object.keys(exifResult.metadata), ['Stealth PNG Info (Alpha)']);
+
+    const softwareOnly = makePng(context, {
+        width: 8,
+        height: 8,
+        idat: zlib.deflateSync(Buffer.alloc(8 * (8 * 4 + 1))),
+        beforeIdat: [textChunk(context, 'Software', 'Paint.NET')],
+    });
+    const softwareOnlyResult = context.scanPngMetadataBuffer(exactArrayBuffer(softwareOnly));
+    assert.equal(softwareOnlyResult.status, 'normal');
+    assert.equal(softwareOnlyResult.metadata.Software, 'Paint.NET');
+});
+
+test('Software plus other normal metadata still follows normal-metadata priority', () => {
+    const context = loadScannerContext();
+    const png = stealthPng(context, 'NovelAI Diffusion V4.5 test payload', [
+        textChunk(context, 'Software', 'Paint.NET'),
+        textChunk(context, 'Description', 'non-software metadata'),
+    ]);
+    const result = context.scanPngMetadataBuffer(exactArrayBuffer(png));
+    assert.equal(result.status, 'normal');
+    assert.equal(result.metadata.Software, 'Paint.NET');
+    assert.equal(result.metadata.Description, 'non-software metadata');
+    assert.equal(Object.hasOwn(result.metadata, 'Stealth PNG Info (Alpha)'), false);
 });
 
 test('normal metadata suppresses Stealth decode and zlib validation before IDAT', () => {

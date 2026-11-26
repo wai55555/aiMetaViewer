@@ -347,7 +347,7 @@ const browserAPI = (() => {
 // 環境検出
 const isFirefox = typeof browser !== 'undefined';
 const isChrome = typeof chrome !== 'undefined' && !isFirefox;
-const PNG_SCANNER_CACHE_VERSION = 'png-scanner-v4';
+const PNG_SCANNER_CACHE_VERSION = 'png-scanner-v5';
 const CACHE_ENTRY_MARKER = 'aiMetaViewerCacheEntry';
 
 // 永続化LRUキャッシュクラス (browserAPI.storage.local使用)
