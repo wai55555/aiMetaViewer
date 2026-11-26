@@ -367,6 +367,7 @@ class PersistentLRUCache {
         this.initPromise = this.init();
         // set/clear を直列化し、clear のキー列挙中に set が割り込まないようにする。
         this.operationChain = Promise.resolve();
+        this.cacheGeneration = 0;
     }
 
     _runExclusive(operation) {
@@ -396,10 +397,13 @@ class PersistentLRUCache {
 
     async saveIndex() {
         if (this.saveTimer) clearTimeout(this.saveTimer);
+        const generation = this.cacheGeneration;
+        const snapshot = Array.from(this.index.entries());
 
         this.saveTimer = setTimeout(async () => {
+            if (generation !== this.cacheGeneration) return;
             try {
-                await this.storage.set({ [this.metaKey]: Array.from(this.index.entries()) });
+                await this.storage.set({ [this.metaKey]: snapshot });
             } catch (e) {
                 debugLog('Cache index save error', e);
             }
@@ -504,6 +508,7 @@ class PersistentLRUCache {
     }
 
     async _clearInternal() {
+        this.cacheGeneration += 1;
         if (this.saveTimer) {
             clearTimeout(this.saveTimer);
             this.saveTimer = null;
