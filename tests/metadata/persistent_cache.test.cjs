@@ -101,6 +101,19 @@ test('cache clear falls back to get(null) when getKeys is unavailable', async ()
     assert.equal(store.has('keep_me'), true);
 });
 
+test('cache clear falls back to get(null) when getKeys rejects', async () => {
+    const { store, storage, cache } = createCache();
+    store.set('meta_cache_a', { value: 1 });
+    store.set('meta_cache_index', []);
+    store.set('keep_me', true);
+    storage.getKeys = async () => { throw new Error('getKeys failed'); };
+
+    await cache.clear();
+    assert.equal(store.has('meta_cache_a'), false);
+    assert.equal(store.has('meta_cache_index'), false);
+    assert.equal(store.has('keep_me'), true);
+});
+
 test('cache eviction follows Map insertion order and preserves FIFO result', async () => {
     const { store, cache } = createCache(3);
     await cache.set('oldest', { value: 'oldest' });

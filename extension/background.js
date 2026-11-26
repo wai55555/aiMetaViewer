@@ -292,7 +292,21 @@ const browserAPI = (() => {
                     clear: () => new Promise(resolve => chrome.storage.local.clear(resolve)),
                     getBytesInUse: (keys) => new Promise(resolve => chrome.storage.local.getBytesInUse(keys, resolve)),
                     ...(typeof chrome.storage.local.getKeys === 'function'
-                        ? { getKeys: () => chrome.storage.local.getKeys() }
+                        ? {
+                            getKeys: () => new Promise((resolve, reject) => {
+                                try {
+                                    chrome.storage.local.getKeys((keys) => {
+                                        if (chrome.runtime.lastError) {
+                                            reject(new Error(chrome.runtime.lastError.message));
+                                        } else {
+                                            resolve(keys);
+                                        }
+                                    });
+                                } catch (error) {
+                                    reject(error);
+                                }
+                            }),
+                        }
                         : {}),
                 },
                 sync: {
@@ -477,6 +491,12 @@ class PersistentLRUCache {
             }
         } catch (error) {
             debugLog('Cache clear key enumeration error', error);
+            try {
+                const all = await this.storage.get(null);
+                keys = Object.keys(all || {});
+            } catch (fallbackError) {
+                debugLog('Cache clear fallback enumeration error', fallbackError);
+            }
         }
         if (Array.isArray(keys)) {
             keys = keys.filter(key => key === this.metaKey || key.startsWith(this.cacheKeyPrefix));
