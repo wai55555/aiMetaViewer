@@ -47,3 +47,15 @@ Range を使わず full-body 取得し、`DEBUG` バッジ、`Debug Detections`�
 
 テストはヘッドレス Chromium 151 で CDP の
 `Extensions.loadUnpacked` を使って実施した。
+
+
+## 確認結果（2026-11-26）
+
+- ブラウザ: ヘッドレス Chromium 151.0.7922.34
+- 拡張: CDP `Extensions.loadUnpacked`
+- 設定: `debugAllDetections=false`, `debugForceFullFetch=true`
+- 画像: `01_furina_1.png`（Software + Stealth）
+- ローカルHTTPサーバの観測: 画像取得に Range ヘッダなし（full-body GET）
+- UI: `DEBUG` バッジ、`Debug Detections`、`"forcedFullFetch": true`、
+  Stealth / Software の担体を確認
+- 自動テスト: `node --test tests/metadata/*.test.cjs` 166 pass / 0 fail
