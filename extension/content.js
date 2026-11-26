@@ -532,6 +532,7 @@ async function checkImageMetadata(img, requestOptions = {}) {
     debugLog(`[AI Meta Viewer] checkImageMetadata called for: ${getImageSource().substring(0, 60)}...`);
 
     const src = getImageSource();
+    const debugAllDetections = settings.debugAllDetections === true;
     if (!src) {
         logImageDiagnostic('analysis-skip', img, { reason: 'no-src' });
         debugLog('[AI Meta Viewer] No src, skipping');
@@ -597,12 +598,12 @@ async function checkImageMetadata(img, requestOptions = {}) {
     let isTooSmall = false;
 
     // リンク画像でない場合（直接表示など）は、設定された最小画素数でチェック
-    if (!isLinkedImage && pixelCount < settings.minPixelCount) {
+    if (!debugAllDetections && !isLinkedImage && pixelCount < settings.minPixelCount) {
         isTooSmall = true;
     }
 
     // リンク画像の場合でも、設定された最小サイズ未満は除外（デフォルト200x200）
-    if (isLinkedImage && (actualWidth < settings.minImageSize || actualHeight < settings.minImageSize)) {
+    if (!debugAllDetections && isLinkedImage && (actualWidth < settings.minImageSize || actualHeight < settings.minImageSize)) {
         isTooSmall = true;
     }
 
@@ -614,7 +615,7 @@ async function checkImageMetadata(img, requestOptions = {}) {
 
     // [Discord専用: ユーザーアイコン対策]
     // リンク解決の有無に関わらず、表示サイズが極端に小さいものやAvatar画像は除外する
-    if (isDiscord) {
+    if (!debugAllDetections && isDiscord) {
         const displayWidth = img.width || img.clientWidth || actualWidth;
         const displayHeight = img.height || img.clientHeight || actualHeight;
 
@@ -624,7 +625,7 @@ async function checkImageMetadata(img, requestOptions = {}) {
         }
     }
 
-    if (isTooSmall) {
+    if (!debugAllDetections && isTooSmall) {
         logImageDiagnostic('analysis-skip', img, { reason: 'too-small' });
         debugLog('[AI Meta Viewer] Image too small, skipping:', {
             src: src.substring(0, 80),
@@ -713,7 +714,7 @@ async function checkImageMetadata(img, requestOptions = {}) {
             }
 
             // キャッシュチェック
-            if (contentMetadataCache.has(url)) {
+            if (!debugAllDetections && contentMetadataCache.has(url)) {
                 const cachedMetadata = contentMetadataCache.get(url);
                 logImageDiagnostic('cache-hit', img, {
                     candidateIndex,
@@ -774,14 +775,18 @@ async function checkImageMetadata(img, requestOptions = {}) {
                 });
                 if (responseState === 'resolved') {
                     metadata = response.metadata;
-                    contentMetadataCache.set(url, metadata);
+                    if (debugAllDetections && response.debug && metadata && typeof metadata === 'object' &&
+                        metadata.__debugDetection === undefined) {
+                        metadata.__debugDetection = response.debug;
+                    }
+                    if (!debugAllDetections) contentMetadataCache.set(url, metadata);
                     successUrl = url;
                     analysisOutcome = 'resolved';
                     break; // 成功したらループを抜ける
                 }
                 if (responseState === 'confirmed-empty') {
                     // 完了確認済みの空結果だけを候補の empty として扱う。
-                    contentMetadataCache.set(url, {});
+                    if (!debugAllDetections) contentMetadataCache.set(url, {});
                     analysisOutcome = 'confirmed-empty';
                     continue;
                 }
@@ -860,32 +865,34 @@ async function checkImageMetadata(img, requestOptions = {}) {
         // --- メタデータフィルタリング (除外判定) ---
 
         if (analysisOutcome === 'resolved') {
-            // 1. キーによる除外 (Ignored Metadata Keys)
-            if (settings.ignoredMetadataKeys && Array.isArray(settings.ignoredMetadataKeys) && settings.ignoredMetadataKeys.length > 0) {
-                const hasIgnoredKey = Object.keys(metadata).some(key =>
-                    settings.ignoredMetadataKeys.includes(key)
-                );
+            if (!debugAllDetections) {
+                // 1. キーによる除外 (Ignored Metadata Keys)
+                if (settings.ignoredMetadataKeys && Array.isArray(settings.ignoredMetadataKeys) && settings.ignoredMetadataKeys.length > 0) {
+                    const hasIgnoredKey = Object.keys(metadata).some(key =>
+                        settings.ignoredMetadataKeys.includes(key)
+                    );
 
-                if (hasIgnoredKey) {
-                    if (settings.debugMode) {
-                        debugLog('[AI Meta Viewer] Ignored image due to ignored metadata key');
+                    if (hasIgnoredKey) {
+                        if (settings.debugMode) {
+                            debugLog('[AI Meta Viewer] Ignored image due to ignored metadata key');
+                        }
+                        removeBadge(img); // バッジがあれば削除
+                        return;
                     }
-                    removeBadge(img); // バッジがあれば削除
-                    return;
                 }
-            }
 
-            // 2. ソフトウェア名による除外 (Ignored Software)
-            if (metadata['Software'] && settings.ignoredSoftware && Array.isArray(settings.ignoredSoftware) && settings.ignoredSoftware.length > 0) {
-                const software = metadata['Software'];
-                const isIgnoredSoftware = settings.ignoredSoftware.some(s => software.includes(s));
+                // 2. ソフトウェア名による除外 (Ignored Software)
+                if (metadata['Software'] && settings.ignoredSoftware && Array.isArray(settings.ignoredSoftware) && settings.ignoredSoftware.length > 0) {
+                    const software = metadata['Software'];
+                    const isIgnoredSoftware = settings.ignoredSoftware.some(s => software.includes(s));
 
-                if (isIgnoredSoftware) {
-                    if (settings.debugMode) {
-                        debugLog('[AI Meta Viewer] Ignored software:', software);
+                    if (isIgnoredSoftware) {
+                        if (settings.debugMode) {
+                            debugLog('[AI Meta Viewer] Ignored software:', software);
+                        }
+                        removeBadge(img); // バッジがあれば削除
+                        return;
                     }
-                    removeBadge(img); // バッジがあれば削除
-                    return;
                 }
             }
 

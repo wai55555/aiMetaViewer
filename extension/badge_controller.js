@@ -156,10 +156,18 @@ function createResidentBadge() {
     return badge;
 }
 
+function applyDebugBadgeLabel(badge) {
+    if (window.settings?.debugAllDetections !== true) return;
+    badge.textContent = 'DEBUG';
+    badge.title = 'Debug: all detections';
+    badge.dataset.debug = 'true';
+}
+
 function applyRichBadgePresentation(badge) {
     if (window.__aiMetaViewerUiModuleReady !== true || typeof window.updateBadge !== 'function') return;
     try {
         window.updateBadge(badge, badge._metadata);
+        applyDebugBadgeLabel(badge);
     } catch (_) {
         // UI の装飾失敗はバッジ表示そのものを壊さない。
     }
@@ -184,6 +192,7 @@ function createBadgeElement(metadata, originalUrl, mediaType = 'image') {
     badge._mediaType = mediaType === 'video' ? 'video' : 'image';
     if (badge._mediaType === 'video') badge.setAttribute('aria-label', 'Click to view video metadata');
     applyRichBadgePresentation(badge);
+    applyDebugBadgeLabel(badge);
     badge.addEventListener('mouseenter', () => requestUiForBadge(badge), { once: true });
     return badge;
 }

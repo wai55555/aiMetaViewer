@@ -690,7 +690,8 @@ function buildSwarmUiGrid(source) {
  * @returns {Array<Object>} - 表示セクション
  */
 function buildSectionsInternal(metadata) {
-    const source = metadata && typeof metadata === 'object' ? metadata : {};
+    const source = metadata && typeof metadata === 'object' ? { ...metadata } : {};
+    delete source.__debugDetection;
     const hasNovelAIComment = Boolean(source.Comment);
     const generatorName = hasNovelAIComment ? 'NovelAI' : detectGenerator(source);
     const sections = [];
@@ -932,16 +933,33 @@ function buildSectionsInternal(metadata) {
  * @returns {Array<Object>} - 表示セクション
  */
 function buildSections(metadata) {
+    let sections;
     try {
-        return buildSectionsInternal(metadata);
+        sections = buildSectionsInternal(metadata);
     } catch (error) {
-        const source = metadata && typeof metadata === 'object' ? metadata : {};
+        const source = metadata && typeof metadata === 'object' ? { ...metadata } : {};
+        delete source.__debugDetection;
         try {
-            return buildDescriptionSections(source, 'Unknown');
+            sections = buildDescriptionSections(source, 'Unknown');
         } catch (fallbackError) {
-            return [];
+            sections = [];
         }
     }
+    const debug = metadata && typeof metadata === 'object' ? metadata.__debugDetection : null;
+    if (debug && Array.isArray(sections)) {
+        try {
+            sections.push(createSectionModel(
+                'debugDetections',
+                'Debug Detections',
+                'raw',
+                true,
+                JSON.stringify(debug, null, 2),
+            ));
+        } catch (_) {
+            // デバッグ表示の失敗で通常表示を壊さない。
+        }
+    }
+    return sections;
 }
 
 /**
@@ -1060,7 +1078,8 @@ function buildComfyGrid(prompt) {
  * @returns {Array<{key:string,value:string}>} - 空値を除いた Grid 行
  */
 function buildGridInternal(metadata) {
-    const source = metadata && typeof metadata === 'object' ? metadata : {};
+    const source = metadata && typeof metadata === 'object' ? { ...metadata } : {};
+    delete source.__debugDetection;
     const generatorName = source.Comment ? 'NovelAI' : detectGenerator(source);
     if (['A1111', 'Civitai', 'Forge', 'Stable Diffusion WebUI'].includes(generatorName)) {
         const parameters = typeof source.parameters === 'string' && source.parameters.includes('Steps:')

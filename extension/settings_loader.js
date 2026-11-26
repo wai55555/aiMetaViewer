@@ -3,6 +3,7 @@
 // デフォルト設定
 window.DEFAULT_SETTINGS = {
     debugMode: false,
+    debugAllDetections: false,
     errorNotification: false,
     minPixelCount: 250000, // 500x500
     minImageSize: 120, // リンク付き画像の最小サイズ

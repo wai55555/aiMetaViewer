@@ -60,13 +60,27 @@ function createCache(limit = 4) {
         browserAPI: { storage: { local: storage } },
     });
     vm.runInContext(backgroundSource.slice(start, end), context, { filename: 'cache.js' });
+    vm.runInContext('settings = { debugAllDetections: false }', context);
     const PersistentLRUCache = vm.runInContext('PersistentLRUCache', context);
     return {
         store,
         storage,
+        context,
         cache: new PersistentLRUCache(limit),
     };
 }
+
+test('debugAllDetections bypasses persistent cache reads and writes', async () => {
+    const { cache, store, context } = createCache();
+    await cache.set('https://example.com/a.png', { Comment: 'normal' });
+    assert.ok(store.size > 0);
+
+    vm.runInContext('settings.debugAllDetections = true', context);
+    assert.equal(await cache.get('https://example.com/a.png'), undefined);
+    const write = await cache.set('https://example.com/debug.png', { Comment: 'debug' });
+    assert.equal(write.stored, false);
+    assert.equal(store.has(cache.cacheKeyPrefix + 'https://example.com/debug.png'), false);
+});
 
 test('cache clear removes only meta_cache_ keys and the index', async () => {
     const { store, cache } = createCache();

@@ -82,6 +82,23 @@ test('JPEG EXIF parameters win over COM in both segment orders', () => {
     }
 });
 
+test('debugAllDetections keeps all JPEG COM carriers while normal priority is unchanged', () => {
+    const context = loadParserContext();
+    const first = jpegSegment(0xFE, Buffer.from('first\nNegative prompt: x', 'utf8'));
+    const second = jpegSegment(0xFE, Buffer.from('second\nNegative prompt: y', 'utf8'));
+    const result = context.extractMetadata(exactArrayBuffer(makeJpeg([first, second])), {
+        format: 'jpeg',
+        debugAllDetections: true,
+    });
+    assert.equal(result.parameters, 'first\nNegative prompt: x');
+    const debug = result.__debugDetection;
+    assert.equal(debug.enabled, true);
+    const comCarriers = debug.carriers.filter(carrier => carrier.carrier === 'COM');
+    assert.equal(comCarriers.length, 2);
+    assert.equal(comCarriers[0].outcome, 'adopted');
+    assert.equal(comCarriers[1].outcome, 'suppressed-existing');
+});
+
 test('JPEG adopts only the first COM that passes the content gate', () => {
     const context = loadParserContext();
     const first = jpegSegment(0xFE, Buffer.from('first\nNegative prompt: x', 'utf8'));

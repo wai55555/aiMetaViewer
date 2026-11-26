@@ -998,6 +998,8 @@
     class PngChunkScanner {
         constructor(options) {
             this.options = options || {};
+            this.debugEnabled = this.options.debugAllDetections === true;
+            this.debugCarriers = this.debugEnabled ? [] : null;
             this.collector = new DiagnosticCollector();
             this.metadata = Object.create(null);
             this.state = 'SIGNATURE';
@@ -1377,12 +1379,24 @@
             if (this.currentType === CHUNK_IHDR) this.acceptIhdr();
             else if (this.currentType === CHUNK_TEXT || this.currentType === CHUNK_ITXT) {
                 if (this.currentData) {
-                    parseTextChunk(this.currentType, this.currentData, this.currentChunkOffset, this.collector, this.metadata);
+                    const parsed = Object.create(null);
+                    parseTextChunk(this.currentType, this.currentData, this.currentChunkOffset, this.collector, parsed);
+                    this.captureDebugMetadata(this.currentType, parsed, 'body');
+                    Object.assign(this.metadata, parsed);
                     if (this.hasStealthSuppressingMetadata()) this.suppressStealthForNormalMetadata();
                 }
             } else if (this.currentType === CHUNK_ZTXT) {
                 if (this.currentData && this.zTxtState?.allowed) {
-                    parseZtxt(this.currentData, this.currentChunkOffset, this.collector, this.metadata);
+                    if (this.debugEnabled) {
+                        const parsed = Object.create(null);
+                        parseZtxt(this.currentData, this.currentChunkOffset, this.collector, parsed);
+                        this.captureDebugMetadata(this.currentType, parsed, 'body');
+                        for (const [key, value] of Object.entries(parsed)) {
+                            if (this.metadata[key] === undefined) this.metadata[key] = value;
+                        }
+                    } else {
+                        parseZtxt(this.currentData, this.currentChunkOffset, this.collector, this.metadata);
+                    }
                     if (this.hasStealthSuppressingMetadata()) this.suppressStealthForNormalMetadata();
                 }
             } else if (this.currentType === CHUNK_EXIF) {
@@ -1390,6 +1404,7 @@
                     declaredLength: this.currentLength,
                 });
                 if (parsed && Object.keys(parsed).length > 0) {
+                    this.captureDebugMetadata('eXIf', parsed, 'body');
                     Object.assign(this.metadata, parsed);
                     if (parsed.metadataPartial === true) {
                         this.metadataPartial = true;
@@ -1415,8 +1430,20 @@
             }
         }
 
+        addDebugCarrier(carrier, data) {
+            if (!this.debugEnabled) return;
+            this.debugCarriers.push(Object.assign({ carrier }, data));
+        }
+
+        captureDebugMetadata(carrier, parsed, location) {
+            if (!this.debugEnabled || !parsed) return;
+            for (const [key, value] of Object.entries(parsed)) {
+                this.addDebugCarrier(carrier, { key, value, location });
+            }
+        }
+
         hasStealthSuppressingMetadata() {
-            return Object.keys(this.metadata).some(key => key !== 'Software');
+            return !this.debugEnabled && Object.keys(this.metadata).some(key => key !== 'Software');
         }
 
         suppressStealthForNormalMetadata() {
@@ -1457,7 +1484,7 @@
             this.ihdr = { width, height, bitDepth, colorType, interlace };
             this.layout = makeLayout(width, height, bitDepth, colorType, interlace, this.collector, this.currentChunkOffset);
             const pixelCount = width * height;
-            if (pixelCount > MAX_STEALTH_PIXELS) {
+            if (pixelCount > MAX_STEALTH_PIXELS && !this.debugEnabled) {
                 addUnsupportedDiagnostic(this.collector, 'unsupported-stealth-pixel-limit', {
                     width,
                     height,
@@ -1499,6 +1526,14 @@
             if (completed) {
                 this.stealthResult = completed.result;
                 this.stealthStopped = true;
+                this.addDebugCarrier('stealth', {
+                    mode: completed.mode,
+                    signature: completed.signature,
+                    compressed: completed.compressed === true,
+                    value: completed.result.value,
+                    location: 'IDAT',
+                    outcome: 'matched',
+                });
                 releaseCandidates(this.candidates, diagnosticOffset, completed);
                 if (this.rowAssembler) this.rowAssembler.candidates = [];
                 return;
@@ -1512,6 +1547,15 @@
                     offset: diagnosticOffset,
                     decodedRows: this.rowAssembler ? this.rowAssembler.rowsCompleted : 0,
                 });
+                for (const candidate of this.candidates) {
+                    this.addDebugCarrier('stealth', {
+                        mode: candidate.mode,
+                        signature: candidate.signature,
+                        outcome: 'rejected',
+                        reason: candidate.rejectionDetail || 'signature-mismatch',
+                        location: 'IDAT',
+                    });
+                }
                 releaseCandidates(this.candidates, diagnosticOffset);
                 if (this.rowAssembler) {
                     this.rowAssembler.candidates = [];
@@ -1565,7 +1609,14 @@
             if (!source || typeof source !== 'object') return;
             let merged = false;
             for (const key of Object.keys(source)) {
-                if (this.metadata[key] === undefined) {
+                const adopted = this.metadata[key] === undefined;
+                this.addDebugCarrier('trailing', {
+                    key,
+                    value: source[key],
+                    location: 'after-IEND',
+                    outcome: adopted ? 'adopted' : 'suppressed-existing',
+                });
+                if (adopted) {
                     this.metadata[key] = source[key];
                     merged = true;
                 }
@@ -1665,6 +1716,19 @@
         }
 
         makeResult() {
+            const result = this.makeResultInternal();
+            if (!this.debugEnabled) return result;
+            result.debug = {
+                enabled: true,
+                carriers: this.debugCarriers.slice(),
+                limited: this.idatSeen
+                    ? (this.idatFramingOnly ? 'png-idat-framing-only' : null)
+                    : 'png-idat-not-acquired',
+            };
+            return result;
+        }
+
+        makeResultInternal() {
             const diagnosticOffset = this.idatChunkOffset === null ? this.offset : this.idatChunkOffset;
             if (this.iendSeen && this.analysisEndReason === END_VALID_IEND) {
                 flushCandidateReleaseDiagnostics(
@@ -1687,9 +1751,16 @@
             const metadataKeys = Object.keys(this.metadata);
             const hasNonSoftwareMetadata = metadataKeys.some(key => key !== 'Software');
             if (hasNonSoftwareMetadata) {
+                let metadata = this.metadata;
+                if (this.debugEnabled && this.stealthResult) {
+                    metadata = Object.assign(Object.create(null), this.metadata);
+                    if (metadata[this.stealthResult.key] === undefined) {
+                        metadata[this.stealthResult.key] = this.stealthResult.value;
+                    }
+                }
                 return {
                     status: STATUS_NORMAL,
-                    metadata: this.metadata,
+                    metadata,
                     ...(this.metadataPartial || this.metadataChunkIncomplete ? { metadataPartial: true } : {}),
                     diagnostics,
                 };

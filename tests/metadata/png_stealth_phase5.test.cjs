@@ -127,6 +127,34 @@ test('Software-only metadata does not suppress Stealth and Stealth becomes the p
     assert.equal(softwareOnlyResult.metadata.Software, 'Paint.NET');
 });
 
+test('debugAllDetections returns normal and Stealth carriers without changing normal priority', () => {
+    const context = loadScannerContext();
+    const png = stealthPng(context, '{"prompt":"debug stealth"}', [
+        textChunk(context, 'Software', 'Paint.NET'),
+        textChunk(context, 'Description', 'normal metadata'),
+    ]);
+    const result = context.scanPngMetadataBuffer(exactArrayBuffer(png), { debugAllDetections: true });
+    assert.equal(result.status, 'normal');
+    assert.equal(result.metadata.Description, 'normal metadata');
+    assert.equal(result.metadata.Software, 'Paint.NET');
+    assert.equal(result.metadata['Stealth PNG Info (Alpha)'], '{"prompt":"debug stealth"}');
+    const debug = result.debug;
+    assert.equal(debug.enabled, true);
+    assert.ok(debug.carriers.some(carrier => carrier.carrier === 'tEXt' && carrier.key === 'Description'));
+    assert.ok(debug.carriers.some(carrier => carrier.carrier === 'stealth' && carrier.outcome === 'matched'));
+});
+
+test('debugAllDetections leaves normal-mode suppression unchanged', () => {
+    const context = loadScannerContext();
+    const png = stealthPng(context, '{"prompt":"normal suppression"}', [
+        textChunk(context, 'Description', 'normal metadata'),
+    ]);
+    const normal = context.scanPngMetadataBuffer(exactArrayBuffer(png));
+    assert.equal(normal.status, 'normal');
+    assert.equal(normal.metadata['Stealth PNG Info (Alpha)'], undefined);
+    assert.equal(normal.debug, undefined);
+});
+
 test('Software plus other normal metadata still follows normal-metadata priority', () => {
     const context = loadScannerContext();
     const png = stealthPng(context, 'NovelAI Diffusion V4.5 test payload', [

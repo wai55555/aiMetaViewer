@@ -412,6 +412,7 @@ class PersistentLRUCache {
 
     async get(url) {
         await this.initPromise;
+        if (typeof settings !== 'undefined' && settings?.debugAllDetections === true) return undefined;
         const entry = this.index.get(url);
         if (!entry) return undefined;
 
@@ -454,6 +455,7 @@ class PersistentLRUCache {
     }
 
     async _writeCache(url, metadata, options = {}) {
+        if (typeof settings !== 'undefined' && settings?.debugAllDetections === true) return { stored: false, reason: 'debug' };
         const key = this.cacheKeyPrefix + url;
 
         // JSON文字列をUTF-8へ変換した実byte数をキャッシュ容量として扱う。
@@ -1337,7 +1339,7 @@ async function runGatedPngStreamScan({ charge, context, openStream }) {
         if (!stream) return null;
         const result = await scanPngMetadataStream(
             withStallTimeout(stream, onStall, controller.signal),
-            { signal: controller.signal }
+            { signal: controller.signal, debugAllDetections: context?.debugAllDetections === true }
         );
         if (stalled) {
             const stallError = new Error(
@@ -1379,7 +1381,10 @@ async function runGatedPngBufferScan({ buffer, charge, context }) {
         signal: context?.signal ?? null,
     });
     try {
-        const result = scanPngMetadataBuffer(buffer, { signal: context?.signal ?? null });
+        const result = scanPngMetadataBuffer(buffer, {
+            signal: context?.signal ?? null,
+            debugAllDetections: context?.debugAllDetections === true,
+        });
         if (context?.signal?.aborted) throw createAnalysisAbortError();
         return result;
     } finally {
@@ -1449,6 +1454,7 @@ function requestImageMetadata(imageUrl, { tabId = null, priority = ANALYSIS_PRIO
         order,
         tabId,
         tabIds: new Set(tabId === null ? [] : [tabId]),
+        debugAllDetections: settings?.debugAllDetections === true,
         promise: null,
     };
     inFlightAnalyses.set(imageUrl, entry);
@@ -1770,6 +1776,7 @@ function isStructuralRangeFailure(error, status) {
 // デフォルト設定
 const DEFAULT_SETTINGS = {
     debugMode: false,
+    debugAllDetections: false,
     errorNotification: false,
     minPixelCount: 250000,
     downloaderFolderMode: 'id_pageTitle', // 'id_pageTitle', 'pageTitle', 'domain', 'none'
@@ -3010,6 +3017,10 @@ async function handleFetchImageMetadata(imageUrl) {
         // 後続の既存取得経路で従来どおり失敗分類するため、schemeは空のままにする。
     }
     const isFileScheme = imageScheme === 'file:';
+    const requestContext = getAnalysisContext(imageUrl);
+    const debugAllDetections = requestContext
+        ? requestContext.debugAllDetections === true
+        : settings?.debugAllDetections === true;
     const urlId = getSafeUrlId(imageUrl);
 
     debugLog('[AI Meta Viewer] Fetching metadata for:', imageUrl);
@@ -3170,6 +3181,7 @@ async function handleFetchImageMetadata(imageUrl) {
         metadataPartial = false,
         reason,
         error,
+        debug = null,
         cached = false,
     }) => {
         const analysisState = state === 'empty-confirmed' || state === 'unsupported-format'
@@ -3223,6 +3235,7 @@ async function handleFetchImageMetadata(imageUrl) {
             ...(parserReason ? { parserReason: normalizeSafeReason(parserReason, safeReason) } : {}),
             ...(scannerStatus ? { scannerStatus: normalizeSafeScannerStatus(scannerStatus) } : {}),
             ...(metadataPartial ? { metadataPartial: true } : {}),
+            ...(debug ? { debug } : {}),
             reason: safeReason,
             ...(cached ? { cached: true } : {}),
             diagnostics: diagnostic,
@@ -4680,7 +4693,7 @@ async function handleFetchImageMetadata(imageUrl) {
                 });
             } else if (completeRepresentation) {
                 // 初期206は要求Range上限で有界化されているため、保持済みbytesをbufferで渡す。
-                scanResult = scanPngMetadataBuffer(buffer, { signal: analysisSignal });
+                scanResult = scanPngMetadataBuffer(buffer, { signal: analysisSignal, debugAllDetections });
             } else {
                 // partial headは後続断片へ接続せず、byte 0からのstreamだけを解析する。
                 buffer = null;
@@ -4715,6 +4728,7 @@ async function handleFetchImageMetadata(imageUrl) {
                         metadata: scanResult.metadata,
                         scannerStatus: scanResult.status,
                         metadataPartial: scanResult.metadataPartial === true,
+                        debug: scanResult.debug || null,
                         reason: 'found',
                     });
                 }
@@ -4722,6 +4736,7 @@ async function handleFetchImageMetadata(imageUrl) {
                     success: true,
                     metadata: scanResult.metadata,
                     ...(scanResult.metadataPartial === true ? { metadataPartial: true } : {}),
+                    ...(scanResult.debug ? { debug: scanResult.debug } : {}),
                     diagnostics: scanResult.diagnostics,
                 };
             }
@@ -4808,6 +4823,7 @@ async function handleFetchImageMetadata(imageUrl) {
             metadata = extractMetadata(fullBuffer, {
                 format: detectedFormat,
                 inputComplete: true,
+                debugAllDetections,
             });
             return metadata;
         };
@@ -4815,6 +4831,7 @@ async function handleFetchImageMetadata(imageUrl) {
             metadata = extractMetadata(buffer, {
                 format: detectedFormat,
                 inputComplete: rangeRepresentationComplete,
+                debugAllDetections,
             });
 
             if (detectedFormat === 'webp' && webpStreamResult) {
@@ -4845,6 +4862,7 @@ async function handleFetchImageMetadata(imageUrl) {
                     metadata = extractMetadata(buffer, {
                         format: detectedFormat,
                         inputComplete: rangeRepresentationComplete,
+                        debugAllDetections,
                     });
                     metadata = mergeWebpStreamMetadata(metadata, webpStreamResult);
                     isRangeRequest = false;
@@ -4939,6 +4957,7 @@ async function handleFetchImageMetadata(imageUrl) {
                                 const nextMetadata = extractMetadata(newBuffer, {
                                     format: detectedFormat,
                                     inputComplete: retryComplete,
+                                    debugAllDetections,
                                 });
                                 const retryState = getMetadataState(nextMetadata);
                                 const budgetReached = isBoundedMetadataFormat(detectedFormat) &&
@@ -4968,6 +4987,7 @@ async function handleFetchImageMetadata(imageUrl) {
                                 metadata = extractMetadata(buffer, {
                                     format: detectedFormat,
                                     inputComplete: rangeRepresentationComplete,
+                                    debugAllDetections,
                                 });
                             } else {
                                 const retryFailure = new Error(`HTTP ${retryResponse.status}`);
@@ -5105,6 +5125,7 @@ async function handleFetchImageMetadata(imageUrl) {
                     parserState: metadataState,
                     parserReason,
                     metadataPartial: metadata.metadataPartial === true,
+                    debug: metadata.__debugDetection || null,
                     reason: 'found',
                 });
             }
@@ -5143,6 +5164,7 @@ async function handleFetchImageMetadata(imageUrl) {
             success: true,
             metadata,
             ...(metadata.metadataPartial === true ? { metadataPartial: true } : {}),
+            ...(metadata.__debugDetection ? { debug: metadata.__debugDetection } : {}),
         };
 
     } catch (error) {

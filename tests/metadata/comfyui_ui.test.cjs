@@ -110,3 +110,21 @@ test('source contract disables video editing and metadata-writing while image fl
     assert.match(badgeSource, /createModal\(currentMetadata, badge\._originalUrl, \{ mediaType: badge\._mediaType \}\)/);
     assert.match(uiSource, /mediaType !== 'video' && modalSettings\.advancedModeEnabled/);
 });
+
+
+test('debug detections render as a separate raw section without leaking into normal rows', () => {
+    const metadata = {
+        Description: 'normal metadata',
+        __debugDetection: {
+            enabled: true,
+            carriers: [{ carrier: 'tEXt', key: 'Description', value: 'normal metadata', location: 'body' }],
+            limited: null,
+        },
+    };
+    const sections = uiContext.__uiApi.buildSections(metadata);
+    const debugSection = sections.find(section => section.id === 'debugDetections');
+    assert.ok(debugSection);
+    assert.equal(debugSection.name, 'Debug Detections');
+    assert.match(debugSection.text, /"carrier": "tEXt"/);
+    assert.equal(uiContext.__uiApi.buildGrid(metadata).some(row => row.key === '__debugDetection'), false);
+});

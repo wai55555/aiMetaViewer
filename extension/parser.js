@@ -482,7 +482,14 @@ function isAdoptableJpegCom(text) {
     (text.includes('Sampler:') || text.includes('Seed:') || text.includes('CFG scale:') || text.includes('Size:'));
 }
 
-function scanJpegMarkers(view) {
+function scanJpegMarkers(view, options = {}) {
+  const debugCarriers = options.debugAllDetections === true ? [] : null;
+  const result = scanJpegMarkersInternal(view, debugCarriers);
+  if (debugCarriers) result.debugCarriers = debugCarriers;
+  return result;
+}
+
+function scanJpegMarkersInternal(view, debugCarriers) {
   if (view.length < 3 || view[0] !== 0xFF || view[1] !== 0xD8) {
     return { reachedSos: false, complete: false, metadata: {}, exifIncomplete: false, xmpIncomplete: false };
   }
@@ -533,6 +540,11 @@ function scanJpegMarkers(view) {
         allowExifPrefix: true,
         declaredLength: payloadEnd - payloadStart,
       });
+      if (debugCarriers) {
+        for (const [key, value] of Object.entries(parsed)) {
+          debugCarriers.push({ carrier: 'eXIf', key, value, location: 'jpeg-app1' });
+        }
+      }
       Object.assign(metadata, parsed);
       if (parsed.parserState === PARSER_STATE_UNRESOLVED || parsed.parserState === PARSER_STATE_RESOURCE_LIMIT) {
         exifIncomplete = true;
@@ -545,6 +557,12 @@ function scanJpegMarkers(view) {
     } else if (marker === 0xFE && payloadStart < payloadEnd) {
       try {
         const comment = UTF8_FATAL_DECODER.decode(view.subarray(payloadStart, payloadEnd));
+        debugCarriers?.push({
+          carrier: 'COM',
+          value: comment,
+          location: 'jpeg-com',
+          outcome: isAdoptableJpegCom(comment) ? (comAdopted ? 'suppressed-existing' : 'adopted') : 'suppressed-gate',
+        });
         if (!comAdopted && isAdoptableJpegCom(comment)) {
           comAdopted = true;
           if (metadata.parameters === undefined) metadata.parameters = comment;
@@ -556,10 +574,22 @@ function scanJpegMarkers(view) {
         startsWithAscii(view, payloadStart, payloadEnd, JPEG_XMP_HEADER)) {
       const xmpStart = payloadStart + JPEG_XMP_HEADER.length;
       const xmpText = UTF8_DECODER.decode(view.subarray(xmpStart, payloadEnd));
-      mergeMissingMetadata(metadata, parseXmpMetadata(xmpText));
+      const parsedXmp = parseXmpMetadata(xmpText);
+      if (debugCarriers) {
+        for (const [key, value] of Object.entries(parsedXmp)) {
+          debugCarriers.push({ carrier: 'XMP', key, value, location: 'jpeg-app1' });
+        }
+      }
+      mergeMissingMetadata(metadata, parsedXmp);
     } else if (marker === 0xE1 &&
         startsWithAscii(view, payloadStart, payloadEnd, JPEG_EXTENDED_XMP_HEADER)) {
       // Extended XMP is intentionally ignored (CUT-05).
+      debugCarriers?.push({
+        carrier: 'XMP-extended',
+        location: 'jpeg-app1',
+        outcome: 'ignored',
+        length: payloadEnd - payloadStart,
+      });
     }
     offset += segmentLength;
   }
@@ -567,34 +597,48 @@ function scanJpegMarkers(view) {
 }
 
 function extractJpegMetadata(buffer, options = {}) {
-  const markerResult = scanJpegMarkers(new Uint8Array(buffer));
+  const markerResult = scanJpegMarkers(new Uint8Array(buffer), options);
   const metadata = markerResult.metadata;
+  const debug = markerResult.debugCarriers
+    ? {
+        enabled: true,
+        carriers: markerResult.debugCarriers,
+        limited: markerResult.exifIncomplete || markerResult.xmpIncomplete ? 'jpeg-head-incomplete' : null,
+      }
+    : null;
+  const attachDebug = result => {
+    if (debug && result && typeof result === 'object' && Object.keys(result).length > 0 &&
+        !Object.prototype.hasOwnProperty.call(result, '__debugDetection')) {
+      result.__debugDetection = debug;
+    }
+    return result;
+  };
   if (Object.keys(metadata).length > 0) {
-    return setParserState(metadata, PARSER_STATE_RESOLVED, {
+    return attachDebug(setParserState(metadata, PARSER_STATE_RESOLVED, {
       ...(markerResult.metadataPartial || markerResult.exifIncomplete || markerResult.xmpIncomplete ||
           (!markerResult.reachedSos && !markerResult.complete) ? { metadataPartial: true } : {}),
       ...(Number.isSafeInteger(markerResult.suggestedSize) ? { suggestedSize: markerResult.suggestedSize } : {}),
-    });
+    }));
   }
   if (markerResult.exifIncomplete || markerResult.xmpIncomplete ||
       (!markerResult.reachedSos && !markerResult.complete)) {
-    return setParserState(metadata, PARSER_STATE_UNRESOLVED, {
+    return attachDebug(setParserState(metadata, PARSER_STATE_UNRESOLVED, {
       isIncomplete: true,
       suggestedSize: Number.isSafeInteger(markerResult.suggestedSize)
         ? markerResult.suggestedSize
         : JPEG_METADATA_HEAD_BUDGET_BYTES - 1,
-    });
+    }));
   }
   if (markerResult.exifInvalid) {
-    return setParserState(metadata, PARSER_STATE_INVALID, { parserReason: 'invalid-exif' });
+    return attachDebug(setParserState(metadata, PARSER_STATE_INVALID, { parserReason: 'invalid-exif' }));
   }
   if (markerResult.reachedSos || markerResult.complete) {
-    return setParserState(metadata, PARSER_STATE_EMPTY_CONFIRMED);
+    return attachDebug(setParserState(metadata, PARSER_STATE_EMPTY_CONFIRMED));
   }
-  return setParserState({}, PARSER_STATE_UNRESOLVED, {
+  return attachDebug(setParserState({}, PARSER_STATE_UNRESOLVED, {
     isIncomplete: true,
     suggestedSize: JPEG_METADATA_HEAD_BUDGET_BYTES - 1,
-  });
+  }));
 }
 
 /**
@@ -1499,20 +1543,41 @@ function extractMetadata(buffer, options = {}) {
     console.log(`[AI Meta Viewer] extractMetadata: format detected: ${detectedFormat}, buffer size: ${buffer.byteLength}`);
   }
 
+  let result;
   switch (detectedFormat) {
     case 'png':
-      return extractPngMetadataWithScanner(buffer);
+      result = extractPngMetadataWithScanner(buffer, options);
+      break;
     case 'jpeg':
-      return extractJpegMetadata(buffer, { inputComplete });
+      result = extractJpegMetadata(buffer, { inputComplete, debugAllDetections: options.debugAllDetections === true });
+      break;
     case 'webp':
-      return extractWebpMetadata(buffer, { inputComplete });
+      result = extractWebpMetadata(buffer, { inputComplete, debugAllDetections: options.debugAllDetections === true });
+      break;
     case 'avif':
-      return extractAvifMetadata(buffer, { inputComplete });
+      result = extractAvifMetadata(buffer, { inputComplete, debugAllDetections: options.debugAllDetections === true });
+      break;
     case 'safetensors':
-      return extractSafetensorsMetadata(buffer, { inputComplete });
+      result = extractSafetensorsMetadata(buffer, { inputComplete, debugAllDetections: options.debugAllDetections === true });
+      break;
     default:
-      return setParserState({}, PARSER_STATE_UNSUPPORTED_FORMAT);
+      result = setParserState({}, PARSER_STATE_UNSUPPORTED_FORMAT);
   }
+  if (options.debugAllDetections === true && result && typeof result === 'object' &&
+      !Object.prototype.hasOwnProperty.call(result, '__debugDetection') &&
+      Object.keys(result).length > 0) {
+    result.__debugDetection = {
+      enabled: true,
+      carriers: Object.keys(result).map(key => ({
+        carrier: 'metadata',
+        key,
+        value: result[key],
+        location: detectedFormat,
+      })),
+      limited: null,
+    };
+  }
+  return result;
 }
 
 /**
@@ -1521,12 +1586,13 @@ function extractMetadata(buffer, options = {}) {
  * @param {ArrayBuffer|Uint8Array} buffer
  * @returns {Object}
  */
-function extractPngMetadataWithScanner(buffer) {
+function extractPngMetadataWithScanner(buffer, options = {}) {
   if (typeof scanPngMetadataBuffer !== 'function') {
     throw new Error('PNG scanner is not loaded.');
   }
-  const result = scanPngMetadataBuffer(buffer);
+  const result = scanPngMetadataBuffer(buffer, { debugAllDetections: options.debugAllDetections === true });
   const metadata = { ...(result.metadata || {}) };
+  if (result.debug) metadata.__debugDetection = result.debug;
   if (result.status === 'normal' || result.status === 'stealth') {
     return setParserState(metadata, PARSER_STATE_RESOLVED, {
       ...(result.metadataPartial === true ? { metadataPartial: true } : {}),
