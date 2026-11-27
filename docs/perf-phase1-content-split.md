@@ -141,12 +141,23 @@
 
 - SW が要求時点の `sender.url` からハッシュを除いた URL を
   `window.__aiMetaViewerExpectedLazyUrl` に設定する。
-- `ui_guard.js` が自フレームの `location.href` と照合し、不一致なら
-  `__aiMetaViewerAbortUiModule = true`、`__aiMetaViewerUiModuleReady = false`
-  にする。`ui.js` / `comfyui_parser.js` は先頭で abort フラグを見て throw し、
-  グローバル関数を定義しない。
+- SW は注入前に同じ `func` で自フレームの `location.href` を読み、ハッシュを除いた値が
+  `sender.url` と一致するときだけ `ui_guard.js` / `comfyui_parser.js` / `ui.js` を注入する。
+  不一致なら何も注入せず `navigation-mismatch` を返す。
+- `ui_guard.js` は注入直前の照合（SW の probe と注入の間のレース）用に残す。不一致なら
+  `__aiMetaViewerAbortUiModule = true`、`__aiMetaViewerUiModuleReady = false` にする。
+  `ui.js` / `comfyui_parser.js` は先頭で abort フラグを見て**静かに中断**し
+  （`return`。`throw` ではない）、グローバル関数を定義しない。
+  注入ファイル内の例外は拡張側で捕捉できず、ページのコンソールに「Uncaught Error」として
+  残るため。UI が不要なページで操作のたびに再試行されると大量のエラーになる
+  （Amazon のような画像の多いページで顕在化した）。
 - content 側のロード済みフラグは SW の成功応答後にのみ立てる。不一致・失敗時は
-  次のバッジ操作で再試行できる。
+  次のバッジ操作で再試行できるが、同じ URL で 3 回連続失敗したら 30 秒の
+  クールダウンに入る（`LAZY_MODULE_RETRY_DEFAULTS`）。URL が変われば回数はリセット。
+- `about:` / `data:` / `chrome-extension:` などのフレームは対象外
+  （`unsupported-frame-url`）。モーダル UI を載せる対象ではなく、Chrome が
+  そうしたフレームの `sender.url` に開始元の URL を返すことがあり、照合が永久に
+  失敗して再試行だけが残るため。
 - `sender.url` が存在せず、サブフレームの location がタブ URL と一致しない
   遅延 B（scanner）では照合を行わない。
 
@@ -178,6 +189,10 @@
 - 遅延モジュールの並行要求合流（`sendMessage` 1 回）
 - 成功時のみロード済みフラグを立てること
 - ナビゲーション不一致（失敗応答）後にフラグが立たず再試行できること
+- 同じ URL で 3 回連続失敗したらクールダウンし、URL 変更と 30 秒経過で再開すること
+- 注入ファイル（`ui.js` / `comfyui_parser.js`）が abort 時に throw せず、
+  グローバルを定義しないこと
+- SW が注入前にフレーム URL を照合し、不一致時にファイルを注入しないこと
 - `ui_guard.js` がハッシュ差分を許容し、パス差分で中断すること
 - manifest の常駐/条件付き分割、`scripting` 権限、`adapters.js` の条件
 - 除外パターンのアンカー・ワイルドカード

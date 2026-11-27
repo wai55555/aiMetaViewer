@@ -7,6 +7,13 @@
         debounceMs: 100,
         safetyIntervalMs: 800,
     });
+    // 恒久的に失敗するページ（about:blank フレームやソフトナビゲーション直後など）で
+    // バッジ操作のたびに注入を試み続けないための上限。
+    // 同じ URL では maxConsecutiveFailures 回まで、その後は failureCooldownMs 経過で再開する。
+    const LAZY_MODULE_RETRY_DEFAULTS = Object.freeze({
+        maxConsecutiveFailures: 3,
+        failureCooldownMs: 30000,
+    });
 
     function getHashlessUrl(value) {
         if (typeof value !== 'string') return '';
@@ -96,8 +103,40 @@
         const moduleName = typeof options.moduleName === 'string' ? options.moduleName : 'ui';
         const sendMessage = typeof options.sendMessage === 'function' ? options.sendMessage : async () => ({ success: false });
         const isReady = typeof options.isReady === 'function' ? options.isReady : () => false;
+        const now = typeof options.now === 'function' ? options.now : () => Date.now();
+        const getUrl = typeof options.getUrl === 'function'
+            ? options.getUrl
+            : () => (typeof globalObject.location?.href === 'string' ? globalObject.location.href : '');
+        const maxConsecutiveFailures = Number.isFinite(options.maxConsecutiveFailures)
+            ? Math.max(1, options.maxConsecutiveFailures)
+            : LAZY_MODULE_RETRY_DEFAULTS.maxConsecutiveFailures;
+        const failureCooldownMs = Number.isFinite(options.failureCooldownMs)
+            ? Math.max(0, options.failureCooldownMs)
+            : LAZY_MODULE_RETRY_DEFAULTS.failureCooldownMs;
         let loaded = false;
         let inFlight = null;
+        let failures = 0;
+        let lastFailureAt = 0;
+        let failureUrl = getUrl();
+
+        function injectionFailedError() {
+            const error = new Error('Lazy module injection failed');
+            error.code = 'lazy-module-injection-failed';
+            return error;
+        }
+
+        // URL が変われば失敗回数を数え直す。同じ URL で上限に達したら
+        // クールダウンが明けるまで注入要求を送らない。
+        function retryAllowed() {
+            const url = getUrl();
+            if (url !== failureUrl) {
+                failureUrl = url;
+                failures = 0;
+                lastFailureAt = 0;
+            }
+            if (failures < maxConsecutiveFailures) return true;
+            return (now() - lastFailureAt) >= failureCooldownMs;
+        }
 
         function ensure() {
             if (loaded || isReady()) {
@@ -105,15 +144,23 @@
                 return Promise.resolve({ success: true, cached: true });
             }
             if (inFlight) return inFlight;
+            if (!retryAllowed()) {
+                const suppressed = injectionFailedError();
+                suppressed.suppressed = true;
+                return Promise.reject(suppressed);
+            }
             inFlight = Promise.resolve()
                 .then(() => sendMessage({ action: 'ensureModule', module: moduleName }))
                 .then((response) => {
                     if (!response || response.success !== true) {
-                        const error = new Error('Lazy module injection failed');
-                        error.code = 'lazy-module-injection-failed';
-                        throw error;
+                        failures += 1;
+                        lastFailureAt = now();
+                        failureUrl = getUrl();
+                        throw injectionFailedError();
                     }
                     loaded = true;
+                    failures = 0;
+                    lastFailureAt = 0;
                     return response;
                 })
                 .finally(() => {
@@ -125,10 +172,12 @@
         return {
             ensure,
             isLoaded: () => loaded || isReady(),
+            failureCount: () => failures,
         };
     }
 
     globalObject.SPA_URL_TRACKER_DEFAULTS = SPA_URL_TRACKER_DEFAULTS;
+    globalObject.LAZY_MODULE_RETRY_DEFAULTS = LAZY_MODULE_RETRY_DEFAULTS;
     globalObject.getHashlessUrl = getHashlessUrl;
     globalObject.matchesExcludedSitePattern = matchesExcludedSitePattern;
     globalObject.createSpaUrlTracker = createSpaUrlTracker;

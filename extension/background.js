@@ -1995,6 +1995,10 @@ const SCANNER_SCRIPT_FILES = Object.freeze([
     'scanner.js',
 ]);
 const LAZY_INJECTION_PROMISES = new Map();
+// about:/data: フレームはモーダル UI を載せる対象ではなく、Chrome は
+// そうしたフレームの sender.url に開始元の URL を返すことがある。
+// その場合ナビゲーション照合は永久に失敗し、再試行のたびに無駄な注入を試みていた。
+const UNSUPPORTED_LAZY_FRAME_URL = /^(?:about|data|chrome|chrome-extension|devtools|edge|moz-extension|safari-web-extension):/i;
 const SCANNER_INJECTION_PROMISES = new Map();
 const LAZY_MODULE_STYLE_READY = new Set();
 
@@ -2052,6 +2056,9 @@ async function injectLazyModule(moduleName, sender) {
     if (await isUrlExcludedBySettings(senderUrl)) {
         return { success: false, error: 'site-excluded' };
     }
+    if (UNSUPPORTED_LAZY_FRAME_URL.test(senderUrl)) {
+        return { success: false, error: 'unsupported-frame-url' };
+    }
 
     const target = { tabId, frameIds: [frameId] };
     const expectedUrl = toHashlessUrl(senderUrl);
@@ -2085,16 +2092,28 @@ async function injectLazyModule(moduleName, sender) {
             return { success: true, cached: true };
         }
         LAZY_MODULE_STYLE_READY.delete(styleKey);
-        await chrome.scripting.executeScript({
+        // 注入前に自フレームの URL を読み、送信元と一致するときだけファイルを注入する。
+        // 不一致のまま注入すると（ui_guard.js が abort するので）未捕捉エラーが
+        // ページのコンソールに溜まる。content 側は次のバッジ操作で再試行するため、
+        // ここで何も注入せずに返せば失うものは無い。
+        const urlProbe = await chrome.scripting.executeScript({
             target,
             world: 'ISOLATED',
             func: (expected) => {
+                const href = String(window.location.href || '');
+                const hashIndex = href.indexOf('#');
+                const actual = hashIndex === -1 ? href : href.slice(0, hashIndex);
                 window.__aiMetaViewerExpectedLazyUrl = expected;
-                window.__aiMetaViewerAbortUiModule = false;
+                window.__aiMetaViewerAbortUiModule = actual !== expected;
                 window.__aiMetaViewerUiModuleReady = false;
+                return actual;
             },
             args: [expectedUrl],
         });
+        const probedUrl = Array.isArray(urlProbe) && urlProbe.length > 0 ? urlProbe[0]?.result : null;
+        if (typeof probedUrl !== 'string' || probedUrl !== expectedUrl) {
+            return { success: false, error: 'navigation-mismatch' };
+        }
         await chrome.scripting.executeScript({
             target,
             world: 'ISOLATED',

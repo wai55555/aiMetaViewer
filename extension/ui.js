@@ -5,8 +5,12 @@
 // 全体を per-run スコープに閉じ込め、abort 後の再注入で lexical binding が
 // 衝突しないようにする。
 (function installUiModule() {
+// 中断は throw ではなく return で行う。注入ファイル内の例外は拡張側で捕捉できず、
+// ページのコンソールに「Uncaught Error」として出る（SNS/EC サイトのように
+// UI が不要なページでは操作のたびに再試行され、大量のエラーになる）。
+// グローバルを定義しなければ中断としては十分なので、静かに抜ける。
 if (window.__aiMetaViewerAbortUiModule === true) {
-    throw new Error('AI Meta Viewer UI module aborted by navigation guard');
+    return;
 }
 
 /**

@@ -206,3 +206,85 @@ test('ui entry contains a navigation abort guard and scanner is all-frame aware'
     assert.match(guard, /__aiMetaViewerUiModuleReady = false;/);
     assert.match(guard, /expectedUrl !== actualUrl/);
 });
+
+test('the injected comfyui parser aborts silently instead of throwing', () => {
+    const parserSource = fs.readFileSync(path.join(extensionDir, 'comfyui_parser.js'), 'utf8');
+    const context = vm.createContext({ console });
+    context.window = context;
+    context.__aiMetaViewerAbortUiModule = true;
+    // A throw from an injected file cannot be caught by the extension; it always
+    // becomes an "Uncaught Error" in the page console.
+    assert.doesNotThrow(() => vm.runInContext(parserSource, context, { filename: 'comfyui_parser.js' }));
+    assert.equal(context.ComfyUIParser, undefined);
+
+    context.__aiMetaViewerAbortUiModule = false;
+    assert.doesNotThrow(() => vm.runInContext(parserSource, context, { filename: 'comfyui_parser.js' }));
+    assert.equal(typeof context.ComfyUIParser.summarize, 'function');
+});
+
+test('lazy module client stops retrying a permanently failing page until the URL changes', async () => {
+    const context = loadRuntime();
+    assert.deepEqual(
+        { ...context.LAZY_MODULE_RETRY_DEFAULTS },
+        { maxConsecutiveFailures: 3, failureCooldownMs: 30000 }
+    );
+
+    let url = 'https://example.test/product';
+    let clock = 0;
+    let sendCount = 0;
+    const client = context.createLazyModuleClient({
+        moduleName: 'ui',
+        sendMessage: async () => {
+            sendCount += 1;
+            return { success: false, error: 'navigation-mismatch' };
+        },
+        isReady: () => false,
+        getUrl: () => url,
+        now: () => clock,
+    });
+
+    // Three attempts are allowed, then the page is left alone.
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+        await assert.rejects(client.ensure(), /Lazy module injection failed/);
+    }
+    assert.equal(sendCount, 3);
+    assert.equal(client.failureCount(), 3);
+
+    clock += 1000;
+    await assert.rejects(client.ensure(), error => {
+        assert.equal(error.code, 'lazy-module-injection-failed');
+        assert.equal(error.suppressed, true);
+        return true;
+    });
+    assert.equal(sendCount, 3, 'no further message while the cooldown holds');
+
+    // A soft navigation is a new attempt budget.
+    url = 'https://example.test/product?page=2';
+    await assert.rejects(client.ensure(), /Lazy module injection failed/);
+    assert.equal(sendCount, 4);
+    assert.equal(client.failureCount(), 1);
+
+    // The cooldown re-opens retries on the same URL after 30s.
+    clock += 30000;
+    await assert.rejects(client.ensure(), /Lazy module injection failed/);
+    assert.equal(sendCount, 5);
+});
+
+test('the service worker checks the frame URL before injecting the UI files', () => {
+    const background = fs.readFileSync(path.join(extensionDir, 'background.js'), 'utf8');
+    // The setter probe reads the real frame URL and the mismatch branch returns
+    // before any file is injected (no ui_guard abort, no console error).
+    const probeIndex = background.indexOf('const urlProbe = await chrome.scripting.executeScript');
+    const injectIndex = background.indexOf('files: config.scripts');
+    assert.ok(probeIndex > 0, 'URL probe must exist');
+    assert.ok(injectIndex > probeIndex, 'files are injected only after the probe');
+    assert.match(background, /window\.__aiMetaViewerAbortUiModule = actual !== expected;/);
+    assert.match(background, /probedUrl !== expectedUrl/);
+    assert.match(background, /error: 'navigation-mismatch'/);
+    assert.match(background, /error: 'unsupported-frame-url'/);
+    const mismatchIndex = background.indexOf("probedUrl !== expectedUrl");
+    assert.ok(
+        background.slice(mismatchIndex, injectIndex).includes('return { success: false, error: \'navigation-mismatch\' }'),
+        'mismatch must return before injection'
+    );
+});

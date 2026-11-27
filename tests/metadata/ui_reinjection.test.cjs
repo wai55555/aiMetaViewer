@@ -7,7 +7,7 @@ const vm = require('node:vm');
 const repoRoot = path.resolve(__dirname, '../..');
 const uiSource = fs.readFileSync(path.join(repoRoot, 'extension/ui.js'), 'utf8');
 
-test('aborted ui.js can be re-injected without lexical redeclaration and only marks ready at the end', () => {
+test('aborted ui.js aborts silently and can be re-injected without lexical redeclaration', () => {
     const context = vm.createContext({
         console,
         URL,
@@ -38,7 +38,10 @@ test('aborted ui.js can be re-injected without lexical redeclaration and only ma
     context.window = context;
     context.ComfyUIParser = {};
     context.__aiMetaViewerAbortUiModule = true;
-    assert.throws(() => vm.runInContext(uiSource, context), /aborted by navigation guard/);
+    // Injected files that throw always surface as an uncaught error in the page
+    // console, so the guard must abort without throwing.
+    assert.doesNotThrow(() => vm.runInContext(uiSource, context));
+    assert.equal(context.createModal, undefined);
     assert.notEqual(context.__aiMetaViewerUiModuleReady, true);
 
     context.__aiMetaViewerAbortUiModule = false;

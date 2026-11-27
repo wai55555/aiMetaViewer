@@ -2,9 +2,11 @@
 (function (root) {
     'use strict';
 
-    if (root.__aiMetaViewerAbortUiModule === true) {
-        throw new Error('AI Meta Viewer UI module aborted by navigation guard');
-    }
+    // Abort silently: this file is injected by the service worker, and a throw
+    // from an injected file cannot be caught by the extension — it always lands
+    // in the page console as an uncaught error. Not defining ComfyUIParser is
+    // the whole point of the guard, so returning is enough.
+    if (root.__aiMetaViewerAbortUiModule === true) return;
 
     const MAX_NODES = 10000;
     const OUTPUT_TYPE = /^(?:SaveImage|PreviewImage|SaveAnimated|VideoCombine|VHS_VideoCombine|SaveVideo|SaveGif)/i;
