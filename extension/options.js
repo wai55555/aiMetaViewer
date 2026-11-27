@@ -4,6 +4,7 @@
 const DEFAULT_SETTINGS = {
     debugMode: false,
     debugAllDetections: false,
+    debugForceFullFetch: false,
     errorNotification: false,
     minPixelCount: 250000,
     minImageSize: 200,
@@ -37,6 +38,7 @@ const DEFAULT_SETTINGS = {
 // DOM Elements
 const debugModeCheckbox = document.getElementById('debugMode');
 const debugAllDetectionsCheckbox = document.getElementById('debugAllDetections');
+const debugForceFullFetchCheckbox = document.getElementById('debugForceFullFetch');
 const errorNotificationCheckbox = document.getElementById('errorNotification');
 const minPixelCountInput = document.getElementById('minPixelCount');
 const minImageSizeInput = document.getElementById('minImageSize');
@@ -225,6 +227,7 @@ async function loadSettings() {
 
     if (debugModeCheckbox) debugModeCheckbox.checked = settings.debugMode;
     if (debugAllDetectionsCheckbox) debugAllDetectionsCheckbox.checked = settings.debugAllDetections;
+    if (debugForceFullFetchCheckbox) debugForceFullFetchCheckbox.checked = settings.debugForceFullFetch;
     if (errorNotificationCheckbox) errorNotificationCheckbox.checked = settings.errorNotification;
     if (minPixelCountInput) minPixelCountInput.value = settings.minPixelCount;
     if (minImageSizeInput) minImageSizeInput.value = settings.minImageSize;
@@ -301,6 +304,7 @@ async function saveSettings() {
     const settings = {
         debugMode: debugModeCheckbox ? debugModeCheckbox.checked : false,
         debugAllDetections: debugAllDetectionsCheckbox ? debugAllDetectionsCheckbox.checked : false,
+        debugForceFullFetch: debugForceFullFetchCheckbox ? debugForceFullFetchCheckbox.checked : false,
         errorNotification: errorNotificationCheckbox ? errorNotificationCheckbox.checked : false,
         minPixelCount: parseInt(minPixelCountInput ? minPixelCountInput.value : '250000', 10) || 250000,
         minImageSize: parseInt(minImageSizeInput ? minImageSizeInput.value : '200', 10) || 200,

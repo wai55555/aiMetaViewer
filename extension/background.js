@@ -44,6 +44,11 @@ let initializationState = INITIALIZATION_STATES.PENDING;
 let fatalInitializationSignalEmitted = false;
 let settings = { debugMode: false };
 let settingsLoaded = false;
+
+function isDebugDetectionEnabled() {
+    return typeof settings !== 'undefined' && settings != null &&
+        (settings.debugAllDetections === true || settings.debugForceFullFetch === true);
+}
 const pendingContentDiagnosticLogs = [];
 const MAX_PENDING_CONTENT_DIAGNOSTIC_LOGS = 256;
 
@@ -412,7 +417,8 @@ class PersistentLRUCache {
 
     async get(url) {
         await this.initPromise;
-        if (typeof settings !== 'undefined' && settings?.debugAllDetections === true) return undefined;
+        if (typeof settings !== 'undefined' && settings != null &&
+            (settings.debugAllDetections === true || settings.debugForceFullFetch === true)) return undefined;
         const entry = this.index.get(url);
         if (!entry) return undefined;
 
@@ -455,7 +461,8 @@ class PersistentLRUCache {
     }
 
     async _writeCache(url, metadata, options = {}) {
-        if (typeof settings !== 'undefined' && settings?.debugAllDetections === true) return { stored: false, reason: 'debug' };
+        if (typeof settings !== 'undefined' && settings != null &&
+            (settings.debugAllDetections === true || settings.debugForceFullFetch === true)) return { stored: false, reason: 'debug' };
         const key = this.cacheKeyPrefix + url;
 
         // JSON文字列をUTF-8へ変換した実byte数をキャッシュ容量として扱う。
@@ -1454,7 +1461,8 @@ function requestImageMetadata(imageUrl, { tabId = null, priority = ANALYSIS_PRIO
         order,
         tabId,
         tabIds: new Set(tabId === null ? [] : [tabId]),
-        debugAllDetections: settings?.debugAllDetections === true,
+        debugAllDetections: isDebugDetectionEnabled(),
+        debugForceFullFetch: settings?.debugForceFullFetch === true,
         promise: null,
     };
     inFlightAnalyses.set(imageUrl, entry);
@@ -1777,6 +1785,7 @@ function isStructuralRangeFailure(error, status) {
 const DEFAULT_SETTINGS = {
     debugMode: false,
     debugAllDetections: false,
+    debugForceFullFetch: false,
     errorNotification: false,
     minPixelCount: 250000,
     downloaderFolderMode: 'id_pageTitle', // 'id_pageTitle', 'pageTitle', 'domain', 'none'
@@ -3018,9 +3027,12 @@ async function handleFetchImageMetadata(imageUrl) {
     }
     const isFileScheme = imageScheme === 'file:';
     const requestContext = getAnalysisContext(imageUrl);
-    const debugAllDetections = requestContext
+    const debugForceFullFetch = requestContext
+        ? requestContext.debugForceFullFetch === true
+        : settings?.debugForceFullFetch === true;
+    const debugAllDetections = debugForceFullFetch || (requestContext
         ? requestContext.debugAllDetections === true
-        : settings?.debugAllDetections === true;
+        : isDebugDetectionEnabled());
     const urlId = getSafeUrlId(imageUrl);
 
     debugLog('[AI Meta Viewer] Fetching metadata for:', imageUrl);
@@ -4249,7 +4261,8 @@ async function handleFetchImageMetadata(imageUrl) {
                 return readResponseForMetadata(response, {
                     allowPngStream: true,
                     signal: requestSignal,
-                    maxWebpScanBytes: options.maxWebpScanBytes,
+                    maxWebpScanBytes: options.maxWebpScanBytes ||
+                        (debugForceFullFetch ? MAX_WEBP_DEEP_SCAN_BYTES : undefined),
                 });
             }
         );
@@ -4361,7 +4374,7 @@ async function handleFetchImageMetadata(imageUrl) {
             }
         } else {
             // URLフェッチ: Range Request 試行
-            const shouldUseRange = !rangeRequestBlockList.has(domain);
+            const shouldUseRange = !debugForceFullFetch && !rangeRequestBlockList.has(domain);
 
             if (shouldUseRange) {
                 const rangeSize = 65535;
@@ -4557,9 +4570,11 @@ async function handleFetchImageMetadata(imageUrl) {
                     }
                 }
             } else {
-                debugLog('[AI Meta Viewer] Range Request skipped for blocked domain:', {
+                debugLog('[AI Meta Viewer] Range Request skipped:', {
                     domain: domain || '(unknown)',
-                    reason: 'domain is already in rangeRequestBlockList'
+                    reason: debugForceFullFetch
+                        ? 'debug-force-full-fetch'
+                        : 'domain is already in rangeRequestBlockList'
                 });
                 const blockedInput = await safeFetchFullInput(imageUrl, getAnalysisContext(imageUrl)?.signal);
                 rangeRepresentationComplete = true;
@@ -4701,6 +4716,9 @@ async function handleFetchImageMetadata(imageUrl) {
             }
 
             if (analysisSignal?.aborted) throw createAnalysisAbortError();
+            if (debugForceFullFetch && scanResult.debug) {
+                scanResult.debug.forcedFullFetch = true;
+            }
             if (scanResult.status === 'normal' || scanResult.status === 'stealth') {
                 if (analysisSignal?.aborted) throw createAnalysisAbortError();
                 const cacheResult = scanResult.metadataPartial === true
@@ -4843,7 +4861,7 @@ async function handleFetchImageMetadata(imageUrl) {
                     webpStreamResult?.scanLimitReached === true) &&
                 (!webpStreamResult || webpStreamResult.complete !== true) &&
                 (webpStreamResult?.state !== 'resource-limit' || webpStreamResult?.scanLimitReached === true);
-            if (webpNeedsRecovery) {
+            if (webpNeedsRecovery && !debugForceFullFetch) {
                 try {
                     const fullInput = await safeFetchFullWebpInput(
                         activeUrl,
@@ -4872,7 +4890,7 @@ async function handleFetchImageMetadata(imageUrl) {
             }
 
             // メタデータ不足時の再試行ロジック
-            if (getMetadataState(metadata) === 'unresolved' && !isFileScheme && detectedFormat !== 'webp') {
+            if (getMetadataState(metadata) === 'unresolved' && !isFileScheme && detectedFormat !== 'webp' && !debugForceFullFetch) {
 
                 if (!isRangeRequest) {
                     // file:// URL 等で Range が暗黙的に効いてバッファが切り詰められたケース
@@ -5034,6 +5052,14 @@ async function handleFetchImageMetadata(imageUrl) {
             }
         }
 
+        if (debugForceFullFetch && !isFileScheme && metadata && typeof metadata === 'object' &&
+            metadata.__debugDetection && typeof metadata.__debugDetection === 'object') {
+            metadata.__debugDetection.forcedFullFetch = true;
+            if ((!rangeRepresentationComplete || metadata.metadataPartial === true) &&
+                !metadata.__debugDetection.limited) {
+                metadata.__debugDetection.limited = 'full-fetch-incomplete';
+            }
+        }
         const metadataState = getMetadataState(metadata);
         const analysisOutcome = metadataState === 'resolved'
             ? 'resolved'

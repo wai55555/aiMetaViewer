@@ -1001,14 +1001,13 @@ Chrome Web Store への公開手順は本計画の対象外である。
 
 ---
 
-## §15 デバッグ全検知モード（Level 1）
+## §15 デバッグ全検知モード（Level 1 / Level 2）
 
 ユーザー報告の「検出できない画像」を調査するための、明示的なデバッグ機能。
 通常の検出・キャッシュ・性能には影響させない。
 
 - **FR-DBG-01**: 設定 `debugAllDetections`（既定 `false`）を追加する。オプション画面の
-  Debug セクションから有効化できる。Level 2（追加取得を強制するモード）は本節の
-  対象外とし、実装しない。
+  Debug セクションから有効化できる。
 - **FR-DBG-02**: 有効時は、取得済みバイト列に対する**論理的な抑制**を外す。
   - 通常メタデータによる Stealth 抑制
   - Stealth 候補の画素数上限（33.5MP）
@@ -1030,6 +1029,28 @@ Chrome Web Store への公開手順は本計画の対象外である。
 - **FR-DBG-07**: 通常モードの検出結果・優先順位・キャッシュ版数を変更しない。
   §11.2 にデバッグ用の回帰テストを追加する。
 
+### 15.1 Level 2：追加取得の強制
+
+Level 1 が「取得済みバイト列に対する論理抑制の解除」であるのに対し、
+Level 2 は「初回取得の Range をスキップし、full-body 取得経路へ強制する」
+モードである。通常モードおよび Level 1 の挙動には影響させない。
+
+- **FR-DBG-08**: 設定 `debugForceFullFetch`（既定 `false`）を追加する。
+  オプション画面の Debug セクションから有効化できる。有効時は Level 1 の
+  `debugAllDetections` も有効として扱う（Level 2 は Level 1 を含む）。
+- **FR-DBG-09**: HTTP(S) の初回取得では Range リクエストを送らず、
+  byte 0 からの full-body 取得を強制する。PNG は byte 0 からの
+  full stream、WebP は deep scan、その他の形式は既存の full-fetch
+  リーダーを使う。full-body 応答が既に得られている場合は追加取得しない。
+- **FR-DBG-10**: 資源安全の上限は Level 2 でも変更しない。
+  `MAX_DECODED_BYTES`、text / zTXt / eXIf prefix、trailing 1MiB、
+  JPEG head budget / SOS 打ち切り、PNG の full stream gate、形式別 head budget、
+  WebP の deep scan 上限を維持する。上限で検査できない場合は
+  `debug.limited` に理由を入れる。
+- **FR-DBG-11**: デバッグ結果には `debug.forcedFullFetch = true` を付ける。
+  キャッシュ bypass と通常モード不変の要件は Level 1（FR-DBG-05〜07）を継承する。
+  Level 2 用の回帰テストを §11.2 に追加する。
+
 ---
 
 ## 付録 A：要件 ID 一覧
@@ -1045,7 +1066,7 @@ Chrome Web Store への公開手順は本計画の対象外である。
 - Stealth：FR-STL-01〜07（04b を含む）（§7）
 - 保守：FR-UNI-01〜03、FR-CACHE-01〜03、FR-DUP-01〜02、FR-BG-01（§8）
 - 生成元解釈：FR-GEN-01〜04（§9）
-- デバッグ全検知：FR-DBG-01〜07（§15）
+- デバッグ全検知：FR-DBG-01〜11（§15）
 - Phase 0 計測：B-01〜B-06（§10）
 
 ## 付録 B：判断の経緯（要約）
