@@ -183,3 +183,74 @@ test('the same LoRA behind several outputs is reported once', () => {
     } });
     assert.deepEqual(result.loras.map(entry => entry.text), ['shared.safetensors (0.5)']);
 });
+
+/*
+ * Guards for the three P0 constraints that the table above cannot express on
+ * its own: the WAS input count is not fixed, the Efficiency slot row belongs to
+ * the non-SDXL loader only, and Inspire class_type strings end with " //Inspire".
+ */
+
+test('WAS Text Concatenate accepts every text_a..text_x slot, not a fixed four', () => {
+    const letters = 'abcdefghijklmnopqrstuvwx';
+    const inputs = { delimiter: '|' };
+    for (const letter of letters) inputs[`text_${letter}`] = letter.toUpperCase();
+    const result = summarize({ prompt: {
+        '1': { class_type: 'Text Concatenate', inputs },
+        '2': { class_type: 'CLIPTextEncode', inputs: { text: ['1', 0] } },
+        '3': { class_type: 'KSampler', inputs: { seed: 1, positive: ['2', 0] } },
+        '4': { class_type: 'SaveImage', inputs: { images: ['3', 0] } },
+    } });
+    // 24 parts: a fixed text_a..text_d list would stop at D.
+    assert.deepEqual(
+        result.positive.map(entry => entry.text),
+        [letters.toUpperCase().split('').join('|')]
+    );
+});
+
+test('Eff. Loader SDXL never reuses the non-SDXL positive/negative slots', () => {
+    // TSC_EfficientLoaderSDXL returns SDXL_TUPLE, LATENT, VAE, DEPENDENCIES:
+    // there are no CONDITIONING slots, so slots 1/2 carry no prompt role. If the
+    // "Efficient Loader" row were copied here, slot 1/2 would mislabel the
+    // linked strings as positive/negative.
+    const linked = summarize({ prompt: {
+        '1': { class_type: 'CLIPTextEncode', inputs: { text: 'SDXL POSITIVE' } },
+        '2': { class_type: 'CLIPTextEncode', inputs: { text: 'SDXL NEGATIVE' } },
+        '3': { class_type: 'Eff. Loader SDXL', inputs: { positive: ['1', 0], negative: ['2', 0] } },
+        '4': { class_type: 'KSampler', inputs: { seed: 1, positive: ['3', 1], negative: ['3', 2] } },
+        '5': { class_type: 'SaveImage', inputs: { images: ['4', 0] } },
+    } });
+    assert.deepEqual(linked.positive, []);
+    assert.deepEqual(linked.negative, []);
+    assert.deepEqual(
+        linked.unconnected.map(entry => entry.text).sort(),
+        ['SDXL NEGATIVE', 'SDXL POSITIVE']
+    );
+
+    // The guard must not weaken the verified non-SDXL row.
+    const plain = summarize({ prompt: {
+        '1': { class_type: 'CLIPTextEncode', inputs: { text: 'PLAIN POSITIVE' } },
+        '2': { class_type: 'CLIPTextEncode', inputs: { text: 'PLAIN NEGATIVE' } },
+        '3': { class_type: 'Efficient Loader', inputs: { positive: ['1', 0], negative: ['2', 0] } },
+        '4': { class_type: 'KSampler', inputs: { seed: 1, positive: ['3', 1], negative: ['3', 2] } },
+        '5': { class_type: 'SaveImage', inputs: { images: ['4', 0] } },
+    } });
+    assert.deepEqual(plain.positive.map(entry => entry.text), ['PLAIN POSITIVE']);
+    assert.deepEqual(plain.negative.map(entry => entry.text), ['PLAIN NEGATIVE']);
+});
+
+test('Inspire nodes are matched by the " //Inspire" suffix only', () => {
+    const result = summarize({ prompt: {
+        '1': { class_type: 'WildcardEncode //Inspire', inputs: { populated_text: 'inspire populated', wildcard_text: '__template__' } },
+        '2': { class_type: 'PromptBuilder //Inspire', inputs: { text: 'inspire builder' } },
+        // The catalogue's "-Inspire" spelling is not a class_type: it must not
+        // resolve, because the wildcard keys are not generic prompt keys.
+        '3': { class_type: 'WildcardEncode-Inspire', inputs: { populated_text: 'dash spelling', wildcard_text: '__template__' } },
+        '4': { class_type: 'KSampler', inputs: { seed: 1, positive: ['1', 0], negative: ['2', 0] } },
+        '5': { class_type: 'KSampler', inputs: { seed: 2, positive: ['3', 0] } },
+        '6': { class_type: 'SaveImage', inputs: { images: ['4', 0] } },
+        '7': { class_type: 'SaveImage', inputs: { images: ['5', 0] } },
+    } });
+    assert.deepEqual(result.positive.map(entry => entry.text), ['inspire populated']);
+    assert.deepEqual(result.negative.map(entry => entry.text), ['inspire builder']);
+    assert.equal(result.positive.some(entry => entry.text === 'dash spelling'), false);
+});
