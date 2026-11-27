@@ -6,9 +6,22 @@
   （生成 + 検証: `node tests/e2e/stealth-on-demand/build.cjs`。`MANIFEST.json` が期待値の一次情報）
 - 実施環境: **Windows 側の Chrome**（WSL の Chrome ではない）。拡張は unpacked で読み込む。
 
+## 0. 前提（2026-11-27 の実測で判明した点）
+
+- **バッジは画像サイズで決まる**。`minPixelCount`（既定 250,000 = 500×500）未満の画像は
+  通常モードで解析自体がスキップされ、バッジが出ない（デバッグの全検知モードはこの制限を外す）。
+  そのため本セットは **640×640（409,600 px）** で生成している。
+  設定で `minPixelCount` を上げている場合は、バッジが出ないので戻してから実施する。
+- **メタデータが空の PNG はバッジが出ない**（`confirmed-empty` はバッジを付けない仕様）。
+  そのため `03-no-metadata-alpha.png` は「バッジが出ないこと」を確認する負のコントロールであり、
+  オンデマンドボタンの対象外。メタデータが無い画像では通常スキャンが最初から LSB を見るので、
+  そもそもオンデマンド判定は不要（`05` がその実例）。
+- `file://` で直接開いても確認できる（ローカルアクセス権限が有効な場合）。
+  その場合ヘッダ取得は Range ではなく先頭 64 bytes の読み出しになる。HTTP 配信を推奨。
+
 ## 1. 準備
 
-1. 画像セットをローカル HTTP で配信する（`file://` では拡張の取得経路が変わるため必ず HTTP）。
+1. 画像セットをローカル HTTP で配信する（`file://` 直開きでも可。§0 参照）。
 
    ```powershell
    # Windows PowerShell（リポジトリ直下で）
@@ -29,16 +42,18 @@
 
 `MANIFEST.json` と同一の内容。押下結果の文字列は UI 実装の文言そのもの。
 
-| # | ファイル | IHDR | 通常メタデータ | Stealth セクション | 「Check stealth metadata」押下後 |
-| --- | --- | --- | --- | --- | --- |
-| 1 | `01-stealth-alpha-with-metadata.png` | 6/8b | `parameters`, `Software` | **表示** | `Stealth PNG Info (Alpha)` + `{"prompt":"e2e alpha payload","steps":28}` |
-| 2 | `02-normal-metadata-no-stealth.png` | 2/8b | `parameters` | **表示** | `No stealth payload found in the pixel LSBs.` |
-| 3 | `03-no-metadata-alpha.png` | 6/8b | なし | **表示** | `No stealth payload found in the pixel LSBs.` |
-| 4 | `04-comfyui-api-prompt.png` | 2/8b | `prompt`（ComfyUI API） | **表示** | `No stealth payload found in the pixel LSBs.` |
-| 5 | `05-stealth-only-alpha.png` | 6/8b | `Stealth PNG Info (Alpha)` | **非表示**（通常スキャンで検出済み） | – |
-| 6 | `06-gray8-not-eligible.png` | 0/8b | なし | **非表示**（非対象レイアウト） | – |
-| 7 | `07-rgb16-not-eligible.png` | 2/16b | なし | **非表示**（16bit RGB は対象外） | – |
-| 8 | `08-stealth-rgb-with-metadata.png` | 2/8b | `parameters` | **表示** | `Stealth PNG Info (RGB)` + `{"prompt":"e2e rgb payload"}` |
+全画像 640×640。
+
+| # | ファイル | IHDR | 通常メタデータ | バッジ | Stealth セクション | 「Check stealth metadata」押下後 |
+| --- | --- | --- | --- | --- | --- | --- |
+| 1 | `01-stealth-alpha-with-metadata.png` | 6/8b | `parameters`, `Software` | 出る | **表示** | `Stealth PNG Info (Alpha)` + `{"prompt":"e2e alpha payload","steps":28}` |
+| 2 | `02-normal-metadata-no-stealth.png` | 2/8b | `parameters` | 出る | **表示** | `No stealth payload found in the pixel LSBs.` |
+| 3 | `03-no-metadata-alpha.png` | 6/8b | なし | **出ない** | –（モーダルを開けない） | –（負のコントロール） |
+| 4 | `04-comfyui-api-prompt.png` | 2/8b | `prompt`（ComfyUI API） | 出る | **表示** | `No stealth payload found in the pixel LSBs.` |
+| 5 | `05-stealth-only-alpha.png` | 6/8b | `Stealth PNG Info (Alpha)` | 出る | **非表示**（通常スキャンで検出済み） | – |
+| 6 | `06-gray8-not-eligible.png` | 0/8b | なし | 出ない | – | – |
+| 7 | `07-rgb16-not-eligible.png` | 2/16b | なし | 出ない | – | – |
+| 8 | `08-stealth-rgb-with-metadata.png` | 2/8b | `parameters` | 出る | **表示** | `Stealth PNG Info (RGB)` + `{"prompt":"e2e rgb payload"}` |
 
 補足:
 
@@ -64,13 +79,22 @@
 | 1.6 | モーダルを閉じ、**同じ画像**でもう一度開く | Stealth の結果が**そのまま再表示**され、**新しいリクエストが 1 件も出ない**（probe も scan もメモ化） |
 | 1.7 | 別タブで同じ画像を開いてモーダルを開く | そのページでは 1.2 の probe が 1 回だけ走る（メモ化はページ単位） |
 
-### 3.2 ペイロード無しの分岐（#2 / #3 / #4）
+### 3.2 ペイロード無しの分岐（#2 / #4、負のコントロール #3）
 
 | # | 操作 | 期待結果 |
 | --- | --- | --- |
 | 2.1 | `02-normal-metadata-no-stealth.png` で 1.2〜1.4 を実施 | セクションは表示され、押下後は `No stealth payload found in the pixel LSBs.` のみ。ボタンは消える（再試行ボタンは出ない） |
-| 2.2 | `03-no-metadata-alpha.png` を開く | 通常メタデータのセクションは無い（「メタデータ無し」の表示）。Stealth セクションは**表示**され、押下で 2.1 と同じ未検出文言 |
+| 2.2 | `03-no-metadata-alpha.png` を開く | **バッジが出ない**（メタデータも Stealth も無いため表示するものが無い）。これは仕様どおり |
 | 2.3 | `04-comfyui-api-prompt.png` を開く | 生成元が **ComfyUI** と表示され、positive / negative / LoRA が §2 の補足どおりに出る。Stealth セクションは表示、押下で未検出文言 |
+| 2.4 | 任意: `06` / `07` でバッジが出ないことも確認 | 非対象レイアウトは解析対象外 |
+
+### 3.2.1 ヘッダ取得に失敗した場合
+
+`file://` 直開きやローカルアクセス権限が無い状態では、64 bytes のヘッダ取得が失敗する。
+
+| # | 操作 | 期待結果 |
+| --- | --- | --- |
+| 2.5 | `01` を開いてモーダルを見る | セクションは消えず `Could not read the PNG header, so the pixel LSBs were not checked.` と **`Retry header check`** が出る。押すと再取得し、成功すれば「Check stealth metadata」に変わる。コンソールに未捕捉エラーが出ない |
 
 ### 3.3 非表示の分岐（#5 / #6 / #7）
 
@@ -98,7 +122,8 @@
 
 - 合格条件: §3 の全項目が期待どおり。特に
   (a) 押下しない限りペイロードが出ない、(b) 押下時の本体取得は 1 回、
-  (c) 再表示でリクエスト 0、(d) #5/#6/#7 でセクションが出ない、(e) #8 が RGB 担体として出る。
+  (c) 再表示でリクエスト 0、(d) #5/#6/#7 でセクションが出ない、(e) #8 が RGB 担体として出る、
+  (f) #3 はバッジが出ない、(g) ヘッダ取得失敗時に理由と再試行が出る（未捕捉エラーを出さない）。
 - 不一致があった場合は、以下を記録する: 画像 #、操作 #、実際の表示文言、Network のリクエスト一覧、
   Console のエラー、`chrome://version` の Chrome バージョン。
 
@@ -125,7 +150,7 @@
 
 ## 6. 自動化の状況
 
-- ユニット/統合: `node --test tests/metadata/*.test.cjs` → **207 pass / 0 fail**
+- ユニット/統合: `node --test tests/metadata/*.test.cjs` → **215 pass / 0 fail**
   （`stealth_on_demand.test.cjs` 5 件、`stealth_modal.test.cjs` 5 件、ComfyUI P0 19 件を含む）。
 - ブラウザ E2E の自動化: **未実施**。WSL2 から Windows Chrome の CDP ポートへ到達できないため
   （`docs/stealth-on-demand.md` §7 と同じ制約）。到達できない場合の代替は 2 つ:
@@ -143,3 +168,5 @@ node tests/e2e/stealth-on-demand/build.cjs
 - 8 枚を再生成し、`MANIFEST.json` に「実際の scanner 結果」と「期待値」を並べて書き出す。
 - 生成した画像が期待値と食い違えば **exit 1** で失敗する（実装が変わったときの検知に使う）。
 - 出力は決定的（同じ入力から同じ bytes / 同じ sha256）。
+- 画像は **640×640**（`minPixelCount` 既定 250,000 を超えるサイズ）。サイズを変える場合は
+  通常モードでバッジが出ることを必ず確認する。

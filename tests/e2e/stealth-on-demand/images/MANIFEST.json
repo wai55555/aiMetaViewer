@@ -1,16 +1,16 @@
 {
   "purpose": "Manual E2E image set for the on-demand Stealth LSB check (docs/stealth-on-demand-e2e.md §2).",
   "generatedBy": "node tests/e2e/stealth-on-demand/build.cjs",
-  "size": "256x256",
+  "size": "640x640",
   "images": [
     {
       "file": "01-stealth-alpha-with-metadata.png",
       "role": "stealth + 通常メタデータ（Alpha 担体）",
-      "bytes": 4347,
-      "sha256": "6a13ff1deedcdfbbe902be36dd1a20054699ba60d37d075d74fcc8063ae57825",
+      "bytes": 19483,
+      "sha256": "fc022ed94a5ff9f1fde7bdc6cca31c1b93b9bbcc25c39e0196e087e79b059cfd",
       "ihdr": {
-        "width": 256,
-        "height": 256,
+        "width": 640,
+        "height": 640,
         "bitDepth": 8,
         "colorType": 6,
         "stealthEligible": true
@@ -46,11 +46,11 @@
     {
       "file": "02-normal-metadata-no-stealth.png",
       "role": "通常メタデータのみ（ペイロード無し, RGB8 担体）",
-      "bytes": 2715,
-      "sha256": "9166543d1e87d6123720e10f3e1ca5ab3b1666e21632d8758505a74aad54e389",
+      "bytes": 15293,
+      "sha256": "8aa6c56cc7d87069ea478b2049586207b5bbcced01f70574c587a491ecbfe474",
       "ihdr": {
-        "width": 256,
-        "height": 256,
+        "width": 640,
+        "height": 640,
         "bitDepth": 8,
         "colorType": 2,
         "stealthEligible": true
@@ -79,11 +79,11 @@
     {
       "file": "03-no-metadata-alpha.png",
       "role": "メタデータ無し（α, ペイロード無し）",
-      "bytes": 3172,
-      "sha256": "ce0a29ae78a1a2385bc17556c767e342fa880ea5847eb44276fc205b824b190f",
+      "bytes": 18635,
+      "sha256": "3e143a3e9fbbf7385ffb7abc3410d4f2ef72574c585124e580408d69b5d452cf",
       "ihdr": {
-        "width": 256,
-        "height": 256,
+        "width": 640,
+        "height": 640,
         "bitDepth": 8,
         "colorType": 6,
         "stealthEligible": true
@@ -108,11 +108,11 @@
     {
       "file": "04-comfyui-api-prompt.png",
       "role": "ComfyUI 発端（API prompt: JPS 連結 + Efficient Loader + LoRA Stacker）",
-      "bytes": 4354,
-      "sha256": "78bd15611439d55dd695bd5e38e066093ef8d0ef7ff48b81554ea57252305045",
+      "bytes": 16932,
+      "sha256": "2a65987415e050d6e5e5e58f107d9ef5cafeae45315432d3b70a469fec452d67",
       "ihdr": {
-        "width": 256,
-        "height": 256,
+        "width": 640,
+        "height": 640,
         "bitDepth": 8,
         "colorType": 2,
         "stealthEligible": true
@@ -163,11 +163,11 @@
     {
       "file": "05-stealth-only-alpha.png",
       "role": "Stealth のみ（通常メタデータ無し → 通常スキャンで検出済み）",
-      "bytes": 4151,
-      "sha256": "08470cb73e3cd01260a8bd04f5049d4560e56224bb331ab2ddf5ca02396886f8",
+      "bytes": 19287,
+      "sha256": "2064c4a5f6f48acfe9996dd9e0c2c0deaf112ef2939c6d6e7950e913156052f9",
       "ihdr": {
-        "width": 256,
-        "height": 256,
+        "width": 640,
+        "height": 640,
         "bitDepth": 8,
         "colorType": 6,
         "stealthEligible": true
@@ -201,11 +201,11 @@
     {
       "file": "06-gray8-not-eligible.png",
       "role": "非対象レイアウト（Grayscale 8bit）",
-      "bytes": 1617,
-      "sha256": "d39c734473f2ebb8a6a5ed23935a11eb2d76e796b1080038e0fd26fdca85999c",
+      "bytes": 9845,
+      "sha256": "6a306fa8a5e4d5bc1b37be562ae89624ce08a41e24adce80599f746191dc67eb",
       "ihdr": {
-        "width": 256,
-        "height": 256,
+        "width": 640,
+        "height": 640,
         "bitDepth": 8,
         "colorType": 0,
         "stealthEligible": false
@@ -230,11 +230,11 @@
     {
       "file": "07-rgb16-not-eligible.png",
       "role": "非対象レイアウト（RGB 16bit, RGB モードの対象外）",
-      "bytes": 3961,
-      "sha256": "285bcc584d0006253c014f46f0f1f813115783283f7a3d76753998a2fb4a1487",
+      "bytes": 22667,
+      "sha256": "8ddb685e3ae2f71128d027ecbd47d24effa2e9ac182c50b522ca98e0421adb46",
       "ihdr": {
-        "width": 256,
-        "height": 256,
+        "width": 640,
+        "height": 640,
         "bitDepth": 16,
         "colorType": 2,
         "stealthEligible": false
@@ -259,11 +259,11 @@
     {
       "file": "08-stealth-rgb-with-metadata.png",
       "role": "stealth + 通常メタデータ（RGB 担体）",
-      "bytes": 3004,
-      "sha256": "3619dbb1438c4ad15957b3cd72e8304a20ebdbdcbb14a9eaace72dd51575ad7d",
+      "bytes": 15520,
+      "sha256": "fd8a85d57af214c5bf377f5739bd6437eec67461af5a38ca15d8eb1dad546a16",
       "ihdr": {
-        "width": 256,
-        "height": 256,
+        "width": 640,
+        "height": 640,
         "bitDepth": 8,
         "colorType": 2,
         "stealthEligible": true

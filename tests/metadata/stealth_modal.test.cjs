@@ -234,3 +234,35 @@ test('no section is offered when stealth metadata was already detected', () => {
     });
     assert.equal(section, null);
 });
+
+test('a failed PNG header probe is reported and can be retried', async () => {
+    let probeCalls = 0;
+    const { context, body, dispatch } = loadUi({
+        probePngInfo: () => {
+            probeCalls += 1;
+            // A file:// image whose header cannot be read must not look identical
+            // to a JPEG/GIF (which legitimately removes the section).
+            return probeCalls === 1
+                ? { success: false, errorType: 'unknown' }
+                : {
+                    success: true, format: 'png', colorType: 6, bitDepth: 8,
+                    hasAlpha: true, hasRgb: true, stealthEligible: true,
+                };
+        },
+    });
+    const section = context.window.createStealthSection('file:///C:/img/a.png', {});
+    body.appendChild(section);
+    await flush();
+
+    assert.equal(body.children.length, 1, 'the section stays visible');
+    assert.match(section.textContent, /Could not read the PNG header/);
+    const retry = section.querySelector('button');
+    assert.equal(retry.textContent, 'Retry header check');
+
+    retry.click();
+    await flush();
+    assert.doesNotMatch(section.textContent, /Could not read the PNG header/);
+    assert.match(section.textContent, /Check stealth metadata/);
+    assert.equal(dispatch.filter(call => call.action === 'probePngInfo').length, 2);
+    assert.equal(dispatch.some(call => call.action === 'scanStealthMetadata'), false);
+});

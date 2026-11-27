@@ -1411,7 +1411,9 @@ async function probePngInfoForModal(imageUrl) {
         stealthProbeCache.set(imageUrl, response);
         return response;
     }
-    return null;
+    // 失敗も呼び出し側へ返す。null に潰すと「対象外」と「取得失敗」を
+    // 区別できず、黙ってセクションが消えるだけになる。
+    return response || null;
 }
 
 /**
@@ -1485,8 +1487,39 @@ function createStealthSection(imageUrl, metadata) {
         return section;
     }
 
-    probePngInfoForModal(imageUrl).then(info => {
-        if (!info || info.success !== true || info.format !== 'png' || info.stealthEligible !== true) {
+    // probe は「対象外（非PNG・非対象レイアウト）」と「取得失敗」を区別する。
+    // 前者はセクションごと消すが、後者は理由を出さないと原因が分からない
+    // （file:// のローカルアクセス制限など）。
+    let failureNodes = [];
+    const clearFailureNodes = () => {
+        for (const node of failureNodes) {
+            if (node.parentNode === body) body.removeChild(node);
+        }
+        failureNodes = [];
+    };
+    const renderProbeFailure = () => {
+        clearFailureNodes();
+        const note = document.createElement('div');
+        note.className = 'ai-meta-text-area empty';
+        note.textContent = 'Could not read the PNG header, so the pixel LSBs were not checked.';
+        body.appendChild(note);
+        const retry = document.createElement('button');
+        retry.className = 'ai-meta-copy-btn';
+        retry.textContent = 'Retry header check';
+        retry.onclick = event => {
+            event.stopPropagation();
+            startProbe();
+        };
+        body.appendChild(retry);
+        failureNodes = [note, retry];
+    };
+    const renderProbe = info => {
+        clearFailureNodes();
+        if (!info || info.success !== true) {
+            renderProbeFailure();
+            return;
+        }
+        if (info.format !== 'png' || info.stealthEligible !== true) {
             section.remove();
             return;
         }
@@ -1519,10 +1552,13 @@ function createStealthSection(imageUrl, metadata) {
             }
         };
         body.appendChild(button);
-    }).catch(() => {
-        section.remove();
-    });
+    };
+    const startProbe = () => {
+        setStatus('Checking PNG color type…');
+        probePngInfoForModal(imageUrl).then(renderProbe).catch(renderProbeFailure);
+    };
 
+    startProbe();
     return section;
 }
 

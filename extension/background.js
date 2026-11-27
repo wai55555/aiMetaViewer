@@ -1468,11 +1468,15 @@ async function probePngInfo(imageUrl) {
 
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), PNG_INFO_PROBE_TIMEOUT_MS);
+    // file:// はローカル読み出しなので Range に意味がなく、ヘッダを付けると
+    // 取得そのものが失敗することがある。先頭 64 bytes だけ読んで cancel すれば
+    // 通信量は HTTP の Range と同じ。
+    const isLocalFileUrl = /^file:/i.test(imageUrl);
     try {
         const response = await fetch(imageUrl, {
             redirect: 'follow',
             signal: controller.signal,
-            headers: { Range: `bytes=0-${PNG_INFO_PROBE_BYTES - 1}` },
+            ...(isLocalFileUrl ? {} : { headers: { Range: `bytes=0-${PNG_INFO_PROBE_BYTES - 1}` } }),
         });
         if (!response.ok && response.status !== HTTP_PARTIAL_CONTENT_STATUS) {
             return { success: false, status: response.status };

@@ -31,7 +31,9 @@ const { summarize } = require('../../../extension/comfyui_parser.js');
 const OUT_DIR = path.join(__dirname, 'images');
 const CONTEXT = loadScannerContext();
 
-const SIZE = 256;
+// content script の minPixelCount（既定 250,000 = 500x500）を超える大きさにする。
+// 256x256 では通常モードでバッジが出ず、E2E の前提が崩れる。
+const SIZE = 640;
 
 /* ------------------------------------------------------------------ pixels */
 

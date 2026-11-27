@@ -24,7 +24,8 @@ Stealth 側が通常表示に出ない。フル展開は 1024² で 70ms 級、4
 | 成功（検出） | ペイロード本文と担体名（`Stealth PNG Info (Alpha)` 等）を表示、ボタンは消える |
 | 成功（未検出） | 「No stealth payload found in the pixel LSBs.」 |
 | 上限・未対応 | `unsupported-stealth-*` 診断がある場合は「Not checked: …」と理由を表示 |
-| 失敗 | 「Stealth scan failed.」＋「Retry stealth scan」で再試行可 |
+| 失敗（スキャン） | 「Stealth scan failed.」＋「Retry stealth scan」で再試行可 |
+| 失敗（ヘッダ取得） | 「Could not read the PNG header, so the pixel LSBs were not checked.」＋「Retry header check」で再試行可（対象外と区別するため、黙って消さない） |
 | 再表示 | 同一ページ内では結果をメモ化し、再スキャンしない |
 
 ## 3. 実装
@@ -83,6 +84,9 @@ Stealth 側が通常表示に出ない。フル展開は 1024² で 70ms 級、4
 - 16bit RGB は RGB モードの対象外（α 付きなら対象）。
 - Stealth を既に検出済みの画像ではボタンを出さない（同じ結果になるため）。
 - 動画、PNG 以外の形式ではセクション自体を表示しない。
+- `file://` の画像は Range を使わず先頭 64 bytes を読む（ローカル読み出しに Range は無い）。
+  取得に失敗した場合は上表の「ヘッダ取得」表示になり、`Retry header check` で再試行できる。
+- 先頭 64 bytes を読めない状況（ローカルアクセス権限なし等）ではボタンは出ない。
 
 ## 6. テスト
 
@@ -99,7 +103,10 @@ Stealth 側が通常表示に出ない。フル展開は 1024² で 70ms 級、4
   - 再表示はメモ化結果を使い、probe/scan を再送しない
   - 検出済みメタデータではセクションを出さない
 
-`node --test tests/metadata/*.test.cjs` → **204 pass / 0 fail**。
+`node --test tests/metadata/*.test.cjs` → **215 pass / 0 fail**。
+
+- `stealth_modal.test.cjs` は「ヘッダ取得に失敗したときは黙って消さず、理由と
+  `Retry header check` を出す」ことも固定している（`file://` の取得制限を可視化するため）。
 
 ## 7. 実機確認（未実施）
 
