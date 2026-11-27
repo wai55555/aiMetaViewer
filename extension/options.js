@@ -35,6 +35,16 @@ const DEFAULT_SETTINGS = {
     version: chrome.runtime.getManifest().version
 };
 
+// Level 1（全検知デバッグ）と Level 2（強制フル取得）は排他。
+// Level 2 は Level 1 を含むため、両方を同時に有効にはしない。
+function normalizeDebugLevels(settings) {
+    const forceFullFetch = settings && settings.debugForceFullFetch === true;
+    return {
+        debugForceFullFetch: forceFullFetch,
+        debugAllDetections: forceFullFetch ? false : Boolean(settings && settings.debugAllDetections === true),
+    };
+}
+
 // DOM Elements
 const debugModeCheckbox = document.getElementById('debugMode');
 const debugAllDetectionsCheckbox = document.getElementById('debugAllDetections');
@@ -219,6 +229,23 @@ function applyI18n() {
     });
 }
 
+// 片方を有効にしたらもう片方は解除し、Level 2 が有効な間は Level 1 を無効化して
+// 「Level 2 が Level 1 を含む」ことを UI でも表す。
+function syncDebugLevelInputs(changed) {
+    if (!debugAllDetectionsCheckbox || !debugForceFullFetchCheckbox) return;
+    if (changed === 'level1' && debugAllDetectionsCheckbox.checked) {
+        debugForceFullFetchCheckbox.checked = false;
+    }
+    if (changed === 'level2' && debugForceFullFetchCheckbox.checked) {
+        debugAllDetectionsCheckbox.checked = false;
+    }
+    debugAllDetectionsCheckbox.disabled = debugForceFullFetchCheckbox.checked === true;
+    const item = typeof debugAllDetectionsCheckbox.closest === 'function'
+        ? debugAllDetectionsCheckbox.closest('.setting-item')
+        : null;
+    if (item && item.classList) item.classList.toggle('setting-item-muted', debugAllDetectionsCheckbox.disabled);
+}
+
 // Load settings
 async function loadSettings() {
     applyI18n(); // Apply translations first
@@ -226,8 +253,10 @@ async function loadSettings() {
     const settings = await chrome.storage.sync.get(DEFAULT_SETTINGS);
 
     if (debugModeCheckbox) debugModeCheckbox.checked = settings.debugMode;
-    if (debugAllDetectionsCheckbox) debugAllDetectionsCheckbox.checked = settings.debugAllDetections;
-    if (debugForceFullFetchCheckbox) debugForceFullFetchCheckbox.checked = settings.debugForceFullFetch;
+    const debugLevels = normalizeDebugLevels(settings);
+    if (debugAllDetectionsCheckbox) debugAllDetectionsCheckbox.checked = debugLevels.debugAllDetections;
+    if (debugForceFullFetchCheckbox) debugForceFullFetchCheckbox.checked = debugLevels.debugForceFullFetch;
+    syncDebugLevelInputs();
     if (errorNotificationCheckbox) errorNotificationCheckbox.checked = settings.errorNotification;
     if (minPixelCountInput) minPixelCountInput.value = settings.minPixelCount;
     if (minImageSizeInput) minImageSizeInput.value = settings.minImageSize;
@@ -303,8 +332,10 @@ async function saveSettings() {
 
     const settings = {
         debugMode: debugModeCheckbox ? debugModeCheckbox.checked : false,
-        debugAllDetections: debugAllDetectionsCheckbox ? debugAllDetectionsCheckbox.checked : false,
-        debugForceFullFetch: debugForceFullFetchCheckbox ? debugForceFullFetchCheckbox.checked : false,
+        ...normalizeDebugLevels({
+            debugAllDetections: debugAllDetectionsCheckbox ? debugAllDetectionsCheckbox.checked : false,
+            debugForceFullFetch: debugForceFullFetchCheckbox ? debugForceFullFetchCheckbox.checked : false,
+        }),
         errorNotification: errorNotificationCheckbox ? errorNotificationCheckbox.checked : false,
         minPixelCount: parseInt(minPixelCountInput ? minPixelCountInput.value : '250000', 10) || 250000,
         minImageSize: parseInt(minImageSizeInput ? minImageSizeInput.value : '200', 10) || 200,
@@ -449,6 +480,13 @@ document.addEventListener('DOMContentLoaded', () => {
         downloaderUseRootCheckbox.addEventListener('change', updateBaseFolderVisibility);
     }
 
+    if (debugAllDetectionsCheckbox) {
+        debugAllDetectionsCheckbox.addEventListener('change', () => syncDebugLevelInputs('level1'));
+    }
+    if (debugForceFullFetchCheckbox) {
+        debugForceFullFetchCheckbox.addEventListener('change', () => syncDebugLevelInputs('level2'));
+    }
+
     // Reset Window Click
     if (resetWindowBtn) {
         resetWindowBtn.addEventListener('click', () => {
@@ -483,3 +521,9 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     }
 });
+
+// テスト用エクスポート（既存の ui.js / comfyui_parser.js と同じ方針）
+if (typeof window !== 'undefined') {
+    window.normalizeDebugLevels = normalizeDebugLevels;
+    window.syncDebugLevelInputs = syncDebugLevelInputs;
+}

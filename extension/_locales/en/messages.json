@@ -120,10 +120,10 @@
     "message": "Output detailed logs to browser console (for developers)"
   },
   "labelDebugAllDetections": {
-    "message": "Enable Full-Detection Debug"
+    "message": "Enable Full-Detection Debug (Level 1)"
   },
   "descDebugAllDetections": {
-    "message": "Disable logical detection suppressions and show all observed carriers. No extra network fetch; results are not cached."
+    "message": "Disable logical detection suppressions and show all observed carriers. No extra network fetch; results are not cached. Level 2 (Force Full Fetch) includes this mode, so the two cannot be enabled together."
   },
   "labelDebugForceFullFetch": {
       "message": "Force Full Fetch (Level 2)"

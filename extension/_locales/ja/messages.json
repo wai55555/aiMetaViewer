@@ -114,10 +114,10 @@
         "message": "ブラウザのコンソールに詳細なログを出力します（開発者向け）"
     },
     "labelDebugAllDetections": {
-        "message": "全検知デバッグを有効化"
+        "message": "全検知デバッグを有効化 (Level 1)"
     },
     "descDebugAllDetections": {
-        "message": "論理的な検知抑制を外し、観測した全担体を表示します。追加取得は行わず、結果はキャッシュしません。"
+        "message": "論理的な検知抑制を外し、観測した全担体を表示します。追加取得は行わず、結果はキャッシュしません。Level 2（強制フル取得）は本設定を含むため、同時には有効化できません。"
     },
     "labelDebugForceFullFetch": {
         "message": "強制フル取得（Level 2）"
