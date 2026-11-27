@@ -1346,7 +1346,11 @@ async function runGatedPngStreamScan({ charge, context, openStream }) {
         if (!stream) return null;
         const result = await scanPngMetadataStream(
             withStallTimeout(stream, onStall, controller.signal),
-            { signal: controller.signal, debugAllDetections: context?.debugAllDetections === true }
+            {
+                signal: controller.signal,
+                debugAllDetections: context?.debugAllDetections === true,
+                forceStealth: context?.forceStealth === true,
+            }
         );
         if (stalled) {
             const stallError = new Error(
@@ -1391,6 +1395,7 @@ async function runGatedPngBufferScan({ buffer, charge, context }) {
         const result = scanPngMetadataBuffer(buffer, {
             signal: context?.signal ?? null,
             debugAllDetections: context?.debugAllDetections === true,
+            forceStealth: context?.forceStealth === true,
         });
         if (context?.signal?.aborted) throw createAnalysisAbortError();
         return result;
@@ -1440,15 +1445,111 @@ function getAnalysisContext(imageUrl) {
  * @param {string} [options.order] - 取り出し順
  * @returns {Promise<Object>} - handleFetchImageMetadata の結果
  */
+
+// ---------------------------------------------------------------------------
+// PNG 色情報のオンデマンド probe（Stealth 判定ボタンの可否判定用）
+// ---------------------------------------------------------------------------
+const PNG_INFO_PROBE_BYTES = 64;
+const PNG_INFO_PROBE_TIMEOUT_MS = 8000;
+const PNG_INFO_PROBE_CACHE_LIMIT = 512;
+const pngInfoProbeCache = new Map();
+
+/**
+ * 先頭数十 bytes だけを読み、PNG の IHDR 情報を返す。
+ * Range 非対応サーバでは body の先頭だけ読んで cancel するため、
+ * フル取得にはならない。
+ * @param {string} imageUrl
+ * @returns {Promise<Object>} - { success, format, colorType, bitDepth, hasAlpha, stealthEligible, ... }
+ */
+async function probePngInfo(imageUrl) {
+    if (typeof imageUrl !== 'string' || imageUrl.length === 0) return { success: false };
+    const cached = pngInfoProbeCache.get(imageUrl);
+    if (cached) return cached;
+
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), PNG_INFO_PROBE_TIMEOUT_MS);
+    try {
+        const response = await fetch(imageUrl, {
+            redirect: 'follow',
+            signal: controller.signal,
+            headers: { Range: `bytes=0-${PNG_INFO_PROBE_BYTES - 1}` },
+        });
+        if (!response.ok && response.status !== HTTP_PARTIAL_CONTENT_STATUS) {
+            return { success: false, status: response.status };
+        }
+        const head = await readHeadBytes(response, PNG_INFO_PROBE_BYTES);
+        const info = typeof parsePngIhdrInfo === 'function' ? parsePngIhdrInfo(head) : null;
+        const result = info
+            ? { success: true, ...info }
+            : { success: true, format: 'not-png' };
+        if (pngInfoProbeCache.size >= PNG_INFO_PROBE_CACHE_LIMIT) {
+            const oldest = pngInfoProbeCache.keys().next().value;
+            if (oldest !== undefined) pngInfoProbeCache.delete(oldest);
+        }
+        pngInfoProbeCache.set(imageUrl, result);
+        return result;
+    } catch (error) {
+        return { success: false, errorType: error?.name === 'AbortError' ? 'timeout' : 'unknown' };
+    } finally {
+        clearTimeout(timer);
+    }
+}
+
+/**
+ * レスポンス先頭の必要 bytes だけを読み、残りは破棄する。
+ * @param {Response} response
+ * @param {number} limit
+ * @returns {Promise<Uint8Array>}
+ */
+async function readHeadBytes(response, limit) {
+    if (response.body && typeof response.body.getReader === 'function') {
+        const reader = response.body.getReader();
+        const chunks = [];
+        let total = 0;
+        try {
+            while (total < limit) {
+                const record = await reader.read();
+                if (record.done) break;
+                const chunk = record.value instanceof Uint8Array
+                    ? record.value
+                    : new Uint8Array(record.value);
+                chunks.push(chunk);
+                total += chunk.byteLength;
+            }
+        } finally {
+            try { await reader.cancel(); } catch (cancelError) { /* ignore */ }
+            try { reader.releaseLock(); } catch (releaseError) { /* ignore */ }
+        }
+        const head = new Uint8Array(Math.min(total, limit));
+        let offset = 0;
+        for (const chunk of chunks) {
+            const take = Math.min(chunk.byteLength, head.length - offset);
+            if (take <= 0) break;
+            head.set(chunk.subarray(0, take), offset);
+            offset += take;
+        }
+        return head;
+    }
+    const buffer = await response.arrayBuffer();
+    return new Uint8Array(buffer).subarray(0, limit);
+}
+
 function requestImageMetadata(imageUrl, { tabId = null, priority = ANALYSIS_PRIORITY_BATCH,
-    order = ANALYSIS_ORDER_FIFO } = {}) {
+    order = ANALYSIS_ORDER_FIFO, forceStealth = false } = {}) {
     const existing = inFlightAnalyses.get(imageUrl);
     if (existing && !existing.settled && existing.signal && !existing.signal.aborted) {
-        existing.activeRefs += 1;
-        // 後から届いた高優先度要求へ引き上げる
-        if (priority > existing.priority) existing.priority = priority;
-        if (tabId !== null) existing.tabIds.add(tabId);
-        return existing.promise;
+        if (existing.forceStealth === forceStealth) {
+            existing.activeRefs += 1;
+            // 後から届いた高優先度要求へ引き上げる
+            if (priority > existing.priority) existing.priority = priority;
+            if (tabId !== null) existing.tabIds.add(tabId);
+            return existing.promise;
+        }
+        // Stealth 強制判定と通常解析は同じ結果を共有できないため、
+        // 進行中の解析が終わってから要求し直す。
+        return existing.promise.finally(() => requestImageMetadata(imageUrl, {
+            tabId, priority, order, forceStealth,
+        }));
     }
 
     const controller = new AbortController();
@@ -1463,6 +1564,7 @@ function requestImageMetadata(imageUrl, { tabId = null, priority = ANALYSIS_PRIO
         tabIds: new Set(tabId === null ? [] : [tabId]),
         debugAllDetections: isDebugDetectionEnabled(),
         debugForceFullFetch: settings?.debugForceFullFetch === true,
+        forceStealth,
         promise: null,
     };
     inFlightAnalyses.set(imageUrl, entry);
@@ -2168,6 +2270,40 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
             });
 
         // 非同期レスポンスを返すため true を返す
+        return true;
+    }
+
+
+    // PNG の IHDR だけを読む軽量 probe（Stealth 判定ボタンの表示可否）
+    if (request.action === 'probePngInfo') {
+        probePngInfo(request.imageUrl)
+            .then(sendResponse)
+            .catch(() => sendResponse({ success: false }));
+        return true;
+    }
+
+    // オンデマンドの Stealth 判定。通常メタデータがあっても抑制せずに
+    // 画素 LSB を走査する（結果は永続キャッシュへ書き込まない）。
+    if (request.action === 'scanStealthMetadata') {
+        if (typeof request.imageUrl !== 'string' || request.imageUrl.length === 0) {
+            sendResponse({ success: false, error: 'invalid-url' });
+            return false;
+        }
+        requestImageMetadata(request.imageUrl, {
+            tabId: sender?.tab?.id ?? null,
+            priority: ANALYSIS_PRIORITY_HOVER,
+            forceStealth: true,
+        })
+            .then(response => sendResponse({
+                success: response?.success !== false,
+                stealth: response?.stealth || null,
+                scannerStatus: response?.scannerStatus || null,
+                diagnostics: response?.diagnostics || [],
+            }))
+            .catch(error => sendResponse({
+                success: false,
+                error: error?.message || 'stealth scan failed',
+            }));
         return true;
     }
 
@@ -3045,7 +3181,9 @@ async function handleFetchImageMetadata(imageUrl) {
     }
 
     // 1. キャッシュチェック (Async)
-    const cachedMetadata = await metadataCache.get(imageUrl);
+    const cachedMetadata = requestContext?.forceStealth === true
+        ? undefined
+        : await metadataCache.get(imageUrl);
     const isSafetensorsUrl = imageUrl.toLowerCase().includes('.safetensors') || imageUrl.toLowerCase().includes('format=safetensor');
     const cachedParserState = cachedMetadata?.cacheEntryState;
     const cacheState = cachedMetadata === undefined
@@ -3195,6 +3333,7 @@ async function handleFetchImageMetadata(imageUrl) {
         error,
         debug = null,
         cached = false,
+        stealth = null,
     }) => {
         const analysisState = state === 'empty-confirmed' || state === 'unsupported-format'
             ? 'confirmed-empty'
@@ -3248,6 +3387,7 @@ async function handleFetchImageMetadata(imageUrl) {
             ...(scannerStatus ? { scannerStatus: normalizeSafeScannerStatus(scannerStatus) } : {}),
             ...(metadataPartial ? { metadataPartial: true } : {}),
             ...(debug ? { debug } : {}),
+            ...(stealth ? { stealth } : {}),
             reason: safeReason,
             ...(cached ? { cached: true } : {}),
             diagnostics: diagnostic,
@@ -4708,7 +4848,11 @@ async function handleFetchImageMetadata(imageUrl) {
                 });
             } else if (completeRepresentation) {
                 // 初期206は要求Range上限で有界化されているため、保持済みbytesをbufferで渡す。
-                scanResult = scanPngMetadataBuffer(buffer, { signal: analysisSignal, debugAllDetections });
+                scanResult = scanPngMetadataBuffer(buffer, {
+                    signal: analysisSignal,
+                    debugAllDetections,
+                    forceStealth: requestContext?.forceStealth === true,
+                });
             } else {
                 // partial headは後続断片へ接続せず、byte 0からのstreamだけを解析する。
                 buffer = null;
@@ -4719,9 +4863,10 @@ async function handleFetchImageMetadata(imageUrl) {
             if (debugForceFullFetch && scanResult.debug) {
                 scanResult.debug.forcedFullFetch = true;
             }
+            const forcedStealthScan = requestContext?.forceStealth === true;
             if (scanResult.status === 'normal' || scanResult.status === 'stealth') {
                 if (analysisSignal?.aborted) throw createAnalysisAbortError();
-                const cacheResult = scanResult.metadataPartial === true
+                const cacheResult = forcedStealthScan || scanResult.metadataPartial === true
                     ? null
                     : await metadataCache.set(
                         imageUrl,
@@ -4747,6 +4892,7 @@ async function handleFetchImageMetadata(imageUrl) {
                         scannerStatus: scanResult.status,
                         metadataPartial: scanResult.metadataPartial === true,
                         debug: scanResult.debug || null,
+                        ...(scanResult.stealth ? { stealth: scanResult.stealth } : {}),
                         reason: 'found',
                     });
                 }
@@ -4755,16 +4901,19 @@ async function handleFetchImageMetadata(imageUrl) {
                     metadata: scanResult.metadata,
                     ...(scanResult.metadataPartial === true ? { metadataPartial: true } : {}),
                     ...(scanResult.debug ? { debug: scanResult.debug } : {}),
+                    ...(scanResult.stealth ? { stealth: scanResult.stealth } : {}),
                     diagnostics: scanResult.diagnostics,
                 };
             }
             if (scanResult.status === 'not-found') {
                 // IENDまで到達したnot-foundだけを、版数付きnegative cacheへ保存する。
                 if (analysisSignal?.aborted) throw createAnalysisAbortError();
-                await metadataCache.set(imageUrl, {}, {
-                    scannerVersion: PNG_SCANNER_CACHE_VERSION,
-                    parserState: 'empty-confirmed',
-                });
+                if (!forcedStealthScan) {
+                    await metadataCache.set(imageUrl, {}, {
+                        scannerVersion: PNG_SCANNER_CACHE_VERSION,
+                        parserState: 'empty-confirmed',
+                    });
+                }
                 if (isFileScheme) {
                     return createFileResult({
                         state: 'empty-confirmed',

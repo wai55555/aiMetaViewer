@@ -91,6 +91,41 @@ function classifyPngPrefix(buffer) {
 }
 
 /**
+ * PNG の IHDR から色情報だけを取り出す。
+ * Stealth メタデータ（画素 LSB）の判定可否を UI が決めるために使う。
+ * PNG シグネチャ + 最初の IHDR チャンク（先頭 26 bytes まで）で足りる。
+ *
+ * @param {ArrayBuffer|Uint8Array} buffer - 先頭数十 bytes の画像データ
+ * @returns {{format:string,width:number,height:number,bitDepth:number,colorType:number,
+ *   hasAlpha:boolean,hasRgb:boolean,stealthEligible:boolean}|null} - PNG でなければ null
+ */
+function parsePngIhdrInfo(buffer) {
+  const view = buffer instanceof Uint8Array ? buffer : new Uint8Array(buffer);
+  if (classifyPngPrefix(view) !== PNG_PREFIX_PNG) return null;
+  if (view.length < 26) return null;
+  if (!(view[12] === 0x49 && view[13] === 0x48 && view[14] === 0x44 && view[15] === 0x52)) return null;
+  const width = ((view[16] << 24) | (view[17] << 16) | (view[18] << 8) | view[19]) >>> 0;
+  const height = ((view[20] << 24) | (view[21] << 16) | (view[22] << 8) | view[23]) >>> 0;
+  const bitDepth = view[24];
+  const colorType = view[25];
+  const hasAlpha = colorType === 4 || colorType === 6;
+  const hasRgb = colorType === 2 || colorType === 6;
+  // scanner の対応レイアウト（LAYOUTS）に合わせる:
+  // Alpha は 4/6 の 8/16bit、RGB は 8bit（2:8）を対象にする。
+  const stealthEligible = hasAlpha || (colorType === 2 && bitDepth === 8);
+  return {
+    format: 'png',
+    width,
+    height,
+    bitDepth,
+    colorType,
+    hasAlpha,
+    hasRgb,
+    stealthEligible,
+  };
+}
+
+/**
  * 画像形式を判定し、判定不能かどうかも返す。
  * 「非対応形式」と「prefix不足で未判定」を呼び出し側が区別できるようにする。
  * @param {ArrayBuffer|Uint8Array} buffer - 画像バイナリデータ

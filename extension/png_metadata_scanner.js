@@ -999,6 +999,9 @@
         constructor(options) {
             this.options = options || {};
             this.debugEnabled = this.options.debugAllDetections === true;
+            // 通常メタデータによる Stealth 抑制をバイパスする（オンデマンド判定用）。
+            // debug とは独立で、担体情報の収集は有効にしない。
+            this.forceStealth = this.options.forceStealth === true;
             this.debugCarriers = this.debugEnabled ? [] : null;
             this.collector = new DiagnosticCollector();
             this.metadata = Object.create(null);
@@ -1034,6 +1037,7 @@
             this.analysisEndReason = null;
             this.candidates = [];
             this.stealthResult = null;
+            this.stealthInfo = null;
             this.metadataChunkIncomplete = false;
             this.metadataPartial = false;
             this.fatalError = null;
@@ -1443,7 +1447,8 @@
         }
 
         hasStealthSuppressingMetadata() {
-            return !this.debugEnabled && Object.keys(this.metadata).some(key => key !== 'Software');
+            return !this.debugEnabled && !this.forceStealth &&
+                Object.keys(this.metadata).some(key => key !== 'Software');
         }
 
         suppressStealthForNormalMetadata() {
@@ -1525,6 +1530,13 @@
             const diagnosticOffset = this.idatChunkOffset === null ? this.offset : this.idatChunkOffset;
             if (completed) {
                 this.stealthResult = completed.result;
+                this.stealthInfo = {
+                    key: completed.result.key,
+                    value: completed.result.value,
+                    mode: completed.mode,
+                    signature: completed.signature,
+                    compressed: completed.compressed === true,
+                };
                 this.stealthStopped = true;
                 this.addDebugCarrier('stealth', {
                     mode: completed.mode,
@@ -1717,6 +1729,11 @@
 
         makeResult() {
             const result = this.makeResultInternal();
+            // オンデマンド判定では、通常メタデータがあっても検出結果を
+            // metadata とは別枠で返す（metadata の上書きはしない）。
+            if (!this.debugEnabled && this.forceStealth && this.stealthInfo) {
+                result.stealth = this.stealthInfo;
+            }
             if (!this.debugEnabled) return result;
             result.debug = {
                 enabled: true,

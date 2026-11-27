@@ -129,7 +129,7 @@
       "message": "Force Full Fetch (Level 2)"
   },
   "descDebugForceFullFetch": {
-      "message": "Skip the initial Range request and acquire from byte 0. Includes Level 1 full-detection debug; existing safety limits still apply."
+      "message": "Skip the initial Range request and acquire from byte 0. Includes Level 1 full-detection debug. This is heavier than normal: every analysed image is downloaded in full (no Range, no cache reuse) and the full-body PNG gate throttles how many run at once, so pages with many large images get noticeably slower."
   },
   "btnSave": {
     "message": "💾 Save"

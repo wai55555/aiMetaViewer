@@ -1369,6 +1369,159 @@ function setupCopyButton(button, text) {
  * @param {Object} metadata - メタデータ
  * @returns {Promise<HTMLElement>} - モーダルオーバーレイ要素
  */
+/**
+ * ui.js から background へメッセージを送る薄いラッパー。
+ * @param {Object} message
+ * @returns {Promise<Object>}
+ */
+function sendStealthMessage(message) {
+    return new Promise((resolve, reject) => {
+        try {
+            chrome.runtime.sendMessage(message, response => {
+                const lastError = chrome.runtime.lastError;
+                if (lastError) {
+                    reject(new Error(lastError.message || 'Extension message failed'));
+                    return;
+                }
+                resolve(response);
+            });
+        } catch (error) {
+            reject(error);
+        }
+    });
+}
+
+// Stealth 判定は画像ごとに高価なので、モーダル再表示では再実行しない。
+const stealthProbeCache = new Map();
+const stealthScanCache = new Map();
+
+function getCachedStealthProbe(imageUrl) {
+    return stealthProbeCache.get(imageUrl) || null;
+}
+
+async function probePngInfoForModal(imageUrl) {
+    const cached = stealthProbeCache.get(imageUrl);
+    if (cached) return cached;
+    const response = await sendStealthMessage({ action: 'probePngInfo', imageUrl });
+    if (response && response.success === true) {
+        stealthProbeCache.set(imageUrl, response);
+        return response;
+    }
+    return null;
+}
+
+/**
+ * Stealth メタデータ判定セクションを構築する。
+ * PNG かつ α チャンネル（または 8bit RGB）のときだけ表示する。
+ * @param {string} imageUrl
+ * @returns {HTMLElement} - セクション（対象外なら DOM から外す）
+ */
+function createStealthSection(imageUrl, metadata) {
+    const cachedScan = stealthScanCache.get(imageUrl);
+    if (!cachedScan) {
+        const alreadyFound = metadata && typeof metadata === 'object' &&
+            Object.keys(metadata).some(key => key.startsWith('Stealth PNG Info'));
+        // 通常のスキャンで既に検出済みなら、押しても同じ結果になるだけ。
+        if (alreadyFound) return null;
+    }
+
+    const section = document.createElement('div');
+    section.className = 'ai-meta-section';
+    section.dataset.sectionId = 'stealth';
+
+    const header = document.createElement('div');
+    header.className = 'ai-meta-section-header';
+    header.addEventListener('click', () => section.classList.toggle('collapsed'));
+    const label = document.createElement('span');
+    label.className = 'ai-meta-section-label';
+    label.textContent = 'Stealth Metadata (PNG LSB)';
+    header.appendChild(label);
+    section.appendChild(header);
+
+    const body = document.createElement('div');
+    body.className = 'ai-meta-section-body';
+    const status = document.createElement('div');
+    status.className = 'ai-meta-text-area empty';
+    status.textContent = 'Checking PNG color type…';
+    body.appendChild(status);
+    section.appendChild(body);
+
+    const setStatus = text => {
+        status.textContent = text;
+        status.classList.toggle('empty', !text);
+    };
+
+    const renderResult = result => {
+        body.textContent = '';
+        if (result && result.stealth) {
+            const found = document.createElement('div');
+            found.className = 'ai-meta-text-area';
+            found.textContent = result.stealth.value;
+            body.appendChild(found);
+            const meta = document.createElement('div');
+            meta.className = 'ai-meta-char-label';
+            meta.textContent = `${result.stealth.key}${result.stealth.compressed ? ' · compressed' : ''}`;
+            body.insertBefore(meta, found);
+            return;
+        }
+        const note = document.createElement('div');
+        note.className = 'ai-meta-text-area empty';
+        const unsupported = Array.isArray(result && result.diagnostics)
+            ? result.diagnostics.find(entry => entry && typeof entry.category === 'string' &&
+                entry.category.startsWith('unsupported-stealth'))
+            : null;
+        note.textContent = unsupported
+            ? `Not checked: ${unsupported.category}.`
+            : 'No stealth payload found in the pixel LSBs.';
+        body.appendChild(note);
+    };
+
+    if (cachedScan) {
+        renderResult(cachedScan);
+        return section;
+    }
+
+    probePngInfoForModal(imageUrl).then(info => {
+        if (!info || info.success !== true || info.format !== 'png' || info.stealthEligible !== true) {
+            section.remove();
+            return;
+        }
+        setStatus('This image already has metadata, so the pixel LSBs were not scanned. '
+            + 'Scanning reads the image again and can take a moment for large PNGs.');
+        const button = document.createElement('button');
+        button.className = 'ai-meta-copy-btn';
+        button.textContent = 'Check stealth metadata';
+        button.setAttribute('data-tooltip', 'Scan pixel LSBs for stealth_pnginfo (extra read, no cache write)');
+        button.onclick = async event => {
+            event.stopPropagation();
+            button.disabled = true;
+            button.textContent = 'Scanning…';
+            setStatus('Scanning pixel LSBs…');
+            try {
+                const response = await sendStealthMessage({ action: 'scanStealthMetadata', imageUrl });
+                if (!response || response.success !== true) {
+                    setStatus('Stealth scan failed.');
+                    button.disabled = false;
+                    button.textContent = 'Retry stealth scan';
+                    return;
+                }
+                stealthScanCache.set(imageUrl, response);
+                renderResult(response);
+                button.remove();
+            } catch (error) {
+                setStatus('Stealth scan failed.');
+                button.disabled = false;
+                button.textContent = 'Retry stealth scan';
+            }
+        };
+        body.appendChild(button);
+    }).catch(() => {
+        section.remove();
+    });
+
+    return section;
+}
+
 async function createModal(metadata, imageUrl = null, options = {}) {
     const mediaType = options?.mediaType === 'video' ? 'video' : 'image';
     let loadedSectionStates = {};
@@ -1682,6 +1835,11 @@ async function createModal(metadata, imageUrl = null, options = {}) {
     if (!gridInserted) {
         const grid = renderGrid(gridRows);
         if (grid) content.appendChild(grid);
+    }
+
+    if (mediaType !== 'video' && typeof imageUrl === 'string' && imageUrl.length > 0) {
+        const stealthSection = createStealthSection(imageUrl, metadata);
+        if (stealthSection) content.appendChild(stealthSection);
     }
 
     const footer = document.createElement('div');
@@ -2734,6 +2892,7 @@ window.createDownloaderModal = createDownloaderModal;
 window.detectGenerator = detectGenerator;
 window.buildSections = buildSections;
 window.buildGrid = buildGrid;
+window.createStealthSection = createStealthSection;
 window.observeVideoMetadata = observeVideoMetadata;
 window.observeGenericSafetensorsLinks = observeGenericSafetensorsLinks;
 window.handleDirectImageView = handleDirectImageView;
