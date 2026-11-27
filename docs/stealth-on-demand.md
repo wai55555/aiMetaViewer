@@ -17,18 +17,19 @@ Stealth 側が通常表示に出ない。フル展開は 1024² で 70ms 級、4
 
 | 項目 | 挙動 |
 | --- | --- |
-| 位置（結果） | モーダル本文の**先頭**（positive セクションより上）に `Stealth Metadata (PNG LSB)` セクションを置く |
+| 位置（結果） | 押すまでは**本文の最下部**（従来と同じ位置）。押した時点で**本文の先頭**（positive セクションより上）へ移動する |
 | 位置（ボタン） | モーダル最下部のフッター行の**左端**（`Update & Download` / `Copy All Data` と同じ行の行頭）に置く |
 | 表示条件 | PNG かつ IHDR が **α あり（colorType 4/6）** または **8bit RGB（colorType 2）** |
 | 非表示 | 上記以外、動画、既に Stealth を検出済み（metadata に `Stealth PNG Info ...` がある） |
 | 初期状態 | セクションは展開（ヘッダ「Stealth Metadata (PNG LSB)」）。probe 完了までは非表示 |
-| 押下 | 「Check stealth metadata」→ 実行中は「Scanning…」＋無効化 |
+| 押下 | 「Check stealth metadata」→ 実行中は「Scanning…」＋無効化。**押した瞬間にセクションを本文先頭へ移し、スクロールも先頭へ戻す**（進捗と結果がその場で見える） |
+| 位置とスクロール | 本文を下まで読んでいても、押下・結果表示・失敗表示のいずれでも先頭へ戻す。モーダルを開いただけでは移動もスクロールもしない |
 | 成功（検出） | ペイロード本文と担体名（`Stealth PNG Info (Alpha)` 等）を表示、ボタンは消える |
 | 成功（未検出） | 「No stealth payload found in the pixel LSBs.」 |
 | 上限・未対応 | `unsupported-stealth-*` 診断がある場合は「Not checked: …」と理由を表示 |
 | 失敗（スキャン） | 「Stealth scan failed.」＋「Retry stealth scan」で再試行可 |
 | 失敗（ヘッダ取得） | 「Could not read the PNG header, so the pixel LSBs were not checked.」＋「Retry header check」で再試行可（対象外と区別するため、黙って消さない） |
-| 再表示 | 同一ページ内では結果をメモ化し、再スキャンしない |
+| 再表示 | 同一ページ内では結果をメモ化し、再スキャンしない。結果が既に分かっている画像は**開いた時点で本文先頭**に出す |
 
 ## 3. 実装
 
@@ -65,13 +66,17 @@ Stealth 側が通常表示に出ない。フル展開は 1024² で 70ms 級、4
 
 `createStealthSection(imageUrl, metadata)` が `{ section, mount(footer) }` を返す。
 
-- `section`: 結果表示（本文先頭に挿入）。probe が終わるまでは `display:none`。
+- `section`: 結果表示。`createModal` は**本文の最下部**に `appendChild` する
+  （押す前からプロンプトの上に割り込ませない）。probe が終わるまでは `display:none`。
 - `mount(footer)`: 実行ボタンをフッター行の左端へ入れる。probe が `mount` より先に
-  終わっても、`mount` 側でボタンを置ける（pending キュー）。
+  終わっても、`mount` 側でボタンを置ける（pending キュー）。キャッシュ済みの結果は
+  このタイミングで本文先頭へ移す（`createStealthSection` は挿入前に返るため）。
+- `promoteToTop()` / `revealAtTop()`: 押下・結果表示・失敗表示のときに、本文先頭へ
+  移動してスクロールを戻す。
 
-ボタンを本文最下部に置くとスクロールしないと見えず使われないため、**操作はフッター行・
-結果は本文先頭**に分離した。フッターは `justify-content: flex-end` なので、
-ボタンは `margin-right: auto` で左端に寄せる。
+ボタンを本文最下部に置くとスクロールしないと見えず使われないため、**操作はフッター行**に
+分離した。結果は押すまで従来の位置（最下部）に置き、押した瞬間に先頭へ移す。
+フッターは `justify-content: flex-end` なので、ボタンは `margin-right: auto` で左端へ寄せる。
 `window.createStealthSection` としてテスト用にエクスポートしている（既存の
 `window.buildSections` などと同じ互換エクスポート）。
 

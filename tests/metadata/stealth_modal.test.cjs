@@ -35,6 +35,7 @@ class FakeClassList {
 class FakeNode {
     constructor(tag) {
         this.tagName = tag;
+        this.nodeType = 1;
         this.children = [];
         this.classList = new FakeClassList();
         this.style = {};
@@ -64,8 +65,19 @@ class FakeNode {
         this.listeners.get(type).push(handler);
     }
     get firstChild() { return this.children.length > 0 ? this.children[0] : null; }
-    appendChild(node) { node.parentNode = this; this.children.push(node); return node; }
+    // レイアウト値（スクロール判定用）。テストが必要に応じて上書きする。
+    get scrollHeight() { return this._scrollHeight || 0; }
+    get clientHeight() { return this._clientHeight || 0; }
+    // 実 DOM と同じく、既にどこかに居るノードは移動する（複製しない）。
+    _detach(node) {
+        if (node.parentNode && typeof node.parentNode.removeChild === 'function') {
+            node.parentNode.removeChild(node);
+        }
+        return node;
+    }
+    appendChild(node) { this._detach(node); node.parentNode = this; this.children.push(node); return node; }
     insertBefore(node, reference) {
+        this._detach(node);
         const index = this.children.indexOf(reference);
         node.parentNode = this;
         this.children.splice(index < 0 ? this.children.length : index, 0, node);
@@ -136,27 +148,44 @@ function flush() {
     return new Promise(resolve => setTimeout(resolve, 5));
 }
 
+function assertOrder(container, expected, message) {
+    assert.equal(container.children.length, expected.length, `${message} (length)`);
+    expected.forEach((node, index) => {
+        assert.equal(container.children[index], node, `${message} (index ${index})`);
+    });
+}
+
 /**
  * 実際のモーダルと同じ順序で組み立てる: 結果セクションを本文の先頭に入れ、
  * フッター行（右寄せボタンが既にある）へ実行ボタンを mount する。
  */
-function mountStealth(context, body, url, metadata) {
+function mountStealth(context, body, url, metadata, options = {}) {
     const block = context.window.createStealthSection(url, metadata);
-    if (!block) return { block: null, footer: null };
+    if (!block) return { block: null, footer: null, content: null, positive: null };
     const footer = new FakeNode('div');
     footer.appendChild(new FakeNode('button')); // 既存の "Copy All Data" 相当
-    body.appendChild(block.section);
+    // 実際のモーダルと同じく、本文はスクロールコンテナで、既存セクションの
+    // 後ろ（最下部）に stealth セクションが入る。
+    const content = new FakeNode('div');
+    content._scrollHeight = options.scrollHeight || 2000;
+    content._clientHeight = options.clientHeight || 500;
+    content.scrollTop = options.scrollTop || 0;
+    const positive = new FakeNode('div');
+    positive.className = 'ai-meta-section';
+    content.appendChild(positive);
+    content.appendChild(block.section);
+    body.appendChild(content);
     block.mount(footer);
-    return { block, footer };
+    return { block, footer, content, positive };
 }
 
 test('the section is hidden when the PNG has no stealth-capable layout', async () => {
     const { context, body, dispatch } = loadUi({
         probePngInfo: () => ({ success: true, format: 'not-png' }),
     });
-    const { block, footer } = mountStealth(context, body, 'https://example.com/a.png', {});
+    const { block, footer, content, positive } = mountStealth(context, body, 'https://example.com/a.png', {});
     await flush();
-    assert.equal(body.children.length, 0, 'section removes itself');
+    assertOrder(content, [positive], 'only the other sections remain');
     assert.equal(footer.children.length, 1, 'no trigger is offered');
     assert.ok(block, 'the builder still returns a mounted block');
     assert.equal(dispatch.filter(call => call.action === 'probePngInfo').length, 1);
@@ -179,8 +208,13 @@ test('an eligible PNG offers the trigger in the footer and renders the result ab
             },
         }),
     });
-    const { block, footer } = mountStealth(context, body, 'https://example.com/b.png', { parameters: 'steps: 20' });
+    const { block, footer, content, positive } = mountStealth(
+        context, body, 'https://example.com/b.png', { parameters: 'steps: 20' }, { scrollTop: 1500 }
+    );
     await flush();
+
+    // Until the check runs the section stays where it always was: at the bottom.
+    assertOrder(content, [positive, block.section], 'section starts at the bottom');
 
     // The trigger sits at the start (left) of the footer row, not inside the body.
     const trigger = footer.children[0];
@@ -195,6 +229,8 @@ test('an eligible PNG offers the trigger in the footer and renders the result ab
     await flush();
 
     assert.equal(dispatch.filter(call => call.action === 'scanStealthMetadata').length, 1);
+    assertOrder(content, [block.section, positive], 'the result moves to the top');
+    assert.equal(content.scrollTop, 0, 'and the body scrolls there');
     assert.match(block.section.textContent, /stealth payload/);
     assert.match(block.section.textContent, /Stealth PNG Info \(Alpha\)/);
     assert.equal(footer.children.length, 1, 'trigger is removed after a successful scan');
@@ -238,6 +274,7 @@ test('a second modal open reuses the cached result without rescanning', async ()
     const second = mountStealth(context, body, url, {});
     await flush();
 
+    assertOrder(second.content, [second.block.section, second.positive], 'a known result opens at the top');
     assert.match(second.block.section.textContent, /cached payload/);
     assert.equal(second.footer.children.length, 1, 'no trigger once the result is known');
     assert.equal(dispatch.filter(call => call.action === 'probePngInfo').length, probesAfterFirst);
@@ -267,10 +304,10 @@ test('a failed PNG header probe is reported and can be retried', async () => {
                 };
         },
     });
-    const { block, footer } = mountStealth(context, body, 'file:///C:/img/a.png', {});
+    const { block, footer, content, positive } = mountStealth(context, body, 'file:///C:/img/a.png', {});
     await flush();
 
-    assert.equal(body.children.length, 1, 'the section stays visible');
+    assertOrder(content, [block.section, positive], 'the reason is shown at the top');
     assert.match(block.section.textContent, /Could not read the PNG header/);
     const retry = footer.children[0];
     assert.equal(retry.textContent, 'Retry header check');
@@ -289,8 +326,13 @@ test('the modal wires the result to the top and the trigger into the footer row'
     // checked in docs/stealth-on-demand-e2e.md step 1.3.
     assert.match(
         uiSource,
-        /stealthBlock = createStealthSection\(imageUrl, metadata\);[\s\S]{0,200}content\.insertBefore\(stealthBlock\.section, content\.firstChild\)/,
-        'the result section is inserted above every other section'
+        /stealthBlock = createStealthSection\(imageUrl, metadata\);[\s\S]{0,200}content\.appendChild\(stealthBlock\.section\)/,
+        'the section is appended last, i.e. where it always was'
+    );
+    assert.match(
+        uiSource,
+        /const promoteToTop = \(\) => \{[\s\S]{0,200}parent\.insertBefore\(section, parent\.firstChild\)/,
+        'the section moves itself to the top when it has something to show'
     );
     assert.match(
         uiSource,
@@ -299,4 +341,31 @@ test('the modal wires the result to the top and the trigger into the footer row'
     );
     // The footer is right-aligned, so the trigger pins itself to the left edge.
     assert.match(uiSource, /button\.style\.marginRight = 'auto';/);
+});
+
+test('pressing the trigger scrolls the body back to the top so the result is visible', async () => {
+    const { context, body } = loadUi({
+        probePngInfo: () => ({ success: true, format: 'png', hasAlpha: true, stealthEligible: true }),
+        scanStealthMetadata: () => ({
+            success: true,
+            stealth: { key: 'Stealth PNG Info (Alpha)', value: 'scrolled payload', mode: 'Alpha', compressed: false },
+        }),
+    });
+    // 長いプロンプトを下まで読んだ状態を再現する。
+    const { block, footer, content, positive } = mountStealth(
+        context, body, 'https://example.com/f.png', { parameters: 'steps: 20' }, { scrollTop: 1500 }
+    );
+    await flush();
+    assert.equal(content.scrollTop, 1500, 'opening the modal does not jump');
+    assertOrder(content, [positive, block.section], 'still at the bottom before the press');
+
+    footer.children[0].click();
+    assert.equal(content.scrollTop, 0, 'the press reveals the scanning status immediately');
+    assertOrder(content, [block.section, positive], 'the press moves the section to the top');
+
+    content.scrollTop = 1500; // 結果を待つ間に読み進めても、結果表示で戻る
+    await flush();
+    await flush();
+    assert.match(block.section.textContent, /scrolled payload/);
+    assert.equal(content.scrollTop, 0, 'the result is revealed without manual scrolling');
 });

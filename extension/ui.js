@@ -1476,6 +1476,44 @@ function createStealthSection(imageUrl, metadata) {
         section.remove();
         setTrigger(null);
     };
+    // 押すまでは本文の最下部（従来の位置）に置き、押したら本文の先頭へ移す。
+    // モーダルを開いただけでプロンプトの上に割り込ませないための順序。
+    const promoteToTop = () => {
+        const parent = section.parentNode;
+        if (!parent || parent.firstChild === section) return;
+        parent.insertBefore(section, parent.firstChild);
+    };
+    // 移した先（本文の先頭）が見えるように、スクロールも先頭へ戻す。
+    const revealResult = () => {
+        let node = section.parentNode;
+        while (node && node.nodeType === 1) {
+            if (node.scrollHeight > node.clientHeight) {
+                node.scrollTop = 0;
+                return;
+            }
+            node = node.parentNode;
+        }
+    };
+    const revealAtTop = () => {
+        promoteToTop();
+        revealResult();
+    };
+    // createStealthSection は本文へ挿入される前に返るため、キャッシュ済みの結果を
+    // 先頭へ出すのは mount（挿入後）に任せる。既に結果が分かっている画像は
+    // 開いた時点で先頭に出したいので、押下を待たない。
+    let promoteWhenMounted = false;
+    const mount = target => {
+        footer = target || null;
+        if (footer && pendingTrigger) {
+            const button = pendingTrigger;
+            pendingTrigger = null;
+            footer.insertBefore(button, footer.firstChild);
+        }
+        if (promoteWhenMounted) {
+            promoteWhenMounted = false;
+            promoteToTop();
+        }
+    };
 
     const setStatus = text => {
         status.textContent = text;
@@ -1517,9 +1555,11 @@ function createStealthSection(imageUrl, metadata) {
     };
 
     if (cachedScan) {
+        // 結果が既に分かっている画像では、開いた時点で先頭に出す。
+        promoteWhenMounted = true;
         showSection();
         renderResult(cachedScan);
-        return { section, mount: () => {} };
+        return { section, mount };
     }
 
     // probe は「対象外（非PNG・非対象レイアウト）」と「取得失敗」を区別する。
@@ -1546,6 +1586,7 @@ function createStealthSection(imageUrl, metadata) {
             startProbe();
         };
         setTrigger(retry);
+        revealAtTop();
     };
     const renderProbe = info => {
         clearFailureNodes();
@@ -1567,17 +1608,20 @@ function createStealthSection(imageUrl, metadata) {
             button.disabled = true;
             button.textContent = 'Scanning…';
             setStatus('Scanning pixel LSBs…');
+            revealAtTop();
             try {
                 const response = await sendStealthMessage({ action: 'scanStealthMetadata', imageUrl });
                 if (!response || response.success !== true) {
                     setStatus('Stealth scan failed.');
                     button.disabled = false;
                     button.textContent = 'Retry stealth scan';
+                    revealAtTop();
                     return;
                 }
                 stealthScanCache.set(imageUrl, response);
                 renderResult(response);
                 setTrigger(null);
+                revealAtTop();
             } catch (error) {
                 setStatus('Stealth scan failed.');
                 button.disabled = false;
@@ -1594,21 +1638,7 @@ function createStealthSection(imageUrl, metadata) {
 
     startProbe();
 
-    return {
-        section,
-        /**
-         * フッター行を渡す。probe が先に終わっていても、ここでボタンが左端に入る。
-         * @param {HTMLElement} target
-         */
-        mount(target) {
-            footer = target || null;
-            if (footer && pendingTrigger) {
-                const button = pendingTrigger;
-                pendingTrigger = null;
-                footer.insertBefore(button, footer.firstChild);
-            }
-        },
-    };
+    return { section, mount };
 }
 
 async function createModal(metadata, imageUrl = null, options = {}) {
@@ -1929,8 +1959,8 @@ async function createModal(metadata, imageUrl = null, options = {}) {
     let stealthBlock = null;
     if (mediaType !== 'video' && typeof imageUrl === 'string' && imageUrl.length > 0) {
         stealthBlock = createStealthSection(imageUrl, metadata);
-        // 結果はモーダル上部（positive より上）に出す。
-        if (stealthBlock) content.insertBefore(stealthBlock.section, content.firstChild);
+        // 押すまでは従来どおり本文の最下部。押した時点でセクション自身が先頭へ移る。
+        if (stealthBlock) content.appendChild(stealthBlock.section);
     }
 
     const footer = document.createElement('div');

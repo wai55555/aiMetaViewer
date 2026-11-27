@@ -73,10 +73,10 @@
 | --- | --- | --- |
 | 1.1 | `01-stealth-alpha-with-metadata.png` を開く | 画像右上にバッジが出る。Network に画像 1 件だけ（拡張の通信は無い） |
 | 1.2 | バッジをクリックしてモーダルを開く | **64 bytes の Range リクエストが 1 件**増える（`Range: bytes=0-63`、ステータス 206 か 200）。モーダルに `parameters` / `Software` が出る |
-| 1.3 | 「Stealth Metadata (PNG LSB)」セクションを見る | セクションが**展開状態**で**本文の先頭（Positive より上）**に出て、説明文 `This image already has metadata, so the pixel LSBs were not scanned. …` が入る。**ボタンは本文ではなく最下部フッター行の左端**に「Check stealth metadata」として出る（`Update & Download` / `Copy All Data` と同じ行、行頭）。ここまでで**ペイロードは表示されていない** |
-| 1.4 | ボタンを押す | ボタンが `Scanning…` に変わり無効化、説明文が `Scanning pixel LSBs…` になる。**画像の再取得が 1 回だけ**発生する（Range ではなく本体取得） |
-| 1.5 | 完了を待つ | ペイロード `{"prompt":"e2e alpha payload","steps":28}` と、その上に `Stealth PNG Info (Alpha)` のラベルが出る。**ボタンは消える**。1.4 の再取得以外にリクエストが増えない |
-| 1.6 | モーダルを閉じ、**同じ画像**でもう一度開く | Stealth の結果が**そのまま再表示**され、**新しいリクエストが 1 件も出ない**（probe も scan もメモ化） |
+| 1.3 | 「Stealth Metadata (PNG LSB)」セクションを見る | セクションが**展開状態**で**本文の最下部**（従来の位置、Positive より下）にあり、説明文 `This image already has metadata, so the pixel LSBs were not scanned. …` が入る。**ボタンは本文ではなく最下部フッター行の左端**に「Check stealth metadata」として出る（`Update & Download` / `Copy All Data` と同じ行、行頭）。ここまでで**ペイロードは表示されておらず、スクロール位置も動かない** |
+| 1.4 | 本文をいちばん下までスクロールしてからボタンを押す | ボタンが `Scanning…` に変わり無効化、説明文が `Scanning pixel LSBs…` になる。**押した瞬間にセクションが本文先頭へ移動し、スクロールも先頭へ戻る**ので、進捗が上部に見える。**画像の再取得が 1 回だけ**発生する（Range ではなく本体取得） |
+| 1.5 | 完了を待つ | ペイロード `{"prompt":"e2e alpha payload","steps":28}` と、その上に `Stealth PNG Info (Alpha)` のラベルが**上部セクション**に出る（手動スクロール不要）。**フッターのボタンは消える**。1.4 の再取得以外にリクエストが増えない |
+| 1.6 | モーダルを閉じ、**同じ画像**でもう一度開く | Stealth の結果が**開いた時点で本文先頭に再表示**され、**新しいリクエストが 1 件も出ない**（probe も scan もメモ化。フッターにボタンは出ない） |
 | 1.7 | 別タブで同じ画像を開いてモーダルを開く | そのページでは 1.2 の probe が 1 回だけ走る（メモ化はページ単位） |
 
 ### 3.2 ペイロード無しの分岐（#2 / #4、負のコントロール #3）
@@ -94,7 +94,7 @@
 
 | # | 操作 | 期待結果 |
 | --- | --- | --- |
-| 2.5 | `01` を開いてモーダルを見る | セクションは消えず、先頭に `Could not read the PNG header, so the pixel LSBs were not checked.`、**フッター左端**に **`Retry header check`** が出る。押すと再取得し、成功すれば「Check stealth metadata」に変わる。コンソールに未捕捉エラーが出ない |
+| 2.5 | `01` を開いてモーダルを見る | セクションは消えず、**本文先頭へ移動して** `Could not read the PNG header, so the pixel LSBs were not checked.` を表示、**フッター左端**に **`Retry header check`** が出る。押すと再取得し、成功すれば「Check stealth metadata」に変わる。コンソールに未捕捉エラーが出ない |
 
 ### 3.3 非表示の分岐（#5 / #6 / #7）
 
