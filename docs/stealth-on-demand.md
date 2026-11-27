@@ -17,9 +17,11 @@ Stealth 側が通常表示に出ない。フル展開は 1024² で 70ms 級、4
 
 | 項目 | 挙動 |
 | --- | --- |
+| 位置（結果） | モーダル本文の**先頭**（positive セクションより上）に `Stealth Metadata (PNG LSB)` セクションを置く |
+| 位置（ボタン） | モーダル最下部のフッター行の**左端**（`Update & Download` / `Copy All Data` と同じ行の行頭）に置く |
 | 表示条件 | PNG かつ IHDR が **α あり（colorType 4/6）** または **8bit RGB（colorType 2）** |
 | 非表示 | 上記以外、動画、既に Stealth を検出済み（metadata に `Stealth PNG Info ...` がある） |
-| 初期状態 | セクションは展開（ヘッダ「Stealth Metadata (PNG LSB)」） |
+| 初期状態 | セクションは展開（ヘッダ「Stealth Metadata (PNG LSB)」）。probe 完了までは非表示 |
 | 押下 | 「Check stealth metadata」→ 実行中は「Scanning…」＋無効化 |
 | 成功（検出） | ペイロード本文と担体名（`Stealth PNG Info (Alpha)` 等）を表示、ボタンは消える |
 | 成功（未検出） | 「No stealth payload found in the pixel LSBs.」 |
@@ -61,7 +63,15 @@ Stealth 側が通常表示に出ない。フル展開は 1024² で 70ms 級、4
 
 ### 3.4 `ui.js`
 
-`createStealthSection(imageUrl, metadata)` を追加し、モーダルの Generation Grid の後に挿入する。
+`createStealthSection(imageUrl, metadata)` が `{ section, mount(footer) }` を返す。
+
+- `section`: 結果表示（本文先頭に挿入）。probe が終わるまでは `display:none`。
+- `mount(footer)`: 実行ボタンをフッター行の左端へ入れる。probe が `mount` より先に
+  終わっても、`mount` 側でボタンを置ける（pending キュー）。
+
+ボタンを本文最下部に置くとスクロールしないと見えず使われないため、**操作はフッター行・
+結果は本文先頭**に分離した。フッターは `justify-content: flex-end` なので、
+ボタンは `margin-right: auto` で左端に寄せる。
 `window.createStealthSection` としてテスト用にエクスポートしている（既存の
 `window.buildSections` などと同じ互換エクスポート）。
 

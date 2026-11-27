@@ -1434,6 +1434,8 @@ function createStealthSection(imageUrl, metadata) {
     const section = document.createElement('div');
     section.className = 'ai-meta-section';
     section.dataset.sectionId = 'stealth';
+    // probe が終わるまでは何も出さない（対象外ならこのまま消す）。
+    section.style.display = 'none';
 
     const header = document.createElement('div');
     header.className = 'ai-meta-section-header';
@@ -1452,9 +1454,41 @@ function createStealthSection(imageUrl, metadata) {
     body.appendChild(status);
     section.appendChild(body);
 
+    // 実行ボタンはモーダル最下部のフッター行の左端に置く（本文の最下部は
+    // スクロールしないと見えず、押す気にならない）。結果は本文の先頭に出す。
+    let footer = null;
+    let pendingTrigger = null;
+    let trigger = null;
+    const placeTrigger = button => {
+        if (!button) return;
+        if (footer) footer.insertBefore(button, footer.firstChild);
+        else pendingTrigger = button;
+    };
+    const setTrigger = button => {
+        if (trigger) trigger.remove();
+        trigger = button;
+        placeTrigger(button);
+    };
+    const showSection = () => {
+        section.style.display = '';
+    };
+    const hideSection = () => {
+        section.remove();
+        setTrigger(null);
+    };
+
     const setStatus = text => {
         status.textContent = text;
         status.classList.toggle('empty', !text);
+    };
+
+    const createTrigger = text => {
+        const button = document.createElement('button');
+        button.className = 'ai-meta-copy-all-btn';
+        button.textContent = text;
+        // フッターは justify-content: flex-end なので、左端に寄せる。
+        button.style.marginRight = 'auto';
+        return button;
     };
 
     const renderResult = result => {
@@ -1483,8 +1517,9 @@ function createStealthSection(imageUrl, metadata) {
     };
 
     if (cachedScan) {
+        showSection();
         renderResult(cachedScan);
-        return section;
+        return { section, mount: () => {} };
     }
 
     // probe は「対象外（非PNG・非対象レイアウト）」と「取得失敗」を区別する。
@@ -1499,19 +1534,18 @@ function createStealthSection(imageUrl, metadata) {
     };
     const renderProbeFailure = () => {
         clearFailureNodes();
+        showSection();
         const note = document.createElement('div');
         note.className = 'ai-meta-text-area empty';
         note.textContent = 'Could not read the PNG header, so the pixel LSBs were not checked.';
         body.appendChild(note);
-        const retry = document.createElement('button');
-        retry.className = 'ai-meta-copy-btn';
-        retry.textContent = 'Retry header check';
+        failureNodes = [note];
+        const retry = createTrigger('Retry header check');
         retry.onclick = event => {
             event.stopPropagation();
             startProbe();
         };
-        body.appendChild(retry);
-        failureNodes = [note, retry];
+        setTrigger(retry);
     };
     const renderProbe = info => {
         clearFailureNodes();
@@ -1520,14 +1554,13 @@ function createStealthSection(imageUrl, metadata) {
             return;
         }
         if (info.format !== 'png' || info.stealthEligible !== true) {
-            section.remove();
+            hideSection();
             return;
         }
+        showSection();
         setStatus('This image already has metadata, so the pixel LSBs were not scanned. '
             + 'Scanning reads the image again and can take a moment for large PNGs.');
-        const button = document.createElement('button');
-        button.className = 'ai-meta-copy-btn';
-        button.textContent = 'Check stealth metadata';
+        const button = createTrigger('Check stealth metadata');
         button.setAttribute('data-tooltip', 'Scan pixel LSBs for stealth_pnginfo (extra read, no cache write)');
         button.onclick = async event => {
             event.stopPropagation();
@@ -1544,22 +1577,38 @@ function createStealthSection(imageUrl, metadata) {
                 }
                 stealthScanCache.set(imageUrl, response);
                 renderResult(response);
-                button.remove();
+                setTrigger(null);
             } catch (error) {
                 setStatus('Stealth scan failed.');
                 button.disabled = false;
                 button.textContent = 'Retry stealth scan';
             }
         };
-        body.appendChild(button);
+        setTrigger(button);
     };
     const startProbe = () => {
+        clearFailureNodes();
         setStatus('Checking PNG color type…');
         probePngInfoForModal(imageUrl).then(renderProbe).catch(renderProbeFailure);
     };
 
     startProbe();
-    return section;
+
+    return {
+        section,
+        /**
+         * フッター行を渡す。probe が先に終わっていても、ここでボタンが左端に入る。
+         * @param {HTMLElement} target
+         */
+        mount(target) {
+            footer = target || null;
+            if (footer && pendingTrigger) {
+                const button = pendingTrigger;
+                pendingTrigger = null;
+                footer.insertBefore(button, footer.firstChild);
+            }
+        },
+    };
 }
 
 async function createModal(metadata, imageUrl = null, options = {}) {
@@ -1877,9 +1926,11 @@ async function createModal(metadata, imageUrl = null, options = {}) {
         if (grid) content.appendChild(grid);
     }
 
+    let stealthBlock = null;
     if (mediaType !== 'video' && typeof imageUrl === 'string' && imageUrl.length > 0) {
-        const stealthSection = createStealthSection(imageUrl, metadata);
-        if (stealthSection) content.appendChild(stealthSection);
+        stealthBlock = createStealthSection(imageUrl, metadata);
+        // 結果はモーダル上部（positive より上）に出す。
+        if (stealthBlock) content.insertBefore(stealthBlock.section, content.firstChild);
     }
 
     const footer = document.createElement('div');
@@ -1944,6 +1995,7 @@ async function createModal(metadata, imageUrl = null, options = {}) {
         copyToClipboard(text.trim(), copyAllBtn);
     };
     footer.appendChild(copyAllBtn);
+    if (stealthBlock) stealthBlock.mount(footer);
 
     modal.appendChild(header);
     modal.appendChild(content);

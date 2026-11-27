@@ -63,6 +63,7 @@ class FakeNode {
         if (!this.listeners.has(type)) this.listeners.set(type, []);
         this.listeners.get(type).push(handler);
     }
+    get firstChild() { return this.children.length > 0 ? this.children[0] : null; }
     appendChild(node) { node.parentNode = this; this.children.push(node); return node; }
     insertBefore(node, reference) {
         const index = this.children.indexOf(reference);
@@ -135,19 +136,34 @@ function flush() {
     return new Promise(resolve => setTimeout(resolve, 5));
 }
 
+/**
+ * 実際のモーダルと同じ順序で組み立てる: 結果セクションを本文の先頭に入れ、
+ * フッター行（右寄せボタンが既にある）へ実行ボタンを mount する。
+ */
+function mountStealth(context, body, url, metadata) {
+    const block = context.window.createStealthSection(url, metadata);
+    if (!block) return { block: null, footer: null };
+    const footer = new FakeNode('div');
+    footer.appendChild(new FakeNode('button')); // 既存の "Copy All Data" 相当
+    body.appendChild(block.section);
+    block.mount(footer);
+    return { block, footer };
+}
+
 test('the section is hidden when the PNG has no stealth-capable layout', async () => {
     const { context, body, dispatch } = loadUi({
         probePngInfo: () => ({ success: true, format: 'not-png' }),
     });
-    const section = context.window.createStealthSection('https://example.com/a.png', {});
-    body.appendChild(section);
+    const { block, footer } = mountStealth(context, body, 'https://example.com/a.png', {});
     await flush();
     assert.equal(body.children.length, 0, 'section removes itself');
+    assert.equal(footer.children.length, 1, 'no trigger is offered');
+    assert.ok(block, 'the builder still returns a mounted block');
     assert.equal(dispatch.filter(call => call.action === 'probePngInfo').length, 1);
     assert.equal(dispatch.some(call => call.action === 'scanStealthMetadata'), false);
 });
 
-test('an eligible PNG shows a button and renders the scan result on click', async () => {
+test('an eligible PNG offers the trigger in the footer and renders the result above', async () => {
     const { context, body, dispatch } = loadUi({
         probePngInfo: () => ({
             success: true, format: 'png', colorType: 6, bitDepth: 8,
@@ -163,37 +179,39 @@ test('an eligible PNG shows a button and renders the scan result on click', asyn
             },
         }),
     });
-    const section = context.window.createStealthSection('https://example.com/b.png', { parameters: 'steps: 20' });
-    body.appendChild(section);
+    const { block, footer } = mountStealth(context, body, 'https://example.com/b.png', { parameters: 'steps: 20' });
     await flush();
 
-    const button = section.querySelector('button');
-    assert.ok(button, 'button is offered for alpha PNG');
-    assert.match(button.textContent, /Check stealth metadata/);
+    // The trigger sits at the start (left) of the footer row, not inside the body.
+    const trigger = footer.children[0];
+    assert.equal(footer.children.length, 2, 'trigger is prepended to the footer row');
+    assert.ok(trigger, 'button is offered for alpha PNG');
+    assert.match(trigger.textContent, /Check stealth metadata/);
+    assert.equal(block.section.querySelector('button'), null, 'no button inside the section body');
+    assert.equal(block.section.style.display, '', 'section is visible once the probe says eligible');
 
-    button.click();
+    trigger.click();
     await flush();
     await flush();
 
     assert.equal(dispatch.filter(call => call.action === 'scanStealthMetadata').length, 1);
-    assert.match(section.textContent, /stealth payload/);
-    assert.match(section.textContent, /Stealth PNG Info \(Alpha\)/);
-    assert.equal(section.querySelector('button'), null, 'button is removed after a successful scan');
+    assert.match(block.section.textContent, /stealth payload/);
+    assert.match(block.section.textContent, /Stealth PNG Info \(Alpha\)/);
+    assert.equal(footer.children.length, 1, 'trigger is removed after a successful scan');
 });
 
-test('a failed scan keeps the button available for a retry', async () => {
+test('a failed scan keeps the trigger available for a retry', async () => {
     const { context, body } = loadUi({
         probePngInfo: () => ({ success: true, format: 'png', hasAlpha: true, stealthEligible: true }),
         scanStealthMetadata: () => ({ success: false }),
     });
-    const section = context.window.createStealthSection('https://example.com/c.png', {});
-    body.appendChild(section);
+    const { block, footer } = mountStealth(context, body, 'https://example.com/c.png', {});
     await flush();
-    section.querySelector('button').click();
+    footer.children[0].click();
     await flush();
     await flush();
-    assert.match(section.textContent, /Stealth scan failed/);
-    const retry = section.querySelector('button');
+    assert.match(block.section.textContent, /Stealth scan failed/);
+    const retry = footer.children[0];
     assert.ok(retry);
     assert.equal(retry.disabled, false);
     assert.match(retry.textContent, /Retry/);
@@ -208,21 +226,20 @@ test('a second modal open reuses the cached result without rescanning', async ()
         }),
     });
     const url = 'https://example.com/d.png';
-    const first = context.window.createStealthSection(url, {});
-    body.appendChild(first);
+    const first = mountStealth(context, body, url, {});
     await flush();
-    first.querySelector('button').click();
+    first.footer.children[0].click();
     await flush();
     await flush();
 
     const probesAfterFirst = dispatch.filter(call => call.action === 'probePngInfo').length;
     const scansAfterFirst = dispatch.filter(call => call.action === 'scanStealthMetadata').length;
 
-    const second = context.window.createStealthSection(url, {});
-    body.appendChild(second);
+    const second = mountStealth(context, body, url, {});
     await flush();
 
-    assert.match(second.textContent, /cached payload/);
+    assert.match(second.block.section.textContent, /cached payload/);
+    assert.equal(second.footer.children.length, 1, 'no trigger once the result is known');
     assert.equal(dispatch.filter(call => call.action === 'probePngInfo').length, probesAfterFirst);
     assert.equal(dispatch.filter(call => call.action === 'scanStealthMetadata').length, scansAfterFirst);
 });
@@ -250,19 +267,36 @@ test('a failed PNG header probe is reported and can be retried', async () => {
                 };
         },
     });
-    const section = context.window.createStealthSection('file:///C:/img/a.png', {});
-    body.appendChild(section);
+    const { block, footer } = mountStealth(context, body, 'file:///C:/img/a.png', {});
     await flush();
 
     assert.equal(body.children.length, 1, 'the section stays visible');
-    assert.match(section.textContent, /Could not read the PNG header/);
-    const retry = section.querySelector('button');
+    assert.match(block.section.textContent, /Could not read the PNG header/);
+    const retry = footer.children[0];
     assert.equal(retry.textContent, 'Retry header check');
 
     retry.click();
     await flush();
-    assert.doesNotMatch(section.textContent, /Could not read the PNG header/);
-    assert.match(section.textContent, /Check stealth metadata/);
+    assert.doesNotMatch(block.section.textContent, /Could not read the PNG header/);
+    assert.match(footer.children[0].textContent, /Check stealth metadata/);
     assert.equal(dispatch.filter(call => call.action === 'probePngInfo').length, 2);
     assert.equal(dispatch.some(call => call.action === 'scanStealthMetadata'), false);
+});
+
+test('the modal wires the result to the top and the trigger into the footer row', () => {
+    // Placement is decided inside createModal (a 700-line DOM builder that this
+    // file does not assemble), so pin the two call sites. The visual order is
+    // checked in docs/stealth-on-demand-e2e.md step 1.3.
+    assert.match(
+        uiSource,
+        /stealthBlock = createStealthSection\(imageUrl, metadata\);[\s\S]{0,200}content\.insertBefore\(stealthBlock\.section, content\.firstChild\)/,
+        'the result section is inserted above every other section'
+    );
+    assert.match(
+        uiSource,
+        /footer\.appendChild\(copyAllBtn\);\s*\n\s*if \(stealthBlock\) stealthBlock\.mount\(footer\);/,
+        'the trigger is mounted into the footer after the other footer buttons'
+    );
+    // The footer is right-aligned, so the trigger pins itself to the left edge.
+    assert.match(uiSource, /button\.style\.marginRight = 'auto';/);
 });
