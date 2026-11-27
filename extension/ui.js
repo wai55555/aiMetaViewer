@@ -762,6 +762,29 @@ function buildSectionsInternal(metadata) {
                 { children: makeChildren(summary.negative), editable: false }
             ));
         }
+        // The graph carried no prompt text at all (custom-node string chains,
+        // SD Prompt Reader round-trips, ...). Fall back to the A1111-style
+        // `parameters` carrier and label the origin instead of guessing.
+        if (summary.fallback) {
+            sections.push(createSectionModel(
+                'comfyFallbackOrigin', 'Prompt Source', 'settings', true,
+                'No prompt text could be resolved from the ComfyUI graph. '
+                + 'The prompts below come from the A1111-format `parameters` carrier.',
+                { editable: false, highlight: true }
+            ));
+            if (summary.fallback.positive) {
+                sections.push(createSectionModel(
+                    'comfyFallbackPositive', 'Positive Prompt (parameters)', 'positive', true,
+                    summary.fallback.positive, { editable: false }
+                ));
+            }
+            if (summary.fallback.negative) {
+                sections.push(createSectionModel(
+                    'comfyFallbackNegative', 'Negative Prompt (parameters)', 'negative', false,
+                    summary.fallback.negative, { editable: false }
+                ));
+            }
+        }
         if (summary.unconnected?.length > 0) {
             sections.push(createSectionModel(
                 'comfySummaryUnconnected', 'Unconnected Prompt Nodes', 'settings', false, '',
