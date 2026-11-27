@@ -103,6 +103,19 @@
             background-color: #f5f5f5;
         }
 
+        /* Level 2 有効時は Level 1 が「Level 2 に含まれる」ため操作不可にする。 */
+        .setting-item-muted .setting-label {
+            opacity: 0.55;
+        }
+
+        .setting-item-muted .setting-label:hover {
+            background-color: transparent;
+        }
+
+        .setting-item-muted .setting-label input[type="checkbox"] {
+            cursor: not-allowed;
+        }
+
         .setting-label input[type="checkbox"] {
             width: 20px;
             height: 20px;

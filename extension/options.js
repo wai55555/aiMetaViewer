@@ -246,6 +246,25 @@ function syncDebugLevelInputs(changed) {
     if (item && item.classList) item.classList.toggle('setting-item-muted', debugAllDetectionsCheckbox.disabled);
 }
 
+// 排他の配線はページ初期化の他の処理から独立させる。options.js は body 末尾で
+// 読み込まれるため要素は揃っており、ここで配線すれば初期化の途中で例外が出ても
+// 「Level 1 と Level 2 が同時に ON」という状態にはできない。
+function attachDebugLevelExclusivity() {
+    if (!debugAllDetectionsCheckbox || !debugForceFullFetchCheckbox) return;
+    if (!debugAllDetectionsCheckbox.__aiMetaViewerLevelWired) {
+        debugAllDetectionsCheckbox.__aiMetaViewerLevelWired = true;
+        debugAllDetectionsCheckbox.addEventListener('change', () => syncDebugLevelInputs('level1'));
+        debugForceFullFetchCheckbox.addEventListener('change', () => syncDebugLevelInputs('level2'));
+    }
+    syncDebugLevelInputs();
+}
+
+if (typeof document !== 'undefined' && document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', attachDebugLevelExclusivity);
+} else {
+    attachDebugLevelExclusivity();
+}
+
 // Load settings
 async function loadSettings() {
     applyI18n(); // Apply translations first
@@ -461,6 +480,7 @@ function updateBaseFolderVisibility() {
 
 // Event Listeners
 document.addEventListener('DOMContentLoaded', () => {
+    attachDebugLevelExclusivity();
     loadSettings();
 
     if (saveBtn) saveBtn.addEventListener('click', saveSettings);
@@ -478,13 +498,6 @@ document.addEventListener('DOMContentLoaded', () => {
 
     if (downloaderUseRootCheckbox) {
         downloaderUseRootCheckbox.addEventListener('change', updateBaseFolderVisibility);
-    }
-
-    if (debugAllDetectionsCheckbox) {
-        debugAllDetectionsCheckbox.addEventListener('change', () => syncDebugLevelInputs('level1'));
-    }
-    if (debugForceFullFetchCheckbox) {
-        debugForceFullFetchCheckbox.addEventListener('change', () => syncDebugLevelInputs('level2'));
     }
 
     // Reset Window Click
@@ -526,4 +539,5 @@ document.addEventListener('DOMContentLoaded', () => {
 if (typeof window !== 'undefined') {
     window.normalizeDebugLevels = normalizeDebugLevels;
     window.syncDebugLevelInputs = syncDebugLevelInputs;
+    window.attachDebugLevelExclusivity = attachDebugLevelExclusivity;
 }

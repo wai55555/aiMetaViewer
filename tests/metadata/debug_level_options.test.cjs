@@ -21,7 +21,19 @@ const jaLocale = JSON.parse(fs.readFileSync(path.join(REPO, 'extension/_locales/
 const enLocale = JSON.parse(fs.readFileSync(path.join(REPO, 'extension/_locales/en/messages.json'), 'utf8'));
 
 function checkbox() {
-    return { checked: false, disabled: false, listeners: {}, addEventListener(type, handler) { this.listeners[type] = handler; } };
+    return {
+        checked: false,
+        disabled: false,
+        listeners: {},
+        addEventListener(type, handler) {
+            if (!this.listeners[type]) this.listeners[type] = [];
+            this.listeners[type].push(handler);
+        },
+        fire(type) {
+            (this.listeners[type] || []).forEach(handler => handler());
+        },
+        listenerCount(type) { return (this.listeners[type] || []).length; },
+    };
 }
 
 function loadOptionsPage(elements, stored = {}) {
@@ -82,24 +94,46 @@ test('the checkboxes cannot both stay enabled', async () => {
     const level1 = checkbox();
     const level2 = checkbox();
     const page = loadOptionsPage({ debugAllDetections: level1, debugForceFullFetch: level2 });
+    // Wired at load time, before (and independently of) the page init handler: an
+    // exception elsewhere in the options page must not allow both levels on.
+    assert.equal(level1.listenerCount('change'), 1, 'Level 1 is wired on load');
+    assert.equal(level2.listenerCount('change'), 1, 'Level 2 is wired on load');
+
     page.ready();
     await flush();
-    assert.equal(typeof level1.listeners.change, 'function', 'change listeners are wired');
-    assert.equal(typeof level2.listeners.change, 'function');
+    assert.equal(level1.listenerCount('change'), 1, 'wiring is idempotent');
+    assert.equal(level2.listenerCount('change'), 1, 'wiring is idempotent');
 
     level1.checked = true;
-    level1.listeners.change();
+    level1.fire('change');
     assert.equal(level2.checked, false, 'enabling Level 1 clears Level 2');
     assert.equal(level1.disabled, false);
 
     level2.checked = true;
-    level2.listeners.change();
+    level2.fire('change');
     assert.equal(level1.checked, false, 'enabling Level 2 clears Level 1');
     assert.equal(level1.disabled, true, 'Level 1 is disabled while Level 2 is on');
 
     level2.checked = false;
-    level2.listeners.change();
+    level2.fire('change');
     assert.equal(level1.disabled, false, 'Level 1 is selectable again');
+});
+
+test('the levels stay exclusive even when the page init handler never runs', async () => {
+    const level1 = checkbox();
+    const level2 = checkbox();
+    // No DOMContentLoaded dispatch: only the load-time wiring exists.
+    loadOptionsPage({ debugAllDetections: level1, debugForceFullFetch: level2 });
+
+    level2.checked = true;
+    level2.fire('change');
+    assert.equal(level1.checked, false);
+    assert.equal(level1.disabled, true);
+
+    level1.checked = true;
+    level1.fire('change');
+    assert.equal(level2.checked, false, 'Level 1 wins when it is switched on directly');
+    assert.equal(level1.disabled, false);
 });
 
 test('stored "both on" state is shown as Level 2 only', async () => {
@@ -114,6 +148,10 @@ test('stored "both on" state is shown as Level 2 only', async () => {
     assert.equal(level2.checked, true);
     assert.equal(level1.checked, false);
     assert.equal(level1.disabled, true);
+    page.ready();
+    await flush();
+    assert.equal(level2.checked, true, 'loadSettings keeps the normalized state');
+    assert.equal(level1.checked, false);
 });
 
 test('the labels state the level and the exclusivity', () => {
