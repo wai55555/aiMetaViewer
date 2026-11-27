@@ -101,15 +101,23 @@ Stealth 側が通常表示に出ない。フル展開は 1024² で 70ms 級、4
 
 `node --test tests/metadata/*.test.cjs` → **204 pass / 0 fail**。
 
-## 7. 手動確認（未実施）
+## 7. 実機確認（未実施）
 
 ブラウザでの実機確認はまだ行っていない。作業環境が WSL2 で、Windows 側 Chrome の
 CDP ポート（127.0.0.1）へ到達できないため、自動の E2E は実行できなかった。
-Windows 側の Node か、同一ホスト上の Chrome で以下を確認する:
 
-1. `01_furina_1.png`（α付き PNG、Stealth + 通常メタデータ）をローカルHTTPで配信する。
-2. 拡張を読み込み、バッジからモーダルを開く。
-3. 「Stealth Metadata (PNG LSB)」に「Check stealth metadata」が出ることを確認。
-4. 押下 → ペイロードが表示され、ネットワークに画像の再取得が 1 回だけ出ることを確認。
-5. モーダルを閉じて再度開く → 追加リクエストが出ないことを確認。
-6. α なし PNG（colorType 0/2 の 16bit）でセクションが出ないことを確認。
+手順は **`docs/stealth-on-demand-e2e.md`** に、期待結果付きのチェックリストとして分離した。
+画像セットは `tests/e2e/stealth-on-demand/images/`（`node tests/e2e/stealth-on-demand/build.cjs`
+で再生成・自己検証。8 枚、合計 27KB）。チェックリストは次の 4 分類を必ず含む。
+
+| 分類 | 画像 | 期待 |
+| --- | --- | --- |
+| stealth + 通常メタデータ | `01-…alpha-with-metadata.png`, `08-…rgb-with-metadata.png` | セクション表示 → 押下でペイロード（Alpha / RGB 担体） |
+| 通常メタデータのみ | `02-normal-metadata-no-stealth.png` | セクション表示 → 押下で未検出 |
+| メタデータ無し | `03-no-metadata-alpha.png` | セクション表示 → 押下で未検出 |
+| ComfyUI 発端 | `04-comfyui-api-prompt.png` | ComfyUI の正負 + 押下で未検出 |
+| 非表示の分岐 | `05`（検出済み）/ `06`（Gray8）/ `07`（RGB16） | セクションを出さない |
+
+以前この節に書いていた `01_furina_1.png` の例は誤りだった。同ファイルは通常スキャンで
+`Stealth PNG Info (Alpha)` が確定する（tEXt に抑制メタデータが無い）ため、
+「既に検出済み」の規則でボタンは出ない。押下対象の例としては `test.png` を使う。

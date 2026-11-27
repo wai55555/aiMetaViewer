@@ -1,0 +1,298 @@
+{
+  "purpose": "Manual E2E image set for the on-demand Stealth LSB check (docs/stealth-on-demand-e2e.md §2).",
+  "generatedBy": "node tests/e2e/stealth-on-demand/build.cjs",
+  "size": "256x256",
+  "images": [
+    {
+      "file": "01-stealth-alpha-with-metadata.png",
+      "role": "stealth + 通常メタデータ（Alpha 担体）",
+      "bytes": 4347,
+      "sha256": "6a13ff1deedcdfbbe902be36dd1a20054699ba60d37d075d74fcc8063ae57825",
+      "ihdr": {
+        "width": 256,
+        "height": 256,
+        "bitDepth": 8,
+        "colorType": 6,
+        "stealthEligible": true
+      },
+      "normalMetadataKeys": [
+        "parameters",
+        "Software"
+      ],
+      "stealthInNormalScan": null,
+      "forcedStealth": {
+        "key": "Stealth PNG Info (Alpha)",
+        "mode": "Alpha",
+        "compressed": false,
+        "value": "{\"prompt\":\"e2e alpha payload\",\"steps\":28}"
+      },
+      "ui": {
+        "stealthSection": "shown",
+        "press": "payload: Stealth PNG Info (Alpha) · {\"prompt\":\"e2e alpha payload\",\"steps\":28}"
+      },
+      "expect": {
+        "normalMetadataKeys": [
+          "parameters",
+          "Software"
+        ],
+        "stealthInNormalScan": false,
+        "eligible": true,
+        "stealthSection": "shown",
+        "press": "payload: Stealth PNG Info (Alpha) · {\"prompt\":\"e2e alpha payload\",\"steps\":28}"
+      },
+      "comfy": null,
+      "problems": []
+    },
+    {
+      "file": "02-normal-metadata-no-stealth.png",
+      "role": "通常メタデータのみ（ペイロード無し, RGB8 担体）",
+      "bytes": 2715,
+      "sha256": "9166543d1e87d6123720e10f3e1ca5ab3b1666e21632d8758505a74aad54e389",
+      "ihdr": {
+        "width": 256,
+        "height": 256,
+        "bitDepth": 8,
+        "colorType": 2,
+        "stealthEligible": true
+      },
+      "normalMetadataKeys": [
+        "parameters"
+      ],
+      "stealthInNormalScan": null,
+      "forcedStealth": null,
+      "ui": {
+        "stealthSection": "shown",
+        "press": "No stealth payload found in the pixel LSBs."
+      },
+      "expect": {
+        "normalMetadataKeys": [
+          "parameters"
+        ],
+        "stealthInNormalScan": false,
+        "eligible": true,
+        "stealthSection": "shown",
+        "press": "No stealth payload found in the pixel LSBs."
+      },
+      "comfy": null,
+      "problems": []
+    },
+    {
+      "file": "03-no-metadata-alpha.png",
+      "role": "メタデータ無し（α, ペイロード無し）",
+      "bytes": 3172,
+      "sha256": "ce0a29ae78a1a2385bc17556c767e342fa880ea5847eb44276fc205b824b190f",
+      "ihdr": {
+        "width": 256,
+        "height": 256,
+        "bitDepth": 8,
+        "colorType": 6,
+        "stealthEligible": true
+      },
+      "normalMetadataKeys": [],
+      "stealthInNormalScan": null,
+      "forcedStealth": null,
+      "ui": {
+        "stealthSection": "shown",
+        "press": "No stealth payload found in the pixel LSBs."
+      },
+      "expect": {
+        "normalMetadataKeys": [],
+        "stealthInNormalScan": false,
+        "eligible": true,
+        "stealthSection": "shown",
+        "press": "No stealth payload found in the pixel LSBs."
+      },
+      "comfy": null,
+      "problems": []
+    },
+    {
+      "file": "04-comfyui-api-prompt.png",
+      "role": "ComfyUI 発端（API prompt: JPS 連結 + Efficient Loader + LoRA Stacker）",
+      "bytes": 4354,
+      "sha256": "78bd15611439d55dd695bd5e38e066093ef8d0ef7ff48b81554ea57252305045",
+      "ihdr": {
+        "width": 256,
+        "height": 256,
+        "bitDepth": 8,
+        "colorType": 2,
+        "stealthEligible": true
+      },
+      "normalMetadataKeys": [
+        "prompt"
+      ],
+      "stealthInNormalScan": null,
+      "forcedStealth": null,
+      "ui": {
+        "stealthSection": "shown",
+        "press": "No stealth payload found in the pixel LSBs."
+      },
+      "expect": {
+        "normalMetadataKeys": [
+          "prompt"
+        ],
+        "stealthInNormalScan": false,
+        "eligible": true,
+        "stealthSection": "shown",
+        "press": "No stealth payload found in the pixel LSBs.",
+        "comfy": {
+          "positive": [
+            "masterpiece, best quality, 1girl, solo, soft lighting"
+          ],
+          "negative": [
+            "bad quality, worst quality"
+          ],
+          "loras": [
+            "style.safetensors (0.7)"
+          ]
+        }
+      },
+      "comfy": {
+        "positive": [
+          "masterpiece, best quality, 1girl, solo, soft lighting"
+        ],
+        "negative": [
+          "bad quality, worst quality"
+        ],
+        "loras": [
+          "style.safetensors (0.7)"
+        ],
+        "unconnected": []
+      },
+      "problems": []
+    },
+    {
+      "file": "05-stealth-only-alpha.png",
+      "role": "Stealth のみ（通常メタデータ無し → 通常スキャンで検出済み）",
+      "bytes": 4151,
+      "sha256": "08470cb73e3cd01260a8bd04f5049d4560e56224bb331ab2ddf5ca02396886f8",
+      "ihdr": {
+        "width": 256,
+        "height": 256,
+        "bitDepth": 8,
+        "colorType": 6,
+        "stealthEligible": true
+      },
+      "normalMetadataKeys": [
+        "Stealth PNG Info (Alpha)"
+      ],
+      "stealthInNormalScan": "Stealth PNG Info (Alpha)",
+      "forcedStealth": {
+        "key": "Stealth PNG Info (Alpha)",
+        "mode": "Alpha",
+        "compressed": false,
+        "value": "{\"prompt\":\"e2e alpha payload\",\"steps\":28}"
+      },
+      "ui": {
+        "stealthSection": "hidden: already detected",
+        "press": "n/a"
+      },
+      "expect": {
+        "normalMetadataKeys": [
+          "Stealth PNG Info (Alpha)"
+        ],
+        "stealthInNormalScan": true,
+        "eligible": true,
+        "stealthSection": "hidden: already detected",
+        "press": "n/a"
+      },
+      "comfy": null,
+      "problems": []
+    },
+    {
+      "file": "06-gray8-not-eligible.png",
+      "role": "非対象レイアウト（Grayscale 8bit）",
+      "bytes": 1617,
+      "sha256": "d39c734473f2ebb8a6a5ed23935a11eb2d76e796b1080038e0fd26fdca85999c",
+      "ihdr": {
+        "width": 256,
+        "height": 256,
+        "bitDepth": 8,
+        "colorType": 0,
+        "stealthEligible": false
+      },
+      "normalMetadataKeys": [],
+      "stealthInNormalScan": null,
+      "forcedStealth": null,
+      "ui": {
+        "stealthSection": "hidden: not eligible",
+        "press": "n/a"
+      },
+      "expect": {
+        "normalMetadataKeys": [],
+        "stealthInNormalScan": false,
+        "eligible": false,
+        "stealthSection": "hidden: not eligible",
+        "press": "n/a"
+      },
+      "comfy": null,
+      "problems": []
+    },
+    {
+      "file": "07-rgb16-not-eligible.png",
+      "role": "非対象レイアウト（RGB 16bit, RGB モードの対象外）",
+      "bytes": 3961,
+      "sha256": "285bcc584d0006253c014f46f0f1f813115783283f7a3d76753998a2fb4a1487",
+      "ihdr": {
+        "width": 256,
+        "height": 256,
+        "bitDepth": 16,
+        "colorType": 2,
+        "stealthEligible": false
+      },
+      "normalMetadataKeys": [],
+      "stealthInNormalScan": null,
+      "forcedStealth": null,
+      "ui": {
+        "stealthSection": "hidden: not eligible",
+        "press": "n/a"
+      },
+      "expect": {
+        "normalMetadataKeys": [],
+        "stealthInNormalScan": false,
+        "eligible": false,
+        "stealthSection": "hidden: not eligible",
+        "press": "n/a"
+      },
+      "comfy": null,
+      "problems": []
+    },
+    {
+      "file": "08-stealth-rgb-with-metadata.png",
+      "role": "stealth + 通常メタデータ（RGB 担体）",
+      "bytes": 3004,
+      "sha256": "3619dbb1438c4ad15957b3cd72e8304a20ebdbdcbb14a9eaace72dd51575ad7d",
+      "ihdr": {
+        "width": 256,
+        "height": 256,
+        "bitDepth": 8,
+        "colorType": 2,
+        "stealthEligible": true
+      },
+      "normalMetadataKeys": [
+        "parameters"
+      ],
+      "stealthInNormalScan": null,
+      "forcedStealth": {
+        "key": "Stealth PNG Info (RGB)",
+        "mode": "RGB",
+        "compressed": false,
+        "value": "{\"prompt\":\"e2e rgb payload\"}"
+      },
+      "ui": {
+        "stealthSection": "shown",
+        "press": "payload: Stealth PNG Info (RGB) · {\"prompt\":\"e2e rgb payload\"}"
+      },
+      "expect": {
+        "normalMetadataKeys": [
+          "parameters"
+        ],
+        "stealthInNormalScan": false,
+        "eligible": true,
+        "stealthSection": "shown",
+        "press": "payload: Stealth PNG Info (RGB) · {\"prompt\":\"e2e rgb payload\"}"
+      },
+      "comfy": null,
+      "problems": []
+    }
+  ]
+}
