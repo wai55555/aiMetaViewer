@@ -157,7 +157,7 @@ function createResidentBadge() {
 }
 
 function applyDebugBadgeLabel(badge) {
-    if (window.settings?.debugAllDetections !== true) return;
+    if (window.settings?.debugAllDetections !== true && window.settings?.debugForceFullFetch !== true) return;
     badge.textContent = 'DEBUG';
     badge.title = 'Debug: all detections';
     badge.dataset.debug = 'true';

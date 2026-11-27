@@ -532,7 +532,7 @@ async function checkImageMetadata(img, requestOptions = {}) {
     debugLog(`[AI Meta Viewer] checkImageMetadata called for: ${getImageSource().substring(0, 60)}...`);
 
     const src = getImageSource();
-    const debugAllDetections = settings.debugAllDetections === true;
+    const debugAllDetections = settings.debugAllDetections === true || settings.debugForceFullFetch === true;
     if (!src) {
         logImageDiagnostic('analysis-skip', img, { reason: 'no-src' });
         debugLog('[AI Meta Viewer] No src, skipping');

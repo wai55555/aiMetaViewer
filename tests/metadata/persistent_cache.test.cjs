@@ -82,6 +82,18 @@ test('debugAllDetections bypasses persistent cache reads and writes', async () =
     assert.equal(store.has(cache.cacheKeyPrefix + 'https://example.com/debug.png'), false);
 });
 
+test('debugForceFullFetch bypasses persistent cache reads and writes', async () => {
+    const { cache, store, context } = createCache();
+    await cache.set('https://example.com/a.png', { Comment: 'normal' });
+    assert.ok(store.size > 0);
+
+    vm.runInContext('settings.debugForceFullFetch = true', context);
+    assert.equal(await cache.get('https://example.com/a.png'), undefined);
+    const write = await cache.set('https://example.com/force.png', { Comment: 'debug' });
+    assert.equal(write.stored, false);
+    assert.equal(store.has(cache.cacheKeyPrefix + 'https://example.com/force.png'), false);
+});
+
 test('cache clear removes only meta_cache_ keys and the index', async () => {
     const { store, cache } = createCache();
     store.set('meta_cache_a', { value: 1 });
